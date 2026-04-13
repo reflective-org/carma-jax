@@ -297,6 +297,85 @@ def make_plots(fortran, jax_data, outdir):
     fig.savefig(outdir / "03_binwise_relative_error.png", dpi=150)
     plt.close(fig)
 
+    # --- Figure 3b: Concentration + error combined (dual y-axis) ---
+    time_indices_3b = [1, 12, 36, -1]
+    time_labels_3b = ["t=600s (step 1)", "t=7200s (step 12)", "t=21600s (step 36)", f"t={times[-1]:.0f}s (final)"]
+    bins = np.arange(1, fortran["nbin"] + 1)
+
+    fig, axes = plt.subplots(2, 2, figsize=(15, 11))
+    for ax, ti, label in zip(axes.flat, time_indices_3b, time_labels_3b):
+        nd_fi = nd_f[ti]
+        nd_ji = nd_j[ti]
+
+        # Relative error
+        mask = nd_fi > 1e-40
+        rel_err = np.full_like(nd_fi, np.nan)
+        rel_err[mask] = (nd_ji[mask] - nd_fi[mask]) / nd_fi[mask]
+
+        # Left axis: number concentration
+        color_f = "black"
+        color_j = "tab:red"
+        ax.semilogy(bins, nd_fi, "o-", color=color_f, ms=5, lw=1.5, label="Fortran N", zorder=3)
+        ax.semilogy(bins, nd_ji, "^--", color=color_j, ms=5, lw=1.5, label="JAX N", zorder=3)
+        ax.set_xlabel("Bin index")
+        ax.set_ylabel("Number concentration [cm$^{-3}$]")
+        ax.set_ylim(bottom=max(nd_fi[nd_fi > 0].min() * 0.1, 1e-40) if (nd_fi > 0).any() else 1e-40)
+        ax.grid(True, alpha=0.2)
+
+        # Right axis: relative error
+        ax2 = ax.twinx()
+        color_err = "tab:blue"
+        valid = ~np.isnan(rel_err) & (nd_fi > 1e-10)
+        ax2.bar(bins[valid], rel_err[valid] * 100, color=color_err, alpha=0.25, width=0.6, label="Rel. error")
+        ax2.set_ylabel("Relative error [%]", color=color_err)
+        ax2.tick_params(axis="y", labelcolor=color_err)
+        ax2.axhline(0, color=color_err, lw=0.5, ls=":")
+
+        ax.set_title(label, fontsize=11)
+
+        # Combined legend
+        lines1, labels1 = ax.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax.legend(lines1 + lines2, labels1 + labels2, fontsize=8, loc="upper right")
+
+    fig.suptitle("Number Concentration and Relative Error by Bin", fontsize=13)
+    fig.tight_layout()
+    fig.savefig(outdir / "03b_concentration_and_error.png", dpi=150)
+    plt.close(fig)
+
+    # --- Figure 3c: Per-bin time series with error (selected bins) ---
+    selected_bins = [0, 2, 4, 6, 8, 10]  # 0-based
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    for ax, ib in zip(axes.flat, selected_bins):
+        nd_f_bin = nd_f[:, ib]
+        nd_j_bin = nd_j[:, ib]
+
+        mask = nd_f_bin > 1e-40
+        rel_err_bin = np.full_like(nd_f_bin, np.nan)
+        rel_err_bin[mask] = (nd_j_bin[mask] - nd_f_bin[mask]) / nd_f_bin[mask]
+
+        ax.semilogy(times / 3600, nd_f_bin, "k-", lw=1.5, label="Fortran")
+        ax.semilogy(times / 3600, nd_j_bin, "r--", lw=1.5, label="JAX")
+        ax.set_xlabel("Time [hours]")
+        ax.set_ylabel("N [cm$^{-3}$]")
+        ax.set_title(f"Bin {ib+1} (r={r_f[ib]*1e4:.4f} um)", fontsize=10)
+        ax.grid(True, alpha=0.2)
+
+        ax2 = ax.twinx()
+        valid_t = ~np.isnan(rel_err_bin)
+        ax2.plot(times[valid_t] / 3600, rel_err_bin[valid_t] * 100, "b-", alpha=0.5, lw=0.8, label="Rel. error")
+        ax2.set_ylabel("Rel. error [%]", color="tab:blue")
+        ax2.tick_params(axis="y", labelcolor="tab:blue")
+
+        lines1, labels1 = ax.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax.legend(lines1 + lines2, labels1 + labels2, fontsize=7, loc="best")
+
+    fig.suptitle("Per-Bin Time Series: Concentration and Relative Error", fontsize=13)
+    fig.tight_layout()
+    fig.savefig(outdir / "03c_per_bin_timeseries.png", dpi=150)
+    plt.close(fig)
+
     # --- Figure 4: Total number and mass vs time ---
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
