@@ -85,6 +85,7 @@ class CoagConfig(NamedTuple):
     jup: jnp.ndarray  # (NGROUP, NBIN, MAX_PAIRS) source bin j (production)
     igup: jnp.ndarray  # (NGROUP, NBIN, MAX_PAIRS) source group i (production)
     jgup: jnp.ndarray  # (NGROUP, NBIN, MAX_PAIRS) source group j (production)
+    pkernel: jnp.ndarray  # (NBIN, NBIN, NGROUP, NGROUP, NGROUP, 6) production kernels
 
 
 class CarmaConfig(NamedTuple):
