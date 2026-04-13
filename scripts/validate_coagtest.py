@@ -81,7 +81,7 @@ def parse_coagtest_bench(filepath):
 def run_jax_coagtest():
     """Run the JAX coagulation test matching Fortran setup."""
     NBIN, NELEM, NGROUP, NZ = 20, 1, 1, 80
-    rmin_cm = 3e-5  # 3e-7 m in cm
+    rmin_cm = 3e-7  # 3e-7 cm (3 nm) — CARMA uses CGS directly
     rmrat = 2.0
     rho = 2.0
     dtime = 600.0
