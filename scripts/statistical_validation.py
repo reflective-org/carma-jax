@@ -22,25 +22,7 @@ from carma.setup_atm import setup_atm
 from carma.enums import GridType, ElementType
 from carma.coagulation.setup_coag import setup_coag
 from carma.config import ElementConfig, GroupConfig, CarmaConfig
-from carma.microslow import microslow
-from carma.coagulation.coagl import coagl
-from carma.coagulation.csolve import csolve
-from carma.coagulation.coagp import coagp
-
-
-def fast_coag_step(config, pc, ckernel, zmet, dtime):
-    """Fast single-step coagulation (no overhead from full microslow)."""
-    nz, nbin, nelem = pc.shape
-    pcl = pc
-    pconmax = jnp.max(pc[:, :, 0:1] / zmet[:, None, None], axis=1)
-    coaglg = coagl(config, ckernel, pcl, pconmax)
-    coagpe = jnp.zeros_like(pc)
-    for ielem in range(nelem):
-        igroup = config.elements[ielem].igroup
-        for ibin in range(nbin):
-            coagpe = coagp(config, ckernel, pc, pcl, pconmax, coagpe, ibin, ielem)
-            pc = csolve(pc, coagpe, coaglg, zmet, dtime, ibin, ielem, igroup)
-    return pc
+from carma.microslow import make_microslow
 
 
 def main():
@@ -110,12 +92,30 @@ def main():
     all_bin_errors_gt100 = []
     all_bin_errors_gt1000 = []
 
-    # Warmup: run one scenario to trigger any lazy init
-    print("Warming up...", flush=True)
-    ck_warmup = jnp.full((nz, nbin, nbin, 1, 1), 1e-9, dtype=DTYPE)
+    # Build JIT-compiled microslow once
+    print("Building JIT-compiled microslow...", flush=True)
+    microslow_fn = make_microslow(
+        nbin=config.nbin, nelem=config.nelem, ngroup=config.ngroup,
+        elem_igroup=jnp.array([e.igroup for e in config.elements]),
+        icoag=config.coag.icoag, volx=config.coag.volx,
+        icoagelem=config.coag.icoagelem,
+        npairu=config.coag.npairu, npairl=config.coag.npairl,
+        iup=config.coag.iup, jup=config.coag.jup,
+        igup=config.coag.igup, jgup=config.coag.jgup,
+        ilow=config.coag.ilow, jlow=config.coag.jlow,
+        iglow=config.coag.iglow, jglow=config.coag.jglow,
+        pkernel=config.coag.pkernel,
+        ienconc_arr=jnp.array([g.ienconc for g in config.groups]),
+        elem_itypes=jnp.array([e.itype for e in config.elements]),
+    )
+
+    # Warmup (JIT compile)
+    print("JIT compiling...", flush=True)
     pc_warmup = jnp.full((nz, nbin, 1), SMALL_PC, dtype=DTYPE).at[0, 0, 0].set(1e6)
-    _ = fast_coag_step(config, pc_warmup, ck_warmup, zmet, 600.0)
-    print("Warmup done.", flush=True)
+    ck_warmup = jnp.full((nz, nbin, nbin, 1, 1), 1e-9, dtype=DTYPE)
+    pcon_warmup = jnp.max(pc_warmup[:, :, 0:1] / zmet[:, None, None], axis=1)
+    _ = microslow_fn(pc_warmup, pc_warmup, ck_warmup, pcon_warmup, zmet, 600.0)
+    print("Done.", flush=True)
 
     print(f"Running {n_scenarios} scenarios...", flush=True)
     t_start = timer.time()
@@ -138,7 +138,9 @@ def main():
 
         # Time integration
         for istep in range(nstep):
-            pc = fast_coag_step(config, pc, ckernel, zmet, dt)
+            pcl = pc
+            pconmax = jnp.max(pc[:, :, 0:1] / zmet[:, None, None], axis=1)
+            pc = microslow_fn(pc, pcl, ckernel, pconmax, zmet, dt)
 
         nd_final = np.array(pc[0, :, 0])
         N_jax = nd_final.sum()
