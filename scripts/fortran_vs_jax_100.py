@@ -191,6 +191,11 @@ def main():
     max_bin_err = np.zeros(n_scenarios)
     mean_bin_err = np.zeros(n_scenarios)
 
+    # Per-bin storage across all scenarios
+    all_fortran_final = np.zeros((n_scenarios, NBIN))
+    all_jax_final = np.zeros((n_scenarios, NBIN))
+    all_bin_rel_err = np.full((n_scenarios, NBIN), np.nan)
+
     print(f"Running {n_scenarios} scenarios (Fortran + JAX, {nstep} steps each)...", flush=True)
     t_total_start = timer.time()
 
@@ -225,6 +230,13 @@ def main():
         M_j = (j_final * rmass_np).sum()
         if M_f > 1e-50:
             rel_err_totalM[i] = (M_j - M_f) / M_f
+
+        # Store per-bin data
+        all_fortran_final[i] = f_final
+        all_jax_final[i] = j_final
+        for b in range(NBIN):
+            if f_final[b] > 10.0:
+                all_bin_rel_err[i, b] = (j_final[b] - f_final[b]) / f_final[b]
 
         # Per-bin errors (bins > 10 cm^-3)
         mask = f_final > 10.0
@@ -351,6 +363,138 @@ def main():
     fig.suptitle(f"Fortran vs JAX: {n_scenarios} Random Coagulation Scenarios", fontsize=14)
     fig.tight_layout()
     fig.savefig(outdir / "fortran_vs_jax_comparison.png", dpi=150)
+    plt.close(fig)
+
+    # --- Per-bin error boxplot ---
+    fig, axes = plt.subplots(2, 1, figsize=(16, 12))
+
+    # Top: boxplot of relative error per bin (only where N > 10)
+    ax = axes[0]
+    bin_data = []
+    bin_labels = []
+    bin_counts = []
+    for b in range(NBIN):
+        col = all_bin_rel_err[:, b]
+        valid = ~np.isnan(col)
+        if valid.sum() > 5:
+            bin_data.append(col[valid] * 100)  # convert to %
+            bin_labels.append(str(b + 1))
+            bin_counts.append(valid.sum())
+        else:
+            bin_data.append(np.array([]))
+            bin_labels.append(str(b + 1))
+            bin_counts.append(valid.sum())
+
+    bp = ax.boxplot(
+        [d for d in bin_data if len(d) > 0],
+        labels=[bin_labels[i] for i in range(NBIN) if len(bin_data[i]) > 0],
+        patch_artist=True,
+        showfliers=True,
+        flierprops=dict(marker=".", ms=2, alpha=0.3),
+        medianprops=dict(color="red", lw=1.5),
+    )
+    for patch in bp["boxes"]:
+        patch.set_facecolor("steelblue")
+        patch.set_alpha(0.6)
+    ax.axhline(0, color="k", lw=0.5, ls=":")
+    ax.set_xlabel("Bin index")
+    ax.set_ylabel("Relative error [%]  (JAX - Fortran) / Fortran")
+    ax.set_title(f"Per-Bin Relative Error Distribution (N > 10 cm$^{{-3}}$, {n_scenarios} scenarios)")
+    # Add sample count
+    valid_labels = [bin_labels[i] for i in range(NBIN) if len(bin_data[i]) > 0]
+    valid_counts = [bin_counts[i] for i in range(NBIN) if len(bin_data[i]) > 0]
+    for j_idx, (lbl, cnt) in enumerate(zip(valid_labels, valid_counts)):
+        ax.text(j_idx + 1, ax.get_ylim()[0], f"n={cnt}", ha="center", va="top", fontsize=7, color="gray")
+    ax.grid(True, alpha=0.2)
+
+    # Bottom: boxplot of final number concentration per bin (Fortran)
+    ax = axes[1]
+    conc_data_f = []
+    conc_data_j = []
+    for b in range(NBIN):
+        f_col = all_fortran_final[:, b]
+        j_col = all_jax_final[:, b]
+        mask = f_col > 10.0
+        if mask.sum() > 5:
+            conc_data_f.append(f_col[mask])
+            conc_data_j.append(j_col[mask])
+        else:
+            conc_data_f.append(np.array([]))
+            conc_data_j.append(np.array([]))
+
+    positions_f = np.arange(NBIN) * 2.5
+    positions_j = positions_f + 0.8
+
+    valid_f = [i for i in range(NBIN) if len(conc_data_f[i]) > 0]
+
+    if valid_f:
+        bp_f = ax.boxplot(
+            [conc_data_f[i] for i in valid_f],
+            positions=[positions_f[i] for i in valid_f],
+            widths=0.7,
+            patch_artist=True,
+            showfliers=True,
+            flierprops=dict(marker=".", ms=2, alpha=0.3),
+            medianprops=dict(color="black", lw=1.5),
+        )
+        for patch in bp_f["boxes"]:
+            patch.set_facecolor("#333333")
+            patch.set_alpha(0.5)
+
+        bp_j = ax.boxplot(
+            [conc_data_j[i] for i in valid_f],
+            positions=[positions_j[i] for i in valid_f],
+            widths=0.7,
+            patch_artist=True,
+            showfliers=True,
+            flierprops=dict(marker=".", ms=2, alpha=0.3),
+            medianprops=dict(color="red", lw=1.5),
+        )
+        for patch in bp_j["boxes"]:
+            patch.set_facecolor("steelblue")
+            patch.set_alpha(0.5)
+
+        ax.set_yscale("log")
+        ax.set_xticks([(positions_f[i] + positions_j[i]) / 2 for i in valid_f])
+        ax.set_xticklabels([str(i + 1) for i in valid_f])
+        ax.set_xlabel("Bin index")
+        ax.set_ylabel("Number concentration [cm$^{-3}$]")
+        ax.set_title(f"Final Number Concentration by Bin (N > 10 cm$^{{-3}}$)")
+
+        # Legend
+        from matplotlib.patches import Patch
+        ax.legend(
+            handles=[Patch(facecolor="#333", alpha=0.5, label="Fortran"),
+                     Patch(facecolor="steelblue", alpha=0.5, label="JAX")],
+            loc="upper right"
+        )
+    ax.grid(True, alpha=0.2)
+
+    fig.tight_layout()
+    fig.savefig(outdir / "per_bin_error_and_concentration.png", dpi=150)
+    plt.close(fig)
+
+    # --- |Error| heatmap: bin vs scenario ---
+    fig, ax = plt.subplots(figsize=(16, 6))
+    err_for_heatmap = np.abs(all_bin_rel_err.T) * 100  # (NBIN, n_scenarios), in %
+    # Replace NaN with 0 for display
+    err_display = np.where(np.isnan(err_for_heatmap), 0, err_for_heatmap)
+    im = ax.imshow(err_display, aspect="auto", cmap="YlOrRd",
+                   interpolation="nearest", vmin=0, vmax=np.nanpercentile(err_for_heatmap, 99))
+    ax.set_xlabel("Scenario index")
+    ax.set_ylabel("Bin index")
+    ax.set_yticks(range(NBIN))
+    ax.set_yticklabels(range(1, NBIN + 1))
+    ax.set_title(f"|Relative Error| [%] by Bin and Scenario (gray = N < 10 cm$^{{-3}}$)")
+    plt.colorbar(im, ax=ax, label="|Relative error| [%]")
+    # Gray out bins with no data
+    for b in range(NBIN):
+        for s in range(n_scenarios):
+            if np.isnan(all_bin_rel_err[s, b]):
+                ax.add_patch(plt.Rectangle((s - 0.5, b - 0.5), 1, 1,
+                             fill=True, facecolor="lightgray", edgecolor="none"))
+    fig.tight_layout()
+    fig.savefig(outdir / "per_bin_error_heatmap.png", dpi=150)
     plt.close(fig)
 
     print(f"\nPlots saved to: {outdir.resolve()}", flush=True)
