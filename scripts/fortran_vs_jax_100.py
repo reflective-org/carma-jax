@@ -118,7 +118,7 @@ def run_jax(n0, ck0, dtime, nstep, init_bin, microslow_fn, zmet, rmass):
 
 def main():
     np.random.seed(42)
-    n_scenarios = 100
+    n_scenarios = 1000
     nstep = 20
 
     # Setup JAX infrastructure once
@@ -171,14 +171,13 @@ def main():
     _ = microslow_fn(pc_w, pc_w, ck_w, pcon_w, zmet, DTYPE(600.0))
 
     # Random scenario parameters
-    log_N0 = np.random.uniform(3, 8, n_scenarios)
+    log_N0 = np.random.uniform(2, 9, n_scenarios)
     N0_arr = 10.0 ** log_N0
-    init_bins = np.random.randint(1, 4, n_scenarios)  # 1-based for Fortran
-    # Use the same constant kernel formula as original test
-    # but vary reference temperature: ck0 = 8*BK*T_ref / (3*eta)
-    T_ref = np.random.uniform(200, 350, n_scenarios)
+    init_bins = np.random.randint(1, 6, n_scenarios)  # 1-based for Fortran, bins 1-5
+    # Vary kernel: ck0 = 8*BK*T_ref / (3*eta), T_ref in [150, 400]K
+    T_ref = np.random.uniform(150, 400, n_scenarios)
     ck0_arr = 8.0 * 1.38054e-16 * T_ref / (3.0 * 1.85e-4)
-    dtime_arr = np.random.uniform(100, 1000, n_scenarios)
+    dtime_arr = np.random.uniform(30, 1800, n_scenarios)  # 30s to 30min
 
     # Results storage
     fortran_times_total = 0.0
@@ -234,7 +233,7 @@ def main():
             max_bin_err[i] = bin_errs.max()
             mean_bin_err[i] = bin_errs.mean()
 
-        if (i + 1) % 20 == 0:
+        if (i + 1) % 200 == 0:
             elapsed = timer.time() - t_total_start
             print(f"  {i+1}/{n_scenarios} ({elapsed:.1f}s)", flush=True)
 
