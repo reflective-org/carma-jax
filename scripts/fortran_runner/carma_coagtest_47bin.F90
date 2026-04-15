@@ -1,11 +1,11 @@
-!! Parameterized CARMA coagulation test.
-!! Reads N0, ck0, dtime, nstep from a namelist file (coag_params.nml).
+!! Parameterized CARMA coagulation test — 47 bins (0.2nm to 8um).
+!! Reads ck0, dtime, nstep from namelist (coag_params.nml).
+!! Reads per-bin initial number concentrations from init_nd.txt.
 !! Writes output to carma_coagtest_param.txt.
 
 program carma_coagtest_param
   implicit none
-
-  write(*,*) "Parameterized Coagulation Test"
+  write(*,*) "Parameterized Coagulation Test (47 bins)"
   call test_coagulation()
   write(*,*) "Done"
 end program
@@ -69,12 +69,15 @@ subroutine test_coagulation()
   real(kind=f)          :: rmin, rmrat, rho
   real(kind=f)          :: r(NBIN), dr(NBIN), rmass(NBIN)
 
+  ! Per-bin initial number concentrations [cm^-3]
+  real(kind=f)          :: init_nd(NBIN)
+
   ! Set defaults
-  param_n0 = 1.e6_f
   param_ck0 = 8._f * bk * 298._f / 3._f / 1.85e-4_f
-  param_dtime = 600._f
-  param_nstep = 20
+  param_dtime = 60._f
+  param_nstep = 720
   param_init_bin = 1
+  param_n0 = 1.e6_f
 
   ! Read namelist
   open(unit=10, file="coag_params.nml", status="old", iostat=rc)
@@ -83,6 +86,22 @@ subroutine test_coagulation()
     close(10)
   end if
   rc = 0
+
+  ! Read per-bin initial concentrations from file
+  init_nd(:) = 0._f
+  open(unit=11, file="init_nd.txt", status="old", iostat=rc)
+  if (rc == 0) then
+    do i = 1, NBIN
+      read(11, *, iostat=rc) init_nd(i)
+      if (rc /= 0) exit
+    end do
+    close(11)
+    rc = 0
+  else
+    ! Fallback: use param_n0 in param_init_bin
+    init_nd(param_init_bin) = param_n0
+    rc = 0
+  end if
 
   open(unit=lun, file="carma_coagtest_param.txt", status="unknown")
 
@@ -116,16 +135,25 @@ subroutine test_coagulation()
   end do
   call GetStandardAtmosphere(zl, p=pl)
 
-  ! Initial conditions: N0 particles in specified bin
-  mmr(:,:,:,:,:) = 0._f
+  ! Set per-bin initial conditions from init_nd array
   call CARMAGROUP_Get(carma, 1, rc, rmass=rmass, r=r, dr=dr)
 
-  mmr(1,:,:,1,param_init_bin) = rmass(param_init_bin)/1000._f * param_n0 * 1e6_f &
-                               / (p(1,:,:)/287._f/t(1,:,:))
+  mmr(:,:,:,:,:) = 0._f
+  do ibin = 1, NBIN
+    if (init_nd(ibin) > 0._f) then
+      ! Convert number concentration [cm^-3] to mass mixing ratio [kg/kg]
+      ! init_nd is in cm^-3, rmass in g, p in Pa, t in K
+      ! rhoa_air = p/(287*T) in kg/m^3
+      ! mmr = N * m_particle / rhoa_air
+      ! N [cm^-3] = N [m^-3] * 1e-6
+      ! m_particle [g] = m_particle [kg] * 1e3
+      mmr(1,:,:,1,ibin) = rmass(ibin)/1000._f * init_nd(ibin) * 1e6_f &
+                         / (p(1,:,:)/287._f/t(1,:,:))
+    end if
+  end do
 
   ! Write header
   write(lun,*) NBIN, NELEM, NGROUP
-
   do i = 1, NBIN
     write(lun,'(i3,2(1x,e12.5))') i, r(i), dr(i)
   end do
@@ -170,7 +198,6 @@ subroutine test_coagulation()
       call CARMASTATE_GetState(cstate, rc, t=t(:,iy,ix))
     enddo
 
-    ! Write timestep output
     write(lun,'(f12.1)') istep*param_dtime
     rhoa(:,:,:) = p(:,:,:)/287._f/t(:,:,:)
     do j = 1, NELEM

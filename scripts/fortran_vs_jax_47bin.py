@@ -67,11 +67,21 @@ def parse_output(filepath, nbin):
     return np.array(times), np.array(data), radii
 
 
-def run_fortran(n0, ck0, init_bin):
-    nml = (f"&coag_params param_n0={n0:.6e}, param_ck0={ck0:.6e}, "
+def run_fortran(init_nd, ck0):
+    """Run Fortran with per-bin initial concentrations.
+
+    Args:
+        init_nd: (NBIN,) array of initial number concentrations [cm^-3].
+        ck0: Constant coagulation kernel [cm^3/s].
+    """
+    nml = (f"&coag_params param_n0=0.0, param_ck0={ck0:.6e}, "
            f"param_dtime={DT:.6e}, param_nstep={NSTEP}, "
-           f"param_init_bin={init_bin} /\n")
+           f"param_init_bin=1 /\n")
     (FORTRAN_DIR / "coag_params.nml").write_text(nml)
+    # Write per-bin initial concentrations
+    nd_lines = "\n".join(f"{v:.6e}" for v in init_nd)
+    (FORTRAN_DIR / "init_nd.txt").write_text(nd_lines + "\n")
+
     t0 = timer.time()
     result = subprocess.run(
         [str(FORTRAN_EXE)], cwd=str(FORTRAN_DIR),
@@ -84,10 +94,16 @@ def run_fortran(n0, ck0, init_bin):
     return times, nd, radii, t1 - t0
 
 
-def run_jax(n0, ck0, init_bin, microslow_fn, zmet, rmass_jnp):
+def run_jax(init_nd, ck0, microslow_fn, zmet):
+    """Run JAX with per-bin initial concentrations.
+
+    Args:
+        init_nd: (NBIN,) array of initial number concentrations [cm^-3].
+        ck0: Constant coagulation kernel [cm^3/s].
+    """
     ckernel = jnp.full((NZ, NBIN, NBIN, 1, 1), DTYPE(ck0), dtype=DTYPE)
     pc = jnp.full((NZ, NBIN, NELEM), SMALL_PC, dtype=DTYPE)
-    pc = pc.at[0, init_bin - 1, 0].set(DTYPE(n0))
+    pc = pc.at[0, :, 0].set(jnp.array(init_nd, dtype=DTYPE))
 
     nd_history = [np.array(pc[0, :, 0])]
     t0 = timer.time()
@@ -154,12 +170,17 @@ def main():
     _ = microslow_fn(pc_w, pc_w, ck_w, pcon_w, zmet, DTYPE(DT))
     print("Done.", flush=True)
 
-    # Random parameters
-    log_N0 = np.random.uniform(2, 9, n_scenarios)
-    N0_arr = 10.0 ** log_N0
-    init_bins = np.random.randint(1, 10, n_scenarios)  # bins 1-9 (0.2nm to 1.6nm)
+    # Random parameters — multi-bin initial conditions
     T_ref = np.random.uniform(150, 400, n_scenarios)
     ck0_arr = 8.0 * 1.38054e-16 * T_ref / (3.0 * 1.85e-4)
+
+    # Generate random per-bin initial concentrations for each scenario
+    # Each bin in 1-35 gets 10^3 to 10^9 cm^-3 randomly
+    all_init_nd = np.zeros((n_scenarios, NBIN))
+    for i in range(n_scenarios):
+        for b in range(35):  # bins 0-34 (1-35 in 1-based)
+            log_n = np.random.uniform(3, 9)  # 1e3 to 1e9
+            all_init_nd[i, b] = 10.0 ** log_n
 
     # Storage
     fortran_time_total = 0.0
@@ -172,18 +193,17 @@ def main():
 
     r_np = np.array(r)
 
-    print(f"Running {n_scenarios} scenarios (47 bins, dt=60s, 12h)...", flush=True)
+    print(f"Running {n_scenarios} scenarios (47 bins, all bins 1-35 populated, dt=60s, 12h)...", flush=True)
     t_total = timer.time()
 
     for i in range(n_scenarios):
-        n0 = N0_arr[i]
-        ib = init_bins[i]
+        init_nd = all_init_nd[i]
         ck0 = ck0_arr[i]
 
-        f_times, f_nd, f_radii, f_elapsed = run_fortran(n0, ck0, ib)
+        f_times, f_nd, f_radii, f_elapsed = run_fortran(init_nd, ck0)
         fortran_time_total += f_elapsed
 
-        j_times, j_nd, j_elapsed = run_jax(n0, ck0, ib, microslow_fn, zmet, rmass)
+        j_times, j_nd, j_elapsed = run_jax(init_nd, ck0, microslow_fn, zmet)
         jax_time_total += j_elapsed
 
         f_final = f_nd[-1]
@@ -217,8 +237,8 @@ def main():
     print(f"\n--- Setup ---")
     print(f"  Bins: {NBIN} (0.2nm to 8um, rmrat=2)")
     print(f"  Timestep: {DT}s, Steps: {NSTEP}, Total: 12 hours")
-    print(f"  N0 range: [{N0_arr.min():.1e}, {N0_arr.max():.1e}] cm^-3")
-    print(f"  Init bins: 1-9 (0.2nm to 1.6nm)")
+    print(f"  Init: bins 1-35 each get 1e3 to 1e9 cm^-3 randomly")
+    print(f"  Total init N range: [{all_init_nd.sum(axis=1).min():.1e}, {all_init_nd.sum(axis=1).max():.1e}]")
     print(f"\n--- Timing ---")
     print(f"  Fortran: {fortran_time_total:.1f}s ({fortran_time_total/n_scenarios*1000:.1f} ms/scenario)")
     print(f"  JAX:     {jax_time_total:.1f}s ({jax_time_total/n_scenarios*1000:.1f} ms/scenario)")
@@ -340,13 +360,11 @@ def main():
 
     # 6. Example evolution: one scenario
     ax = axes[1, 2]
-    # Pick a mid-range scenario
-    ex_idx = np.argmin(np.abs(N0_arr - 1e6))
-    ex_n0 = N0_arr[ex_idx]
-    ex_ib = init_bins[ex_idx]
+    ex_idx = n_scenarios // 2  # Pick middle scenario
     ex_ck0 = ck0_arr[ex_idx]
-    f_t, f_nd_ex, _, _ = run_fortran(ex_n0, ex_ck0, ex_ib)
-    j_t, j_nd_ex, _ = run_jax(ex_n0, ex_ck0, ex_ib, microslow_fn, zmet, rmass)
+    ex_init = all_init_nd[ex_idx]
+    f_t, f_nd_ex, _, _ = run_fortran(ex_init, ex_ck0)
+    j_t, j_nd_ex, _ = run_jax(ex_init, ex_ck0, microslow_fn, zmet)
 
     # Plot dN/dlogr at t=0, 1h, 6h, 12h
     dlogr = np.log10(r_np[1] / r_np[0])
@@ -360,7 +378,7 @@ def main():
     ax.set_ylim(bottom=1e-2)
     ax.set_xlabel("Radius [um]")
     ax.set_ylabel("dN/dlogr [cm$^{-3}$]")
-    ax.set_title(f"Example: N0={ex_n0:.0e}, bin {ex_ib}\n(black=Fortran, red=JAX, solid=0h, --=1h, -.=6h, :=12h)")
+    ax.set_title(f"Example scenario #{ex_idx}\n(black=Fortran, red=JAX, solid=0h, --=1h, -.=6h, :=12h)")
     ax.grid(True, alpha=0.2)
 
     fig.suptitle(f"Fortran vs JAX: {n_scenarios} Scenarios, 47 bins (0.2nm-8um), dt=60s, 12h", fontsize=14)
