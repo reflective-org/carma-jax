@@ -22,6 +22,12 @@
 
 - **Remaining ~0.02% error vs Fortran is from mmr conversion** — Hypothesis: the systematic error is from Fortran converting through mass mixing ratios each timestep (N→mmr→N roundtrip introduces floating-point drift). JAX operates directly in number concentration. Not a code bug. Status: consistent across all 4000+ scenarios tested, but not definitively proven.
 
+- **Coagulation kernel recomputation strategy** — CRITICAL for Phase 3+. Currently the kernel is computed once and reused for all timesteps. This is only valid when T, p, particle radii, and air density don't change. In the full model (growth, nucleation, thermodynamics, transport), these all change every timestep, requiring kernel recomputation. Fortran CARMA recomputes every step via `setupckern` inside `CARMASTATE_Step`. Our JIT-compiled `setup_ckern_jit` is fast (0.04ms for 47 bins) so per-step recomputation is feasible, but we need a smart strategy:
+  - **Option A**: Recompute every step (simple, matches Fortran). Cost: 0.04ms/step × 720 steps = 29ms — acceptable.
+  - **Option B**: Recompute only when state changes significantly (e.g., T changes > threshold). Saves computation but adds branching complexity.
+  - **Option C**: Compute kernel on-the-fly inside the coagulation loop (fuse setup_ckern into microslow). Avoids materializing the full (NZ,NBIN,NBIN,NG,NG) array in memory.
+  - Decision deferred to Phase 5 orchestration. The JIT-compiled setup functions are fast enough that Option A is likely sufficient.
+
 ## Rejected
 
 (None yet)
