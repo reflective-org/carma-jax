@@ -8,17 +8,19 @@
 
 - **Only implicit solver is versol (tridiagonal Thomas algorithm)** — Used for PPM vertical advection. Forward/backward sweep maps to `jax.lax.scan`. (Confirmed: reading `versol.F90`)
 
-- **Coagulation is independent of growth/nucleation** — `microslow()` (coagulation) runs before `microfast()` (growth/nucleation) with no feedback path. Can be ported and validated independently. (Confirmed: reading `newstate_calc.F90` call sequence)
+- **Coagulation is independent of growth/nucleation** — `microslow()` (coagulation) runs before `microfast()` (growth/nucleation) with no feedback path. Can be ported and validated independently. (Confirmed: reading `newstate_calc.F90` call sequence, validated across 1000 scenarios)
+
+- **NamedTuples sufficient for state management** — `NamedTuple._replace()` and `jnp.at[].set()` work well for all state updates in coagulation. No need for equinox. (Confirmed: Phase 1 implementation)
+
+- **Float64 required for Fortran-matching precision** — Float64 achieves machine-precision mass conservation and <0.02% agreement with Fortran. Float32 would lose several digits. (Confirmed: Phase 1 validation)
+
+- **Python loops over NGROUP are acceptable at trace time** — For NGROUP=1, group loops resolve at trace time inside JIT. For multi-group, these are small static loops that unroll during compilation. (Confirmed: coagulation loss computation with einsum)
 
 ## Open
 
-- **NamedTuples sufficient for state management** — Hypothesis: we won't need equinox.Module or custom pytree registration. NamedTuple._replace() and jnp.at[].set() are sufficient for all state updates. Status: Will evaluate during Phase 1 implementation.
+- **Coagulation kernel memory is manageable** — `ckernel(NZ,NBIN,NBIN,NGROUP,NGROUP)` at NZ=1, NBIN=47, NGROUP=1 is ~17 KB. At NZ=200, NBIN=47, NGROUP=5 would be ~44 MB. May need on-the-fly computation for large multi-group problems.
 
-- **Float64 required for Fortran-matching precision** — Hypothesis: float32 will not match Fortran to 1e-10. Need float64 for validation. Float32 added later as optional mode with relaxed tolerances.
-
-- **Coagulation kernel memory is manageable** — `ckernel(NZ,NBIN,NBIN,NGROUP,NGROUP)` at NZ=80, NBIN=20, NGROUP=1 is ~2.4 MB. At NZ=200, NBIN=40, NGROUP=5 would be 128 MB. May need on-the-fly computation for large problems.
-
-- **Python loops over NGROUP (2-10) are acceptable** — Hypothesis: the overhead of Python loops over small static dimensions is negligible compared to vectorized inner operations. Alternative: full vectorization with padding.
+- **Remaining ~0.02% error vs Fortran is from mmr conversion** — Hypothesis: the systematic error is from Fortran converting through mass mixing ratios each timestep (N→mmr→N roundtrip introduces floating-point drift). JAX operates directly in number concentration. Not a code bug. Status: consistent across all 4000+ scenarios tested, but not definitively proven.
 
 ## Rejected
 
