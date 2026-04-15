@@ -94,28 +94,41 @@ def run_fortran(init_nd, ck0):
     return times, nd, radii, t1 - t0
 
 
-def run_jax(init_nd, ck0, microslow_fn, zmet):
-    """Run JAX with per-bin initial concentrations.
+def make_time_stepper(microslow_fn, nstep):
+    """Build a JIT-compiled function that runs nstep coagulation steps.
 
-    Args:
-        init_nd: (NBIN,) array of initial number concentrations [cm^-3].
-        ck0: Constant coagulation kernel [cm^3/s].
+    The entire time loop runs inside JIT — no Python overhead per step.
     """
+    @jax.jit
+    def run_all_steps(pc, ckernel, zmet):
+        def step_body(pc, _):
+            pcl = pc
+            pconmax = jnp.max(pc[:, :, 0:1] / zmet[:, None, None], axis=1)
+            pc = microslow_fn(pc, pcl, ckernel, pconmax, zmet, DTYPE(DT))
+            return pc, pc[0, :, 0]  # carry, output per step
+
+        pc_final, nd_history = jax.lax.scan(step_body, pc, None, length=nstep)
+        return pc_final, nd_history
+
+    return run_all_steps
+
+
+def run_jax(init_nd, ck0, time_stepper, zmet):
+    """Run JAX with per-bin initial concentrations, fully JIT'd time loop."""
     ckernel = jnp.full((NZ, NBIN, NBIN, 1, 1), DTYPE(ck0), dtype=DTYPE)
     pc = jnp.full((NZ, NBIN, NELEM), SMALL_PC, dtype=DTYPE)
     pc = pc.at[0, :, 0].set(jnp.array(init_nd, dtype=DTYPE))
 
-    nd_history = [np.array(pc[0, :, 0])]
     t0 = timer.time()
-    for istep in range(NSTEP):
-        pcl = pc
-        pconmax = jnp.max(pc[:, :, 0:1] / zmet[:, None, None], axis=1)
-        pc = microslow_fn(pc, pcl, ckernel, pconmax, zmet, DTYPE(DT))
-        nd_history.append(np.array(pc[0, :, 0]))
-    jax.block_until_ready(pc)
+    pc_final, nd_steps = time_stepper(pc, ckernel, zmet)
+    jax.block_until_ready(pc_final)
     t1 = timer.time()
+
+    # Prepend initial state
+    nd_init = np.array(pc[0, :, 0])[None, :]
+    nd_all = np.concatenate([nd_init, np.array(nd_steps)], axis=0)
     times = np.arange(0, NSTEP + 1) * DT
-    return times, np.array(nd_history), t1 - t0
+    return times, nd_all, t1 - t0
 
 
 def main():
@@ -162,12 +175,15 @@ def main():
         t, p_pa * RPA2CGS, pl_pa * RPA2CGS, zc, zl, GridType.I_CART
     )
 
-    # Warmup JIT
-    print("JIT compiling (47 bins, 720 steps)...", flush=True)
+    # Build JIT-compiled time stepper (entire 720-step loop in JIT)
+    print("Building JIT-compiled time stepper (47 bins, 720 steps)...", flush=True)
+    time_stepper = make_time_stepper(microslow_fn, NSTEP)
+
+    # Warmup — first call triggers full compilation
     ck_w = jnp.full((NZ, NBIN, NBIN, 1, 1), 1e-9, dtype=DTYPE)
     pc_w = jnp.full((NZ, NBIN, 1), SMALL_PC, dtype=DTYPE).at[0, 0, 0].set(1e6)
-    pcon_w = jnp.max(pc_w[:, :, 0:1] / zmet[:, None, None], axis=1)
-    _ = microslow_fn(pc_w, pc_w, ck_w, pcon_w, zmet, DTYPE(DT))
+    pc_out, _ = time_stepper(pc_w, ck_w, zmet)
+    jax.block_until_ready(pc_out)
     print("Done.", flush=True)
 
     # Random parameters — multi-bin initial conditions
@@ -190,6 +206,7 @@ def main():
     all_fortran_final = np.zeros((n_scenarios, NBIN))
     all_jax_final = np.zeros((n_scenarios, NBIN))
     all_bin_rel_err = np.full((n_scenarios, NBIN), np.nan)
+    all_bin_mass_rel_err = np.full((n_scenarios, NBIN), np.nan)
 
     r_np = np.array(r)
 
@@ -203,7 +220,7 @@ def main():
         f_times, f_nd, f_radii, f_elapsed = run_fortran(init_nd, ck0)
         fortran_time_total += f_elapsed
 
-        j_times, j_nd, j_elapsed = run_jax(init_nd, ck0, microslow_fn, zmet)
+        j_times, j_nd, j_elapsed = run_jax(init_nd, ck0, time_stepper, zmet)
         jax_time_total += j_elapsed
 
         f_final = f_nd[-1]
@@ -222,6 +239,11 @@ def main():
         for b in range(NBIN):
             if f_final[b] > 10.0:
                 all_bin_rel_err[i, b] = (j_final[b] - f_final[b]) / f_final[b]
+            # Mass per bin: N * rmass
+            f_mass_b = f_final[b] * rmass_np[b]
+            j_mass_b = j_final[b] * rmass_np[b]
+            if f_mass_b > 1e-50:
+                all_bin_mass_rel_err[i, b] = (j_mass_b - f_mass_b) / f_mass_b
 
         if (i + 1) % 100 == 0:
             elapsed = timer.time() - t_total
@@ -364,7 +386,7 @@ def main():
     ex_ck0 = ck0_arr[ex_idx]
     ex_init = all_init_nd[ex_idx]
     f_t, f_nd_ex, _, _ = run_fortran(ex_init, ex_ck0)
-    j_t, j_nd_ex, _ = run_jax(ex_init, ex_ck0, microslow_fn, zmet)
+    j_t, j_nd_ex, _ = run_jax(ex_init, ex_ck0, time_stepper, zmet)
 
     # Plot dN/dlogr at t=0, 1h, 6h, 12h
     dlogr = np.log10(r_np[1] / r_np[0])
@@ -384,6 +406,71 @@ def main():
     fig.suptitle(f"Fortran vs JAX: {n_scenarios} Scenarios, 47 bins (0.2nm-8um), dt=60s, 12h", fontsize=14)
     fig.tight_layout()
     fig.savefig(outdir / "fortran_vs_jax_47bin.png", dpi=150)
+    plt.close(fig)
+
+    # --- Mass per bin error ---
+    fig, axes = plt.subplots(2, 1, figsize=(16, 10))
+
+    # Top: mass per bin relative error boxplot
+    ax = axes[0]
+    mass_bin_data = []
+    mass_valid_bins = []
+    for b in range(NBIN):
+        col = all_bin_mass_rel_err[:, b]
+        valid = ~np.isnan(col)
+        if valid.sum() > 5:
+            mass_bin_data.append(col[valid] * 100)
+            mass_valid_bins.append(b)
+
+    if mass_bin_data:
+        bp = ax.boxplot(
+            mass_bin_data,
+            tick_labels=[str(b + 1) for b in mass_valid_bins],
+            patch_artist=True, showfliers=True,
+            flierprops=dict(marker=".", ms=1, alpha=0.2),
+            medianprops=dict(color="red", lw=1.5),
+        )
+        for patch in bp["boxes"]:
+            patch.set_facecolor("coral")
+            patch.set_alpha(0.6)
+    ax.axhline(0, color="k", lw=0.5, ls=":")
+    ax.set_xlabel("Bin index")
+    ax.set_ylabel("Mass relative error [%]  (JAX - Fortran) / Fortran")
+    ax.set_title(f"Per-Bin MASS Relative Error ({n_scenarios} scenarios)")
+    ax.tick_params(axis="x", labelsize=6)
+    ax.grid(True, alpha=0.2)
+
+    # Bottom: number vs mass error comparison (median per bin)
+    ax = axes[1]
+    num_medians = []
+    mass_medians = []
+    common_bins = []
+    for b in range(NBIN):
+        col_n = all_bin_rel_err[:, b]
+        col_m = all_bin_mass_rel_err[:, b]
+        valid_n = ~np.isnan(col_n)
+        valid_m = ~np.isnan(col_m)
+        if valid_n.sum() > 5 and valid_m.sum() > 5:
+            num_medians.append(np.median(np.abs(col_n[valid_n])) * 100)
+            mass_medians.append(np.median(np.abs(col_m[valid_m])) * 100)
+            common_bins.append(b)
+
+    if common_bins:
+        x = np.arange(len(common_bins))
+        w = 0.35
+        ax.bar(x - w/2, num_medians, w, label="Number error", color="steelblue", alpha=0.7)
+        ax.bar(x + w/2, mass_medians, w, label="Mass error", color="coral", alpha=0.7)
+        ax.set_xticks(x)
+        ax.set_xticklabels([str(b + 1) for b in common_bins], fontsize=6)
+        ax.set_xlabel("Bin index")
+        ax.set_ylabel("Median |relative error| [%]")
+        ax.set_title("Number vs Mass Error by Bin (median absolute)")
+        ax.legend()
+    ax.grid(True, alpha=0.2)
+
+    fig.suptitle(f"Mass Per-Bin Error Analysis ({n_scenarios} scenarios)", fontsize=14)
+    fig.tight_layout()
+    fig.savefig(outdir / "mass_per_bin_error.png", dpi=150)
     plt.close(fig)
 
     print(f"\nPlots saved to: {outdir.resolve()}", flush=True)
