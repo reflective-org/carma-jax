@@ -1,22 +1,26 @@
 """Coagulation kernel computation for CARMA-JAX.
 
-Computes the state-dependent coagulation kernel from atmospheric properties
-and particle characteristics. Includes Brownian, convective enhancement,
-and gravitational collection terms.
+Fully vectorized over (NZ, NBIN, NBIN, NGROUP, NGROUP) — no Python loops
+in the kernel computation. JIT-compilable.
 Ported from: setupckern.F90
 """
 
+import jax
 import jax.numpy as jnp
 
 from carma.constants import BK, GRAV, PI
 from carma.precision import DTYPE
 
 
-def setup_ckern(config, t, rhoa, zmet, rmu, r_wet, rrat, rprat, bpm, rmass, re, vf):
-    """Compute coagulation kernels for all bin/group pairs.
+@jax.jit
+def setup_ckern_jit(t, rhoa, zmet, rmu, r_wet, rrat, rprat, bpm, rmass, re, vf,
+                    cstick):
+    """Compute coagulation kernels — fully vectorized, JIT-compiled.
+
+    Computes Brownian + gravitational collection kernel for all
+    (i1, i2, j1, j2) pairs simultaneously via broadcasting.
 
     Args:
-        config: CarmaConfig.
         t: Temperature (NZ,) [K].
         rhoa: Air density * zmet (NZ,) [g/cm^2/z].
         zmet: Vertical metric (NZ,).
@@ -28,166 +32,155 @@ def setup_ckern(config, t, rhoa, zmet, rmu, r_wet, rrat, rprat, bpm, rmass, re, 
         rmass: Particle mass (NBIN, NGROUP) [g].
         re: Reynolds number (NZ, NBIN, NGROUP).
         vf: Fall velocity (NZ+1, NBIN, NGROUP) [cm/s].
+        cstick: Sticking coefficient (scalar).
 
     Returns:
-        ckernel: Coagulation kernel (NZ, NBIN, NBIN, NGROUP, NGROUP) [cm^3/s].
+        ckernel: (NZ, NBIN, NBIN, NGROUP, NGROUP) [cm^3/s].
     """
     nz = t.shape[0]
-    nbin = config.nbin
-    ngroup = config.ngroup
+    nbin = r_wet.shape[1]
+    ngroup = r_wet.shape[2]
 
-    ckernel = jnp.zeros((nz, nbin, nbin, ngroup, ngroup), dtype=DTYPE)
-
-    # CGS air density
     rhoa_cgs = rhoa / zmet  # (NZ,)
 
-    for j1 in range(ngroup):
-        for j2 in range(ngroup):
-            if config.coag.icoag[j1, j2] < 0:
-                continue
+    # Common thermal quantities
+    temp1 = BK * t        # (NZ,)
+    temp2 = DTYPE(6.0) * PI * rmu  # (NZ,)
 
-            for i1 in range(nbin):
-                # Particle 1 properties
-                r1 = r_wet[:, i1, j1] * rrat[i1, j1]  # (NZ,)
-                m1 = rmass[i1, j1]
-                bpm1 = bpm[:, i1, j1]
+    # === Particle properties for ALL bins/groups at once ===
+    # Shape: (NZ, NBIN, NGROUP)
+    r_eff = r_wet * rrat[None, :, :]
 
-                # Brownian diffusivity
-                temp1 = BK * t  # (NZ,)
-                temp2 = DTYPE(6.0) * PI * rmu  # (NZ,)
-                di = temp1 * bpm1 / (temp2 * r1)  # (NZ,)
+    # Brownian diffusivity: D = kT * bpm / (6*pi*mu*r)
+    diff = temp1[:, None, None] * bpm / (temp2[:, None, None] * r_eff)  # (NZ, NBIN, NGROUP)
 
-                # Mean thermal velocity
-                gi = jnp.sqrt(DTYPE(8.0) * temp1 / (PI * m1))  # (NZ,)
+    # Mean thermal velocity: g = sqrt(8*kT / (pi*m))
+    g_vel = jnp.sqrt(
+        DTYPE(8.0) * temp1[:, None, None] / (PI * rmass[None, :, :])
+    )  # (NZ, NBIN, NGROUP)
 
-                # Mean free path for Brownian motion
-                rlbi = DTYPE(8.0) * di / (PI * gi)  # (NZ,)
+    # Mean free path for Brownian: l = 8*D / (pi*g)
+    rlb = DTYPE(8.0) * diff / (PI * g_vel)  # (NZ, NBIN, NGROUP)
 
-                # Transition regime correction (Fuchs)
-                dti1 = (DTYPE(2.0) * r1 + rlbi) ** 3
-                dti2 = (DTYPE(4.0) * r1**2 + rlbi**2) ** DTYPE(1.5)
-                dti = (
-                    jnp.sqrt(DTYPE(2.0))
-                    / (DTYPE(6.0) * r1 * rlbi)
-                    * (dti1 - dti2)
-                    - DTYPE(2.0) * r1
-                )
+    # Fuchs transition correction: delta
+    dt1 = (DTYPE(2.0) * r_eff + rlb) ** 3
+    dt2 = (DTYPE(4.0) * r_eff**2 + rlb**2) ** DTYPE(1.5)
+    delt_p = (
+        jnp.sqrt(DTYPE(2.0)) / (DTYPE(6.0) * r_eff * rlb) * (dt1 - dt2)
+        - DTYPE(2.0) * r_eff
+    )  # (NZ, NBIN, NGROUP)
 
-                for i2 in range(nbin):
-                    # Particle 2 properties
-                    r2 = r_wet[:, i2, j2] * rrat[i2, j2]  # (NZ,)
-                    m2 = rmass[i2, j2]
-                    bpm2 = bpm[:, i2, j2]
+    # === Broadcasting to (NZ, NBIN_i1, NBIN_i2, NGROUP_j1, NGROUP_j2) ===
+    # Particle 1: axes (NZ, i1, 1, j1, 1)
+    # Particle 2: axes (NZ, 1, i2, 1, j2)
 
-                    dj = temp1 * bpm2 / (temp2 * r2)
-                    gj = jnp.sqrt(DTYPE(8.0) * temp1 / (PI * m2))
-                    rlbj = DTYPE(8.0) * dj / (PI * gj)
-                    dtj1 = (DTYPE(2.0) * r2 + rlbj) ** 3
-                    dtj2 = (DTYPE(4.0) * r2**2 + rlbj**2) ** DTYPE(1.5)
-                    dtj = (
-                        jnp.sqrt(DTYPE(2.0))
-                        / (DTYPE(6.0) * r2 * rlbj)
-                        * (dtj1 - dtj2)
-                        - DTYPE(2.0) * r2
-                    )
+    r1 = r_eff[:, :, None, :, None]           # (NZ, NB, 1, NG, 1)
+    r2 = r_eff[:, None, :, None, :]           # (NZ, 1, NB, 1, NG)
+    d1 = diff[:, :, None, :, None]
+    d2 = diff[:, None, :, None, :]
+    g1 = g_vel[:, :, None, :, None]
+    g2 = g_vel[:, None, :, None, :]
+    dt1_b = delt_p[:, :, None, :, None]
+    dt2_b = delt_p[:, None, :, None, :]
 
-                    # Sticking coefficient (default=1 for non-sulfate)
-                    cstick_val = DTYPE(config.cstick)
+    # === Brownian kernel ===
+    rp = r1 + r2                              # (NZ, NB, NB, NG, NG)
+    dp = d1 + d2
+    gg = jnp.sqrt(g1**2 + g2**2) * DTYPE(cstick)
+    delt = jnp.sqrt(dt1_b**2 + dt2_b**2)
+    term1 = rp / (rp + delt)
+    term2 = DTYPE(4.0) * dp / (gg * rp)
+    cbr = DTYPE(4.0) * PI * rp * dp / (term1 + term2)
 
-                    # Brownian coagulation kernel
-                    rp = r1 + r2
-                    dp = di + dj
-                    gg = jnp.sqrt(gi**2 + gj**2) * cstick_val
-                    delt = jnp.sqrt(dti**2 + dtj**2)
-                    term1 = rp / (rp + delt)
-                    term2 = DTYPE(4.0) * dp / (gg * rp)
-                    cbr = DTYPE(4.0) * PI * rp * dp / (term1 + term2)  # (NZ,)
+    # === Gravitational collection kernel ===
+    # Fall velocities at cell centers: (NZ, NBIN, NGROUP)
+    vf_center = vf[:nz, :, :]
+    vf1 = vf_center[:, :, None, :, None] * zmet[:, None, None, None, None]
+    vf2 = vf_center[:, None, :, None, :] * zmet[:, None, None, None, None]
+    dv = jnp.abs(vf1 - vf2)
 
-                    # Gravitational collection kernel
-                    # Determine larger particle
-                    r_larg = jnp.maximum(r1, r2)
-                    is_2_larger = r2 >= r1
+    # Determine larger/smaller particle
+    is_2_larger = r2 >= r1
+    r_larg = jnp.maximum(r1, r2)
+    r_smal = jnp.minimum(r1, r2)
 
-                    re_1 = re[:, i1, j1]
-                    re_2 = re[:, i2, j2]
-                    re_larg = jnp.where(is_2_larger, re_2, re_1)
+    re1 = re[:, :, None, :, None]
+    re2 = re[:, None, :, None, :]
+    re_larg = jnp.where(is_2_larger, re2, re1)
 
-                    vf1 = vf[:nz, i1, j1] * zmet
-                    vf2 = vf[:nz, i2, j2] * zmet
-                    dv = jnp.abs(vf1 - vf2)
+    vf_smal = jnp.where(is_2_larger, vf1, vf2)
+    vf_larg = jnp.where(is_2_larger, vf2, vf1)
 
-                    # Collection efficiency (simplified: constant for now)
-                    # Fuchs/Langmuir composite
-                    r_smal = jnp.minimum(r1, r2)
-                    vf_smal = jnp.where(is_2_larger, vf1, vf2)
-                    vf_larg = jnp.where(is_2_larger, vf2, vf1)
+    # Stokes number
+    sk = jnp.where(
+        r_larg > 0,
+        jnp.abs(vf_smal) * jnp.abs(vf_larg - vf_smal)
+        / jnp.maximum(r_larg * GRAV, DTYPE(1e-30)),
+        DTYPE(0.0),
+    )
 
-                    # Stokes number
-                    sk = jnp.where(
-                        r_larg > 0,
-                        jnp.abs(vf_smal) * jnp.abs(vf_larg - vf_smal) / (r_larg * GRAV),
-                        DTYPE(0.0),
-                    )
+    # Langmuir efficiency e1 (high Re limit)
+    e1 = jnp.where(
+        sk >= DTYPE(0.08333334),
+        (sk / (sk + DTYPE(0.25))) ** 2,
+        DTYPE(0.0),
+    )
 
-                    # Langmuir efficiency e1 (high Re limit)
-                    e1 = jnp.where(
-                        sk >= DTYPE(0.08333334),
-                        (sk / (sk + DTYPE(0.25))) ** 2,
-                        DTYPE(0.0),
-                    )
+    # Fuchs efficiency e3 (low Re limit)
+    e3 = jnp.where(
+        sk >= DTYPE(1.214),
+        DTYPE(1.0) / (
+            DTYPE(1.0)
+            + DTYPE(0.75) * jnp.log(jnp.maximum(DTYPE(2.0) * sk, DTYPE(1e-30)))
+            / jnp.maximum(sk - DTYPE(1.214), DTYPE(1e-30))
+        ) ** 2,
+        DTYPE(0.0),
+    )
 
-                    # Fuchs efficiency e3 (low Re limit)
-                    e3 = jnp.where(
-                        sk >= DTYPE(1.214),
-                        DTYPE(1.0)
-                        / (
-                            DTYPE(1.0)
-                            + DTYPE(0.75)
-                            * jnp.log(DTYPE(2.0) * sk)
-                            / jnp.maximum(sk - DTYPE(1.214), DTYPE(1e-30))
-                        )
-                        ** 2,
-                        DTYPE(0.0),
-                    )
+    # Interpolate between regimes
+    re60 = re_larg / DTYPE(60.0)
+    e_langmuir = jnp.where(
+        re_larg < DTYPE(1.0), e3,
+        jnp.where(
+            re_larg > DTYPE(1000.0), e1,
+            (e3 + re60 * e1) / (DTYPE(1.0) + re60),
+        ),
+    )
 
-                    # Interpolate between low and high Re
-                    re60 = re_larg / DTYPE(60.0)
-                    e_langmuir = jnp.where(
-                        re_larg < DTYPE(1.0),
-                        e3,
-                        jnp.where(
-                            re_larg > DTYPE(1000.0),
-                            e1,
-                            (e3 + re60 * e1) / (DTYPE(1.0) + re60),
-                        ),
-                    )
+    # Fuchs efficiency from radius ratio
+    pr = r_smal / jnp.maximum(r_larg, DTYPE(1e-30))
+    e_fuchs = (pr / (DTYPE(1.414) * (DTYPE(1.0) + pr))) ** 2
 
-                    # Fuchs efficiency from radius ratio
-                    pr = r_smal / jnp.maximum(r_larg, DTYPE(1e-30))
-                    e_fuchs = (pr / (DTYPE(1.414) * (DTYPE(1.0) + pr))) ** 2
+    e_coll = jnp.maximum(e_fuchs, e_langmuir)
 
-                    e_coll = jnp.maximum(e_fuchs, e_langmuir)
+    # Coalescence efficiency (Beard & Ochs, 1984)
+    beta = (
+        jnp.log(jnp.maximum(r_smal * DTYPE(1e4), DTYPE(1e-30)))
+        + DTYPE(0.44) * jnp.log(jnp.maximum(r_larg * DTYPE(50.0), DTYPE(1e-30)))
+    )
+    b_coal = DTYPE(0.0946) * beta - DTYPE(0.319)
+    a_coal = jnp.sqrt(b_coal**2 + DTYPE(0.00441))
+    x_coal = (
+        jnp.sign(a_coal - b_coal)
+        * jnp.abs(a_coal - b_coal) ** (DTYPE(1.0) / DTYPE(3.0))
+        - jnp.sign(a_coal + b_coal)
+        * jnp.abs(a_coal + b_coal) ** (DTYPE(1.0) / DTYPE(3.0))
+        + DTYPE(0.459)
+    )
+    e_coal = jnp.clip(x_coal, DTYPE(0.5), DTYPE(1.0))
 
-                    # Coalescence efficiency (Beard & Ochs, 1984)
-                    # For small particles, set to 1.0
-                    beta = jnp.log(jnp.maximum(r_smal * DTYPE(1e4), DTYPE(1e-30))) + DTYPE(
-                        0.44
-                    ) * jnp.log(jnp.maximum(r_larg * DTYPE(50.0), DTYPE(1e-30)))
-                    b_coal = DTYPE(0.0946) * beta - DTYPE(0.319)
-                    a_coal = jnp.sqrt(b_coal**2 + DTYPE(0.00441))
-                    x_coal = (
-                        jnp.sign(a_coal - b_coal)
-                        * jnp.abs(a_coal - b_coal) ** (DTYPE(1.0) / DTYPE(3.0))
-                        - jnp.sign(a_coal + b_coal)
-                        * jnp.abs(a_coal + b_coal) ** (DTYPE(1.0) / DTYPE(3.0))
-                        + DTYPE(0.459)
-                    )
-                    e_coal = jnp.clip(x_coal, DTYPE(0.5), DTYPE(1.0))
+    # Gravitational kernel
+    cgr = e_coal * e_coll * PI * rp**2 * dv
 
-                    # Gravitational collection kernel
-                    cgr = e_coal * e_coll * PI * rp**2 * dv
-
-                    # Combined kernel
-                    ckernel = ckernel.at[:, i1, i2, j1, j2].set(cbr + cgr)
+    # Combined kernel
+    ckernel = cbr + cgr
 
     return ckernel
+
+
+def setup_ckern(config, t, rhoa, zmet, rmu, r_wet, rrat, rprat, bpm, rmass, re, vf):
+    """Convenience wrapper matching the original signature."""
+    return setup_ckern_jit(
+        t, rhoa, zmet, rmu, r_wet, rrat, rprat, bpm, rmass, re, vf,
+        cstick=DTYPE(config.cstick),
+    )
