@@ -2,7 +2,7 @@
 
 ## Status
 
-Active — to be resolved in Phase 5 (orchestration)
+Active — MUST be resolved before production use. Compromises 1 and 2 affect physics correctness and are not acceptable for scientific work. The current JIT version is for validation speed only.
 
 ## Context
 
@@ -69,6 +69,18 @@ The JIT-compiled `microfast_growth.py` achieves 4,200x speedup over the Python-l
 **Impact:** Wrong for multi-element particles with non-volatile cores.
 
 **Fix:** Generalize the condensate sum with element-type masking.
+
+## Scientific integrity warning
+
+**Compromises 1 and 2 are NOT acceptable for scientific simulations.** They change the physics:
+
+- **Frozen kernel (#1)**: The growth rate depends on temperature through vapor pressure (exponential), diffusivity (T^1.94), and thermal conductivity (linear). Freezing these while T changes is physically wrong. Even small T changes compound over many steps.
+
+- **No substepping (#2)**: Without convergence checking, the solver can overshoot equilibrium. This produces unphysical oscillations and wrong final states for fast-growing scenarios.
+
+The correct approach: **always recompute all physics every step, then optimize the computation speed.** Never skip physics to gain speed. Our JIT-compiled `setup_vf_jit` (0.006ms) and `setup_ckern_jit` (0.04ms) are already fast enough to call every step. The growth kernel setup (`setup_gkern`) needs the same JIT treatment.
+
+Compromises 3-6 are structural limitations (dimensions, generality) that don't affect the physics for the cases they support.
 
 ## What is NOT compromised
 
