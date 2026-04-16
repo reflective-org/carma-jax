@@ -207,34 +207,45 @@ def run_jax_growtest():
     pden1 = jnp.zeros((NBIN, NGROUP), dtype=DTYPE)
     palr = jnp.zeros((4, NGROUP), dtype=DTYPE)
 
-    # Compute PPM coefficients for uniform rmrat
-    # dm is 1D (NBIN,) from setup_bins
+    # Compute PPM coefficients — EXACT Fortran formulas from carma_mod.F90 lines 532-569
     dm_np = np.array(dm)
+    rmass_np2 = np.array(rmass)
+    rmassup_np = np.array(rmassup)
+    rmrat_val = 2.0
+
     for ig in range(NGROUP):
+        # pratt: gradient coefficients (Fortran domain: i=2..NBIN-1, 1-based = i=1..NBIN-2, 0-based)
         for ibin in range(1, NBIN - 1):
-            dm_i = dm_np[ibin]
             dm_im1 = dm_np[ibin - 1]
+            dm_i = dm_np[ibin]
             dm_ip1 = dm_np[ibin + 1]
             pratt = pratt.at[0, ibin, ig].set(dm_i / (dm_im1 + dm_i + dm_ip1))
             pratt = pratt.at[1, ibin, ig].set((2.0 * dm_im1 + dm_i) / (dm_ip1 + dm_i))
             pratt = pratt.at[2, ibin, ig].set((2.0 * dm_ip1 + dm_i) / (dm_im1 + dm_i))
 
+        # prat, pden1: polynomial coefficients (Fortran domain: i=2..NBIN-2, 1-based = i=1..NBIN-3, 0-based)
         for ibin in range(1, NBIN - 2):
-            dm_i = dm_np[ibin]
             dm_im1 = dm_np[ibin - 1]
+            dm_i = dm_np[ibin]
             dm_ip1 = dm_np[ibin + 1]
             dm_ip2 = dm_np[min(ibin + 2, NBIN - 1)]
             prat = prat.at[0, ibin, ig].set(dm_i / (dm_i + dm_ip1))
-            prat = prat.at[1, ibin, ig].set(1.0 / (dm_im1 + dm_i + dm_ip1 + dm_ip2))
-            prat = prat.at[2, ibin, ig].set((dm_im1 + dm_i) / (2.0 * dm_ip1 + dm_i))
-            prat = prat.at[3, ibin, ig].set((dm_ip2 + dm_ip1) / (2.0 * dm_i + dm_ip1))
+            prat = prat.at[1, ibin, ig].set(2.0 * dm_ip1 * dm_i / (dm_i + dm_ip1))
+            prat = prat.at[2, ibin, ig].set((dm_im1 + dm_i) / (2.0 * dm_i + dm_ip1))
+            prat = prat.at[3, ibin, ig].set((dm_ip2 + dm_ip1) / (2.0 * dm_ip1 + dm_i))
             pden1 = pden1.at[ibin, ig].set(dm_im1 + dm_i + dm_ip1 + dm_ip2)
 
-        # Edge slopes (simple linear for uniform rmrat)
-        palr = palr.at[0, ig].set(0.5)  # bin 1 left
-        palr = palr.at[1, ig].set(-0.5) # bin 0 left
-        palr = palr.at[2, ig].set(0.5)  # bin NBIN-2 right
-        palr = palr.at[3, ig].set(1.5)  # bin NBIN-1 right
+        # palr: edge coefficients — EXACT from Fortran carma_mod.F90 lines 557-568
+        # palr(1) = (rmassup(1) - rmass(1)) / (rmass(2) - rmass(1))  [Fortran 1-based]
+        # palr(2) = (rmassup(1)/rmrat - rmass(1)) / (rmass(2) - rmass(1))
+        # palr(3) = (rmassup(NBIN-1) - rmass(NBIN-1)) / (rmass(NBIN) - rmass(NBIN-1))
+        # palr(4) = (rmassup(NBIN) - rmass(NBIN-1)) / (rmass(NBIN) - rmass(NBIN-1))
+        denom_low = rmass_np2[1] - rmass_np2[0]
+        denom_high = rmass_np2[NBIN - 1] - rmass_np2[NBIN - 2]
+        palr = palr.at[0, ig].set((rmassup_np[0] - rmass_np2[0]) / denom_low)
+        palr = palr.at[1, ig].set((rmassup_np[0] / rmrat_val - rmass_np2[0]) / denom_low)
+        palr = palr.at[2, ig].set((rmassup_np[NBIN - 2] - rmass_np2[NBIN - 2]) / denom_high)
+        palr = palr.at[3, ig].set((rmassup_np[NBIN - 1] - rmass_np2[NBIN - 2]) / denom_high)
 
     # Time integration
     results = {
