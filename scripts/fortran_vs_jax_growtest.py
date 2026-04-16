@@ -125,7 +125,8 @@ def run_jax(T_val, p_pa_val, gas_mmr_val, N0_val,
         pc, gc, t, _ = growth_step(
             pc, gc, t, p_cgs, rhoa, zmet, rmu, thcond,
             re, r_wet, rlow_wet, rup_wet,
-            rmass_2d, dm_2d, pratt, prat, pden1, palr, DTYPE(DTIME))
+            rmass_2d, dm_2d, pratt, prat, pden1, palr,
+            DTYPE(DTIME), jnp.int32(64))
     jax.block_until_ready(pc)
     t1 = timer.time()
 
@@ -172,7 +173,8 @@ def main():
 
     # Build JIT-compiled growth step
     print("Building JIT growth step...", flush=True)
-    growth_step = make_microfast_growth(NBIN, NELEM, NGROUP, NGAS, float(WTMOL_H2O), True)
+    growth_step_single, growth_step_substep = make_microfast_growth(NBIN, NELEM, NGROUP, NGAS, float(WTMOL_H2O), True)
+    growth_step = growth_step_substep  # Use adaptive substepping
 
     # Warmup JIT — use realistic dummy inputs
     pc_w = jnp.full((NZ, NBIN, NELEM), SMALL_PC, dtype=DTYPE).at[0, 0, 0].set(0.1)
@@ -191,13 +193,14 @@ def main():
     dm_2d_w = dm[:, None] * jnp.ones((1, 1), dtype=DTYPE)
     _ = growth_step(pc_w, gc_w, t_w, p_w, rhoa_w, zmet_w, rmu_w, thcond_w,
                     re_w, r_wet_w, rlow_wet_w, rup_wet_w,
-                    rmass_2d_w, dm_2d_w, pratt, prat, pden1, palr, DTYPE(100.0))
+                    rmass_2d_w, dm_2d_w, pratt, prat, pden1, palr,
+                    DTYPE(100.0), jnp.int32(64))
     print("Done.", flush=True)
 
-    # Random scenarios
-    T_arr = np.random.uniform(185, 210, n_scenarios)    # TTL range
+    # Random scenarios — ICE SUPERSATURATED conditions only (T < 198K at TTL)
+    T_arr = np.random.uniform(185, 198, n_scenarios)    # Cold TTL where ice grows
     p_arr = np.random.uniform(7000, 12000, n_scenarios)  # 70-120 hPa
-    gas_arr = np.random.uniform(2e-6, 6e-6, n_scenarios) # 2-6 ppm H2O
+    gas_arr = np.random.uniform(3e-6, 6e-6, n_scenarios) # 3-6 ppm H2O (above ice sat)
     N0_arr = 10.0 ** np.random.uniform(-2, 1, n_scenarios) # 0.01-10 cm^-3
 
     # Storage

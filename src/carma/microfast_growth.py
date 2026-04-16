@@ -277,4 +277,97 @@ def make_microfast_growth(nbin, nelem, ngroup, ngas, gwtmol_val, is_ice,
 
         return pc, gc, t, rlheat_val
 
-    return microfast_growth_jit
+    @jax.jit
+    def microfast_growth_substep(pc, gc, t, p, rhoa, zmet, rmu, thcond,
+                                  re, r_wet, rlow_wet, rup_wet,
+                                  rmass_2d, dm_2d,
+                                  pratt, prat, pden1, palr,
+                                  dtime_orig, max_substeps):
+        """Growth step with adaptive substepping.
+
+        Starts with 1 substep. If supersaturation changes sign after the step,
+        doubles substeps and retries. Repeats up to log2(max_substeps) times.
+
+        Args:
+            ... same as microfast_growth_jit ...
+            dtime_orig: Full timestep [s].
+            max_substeps: Maximum number of substeps (power of 2, e.g. 128).
+
+        Returns:
+            Tuple of (pc, gc, t, rlheat_total).
+        """
+        iz = 0
+
+        # Save initial supersaturation
+        tt0 = t[iz]
+        pvapi0 = DTYPE(10.0) * jnp.exp(
+            DTYPE(9.550426) - DTYPE(5723.265) / tt0
+            + DTYPE(3.53068) * jnp.log(tt0) - DTYPE(0.00728332) * tt0)
+        rvap = RGAS / _gwtmol
+        gc_cgs0 = gc[iz, 0] / zmet[iz]
+        ss0 = (gc_cgs0 * rvap * tt0 - pvapi0) / pvapi0
+
+        # Retry loop state: (pc, gc, t, nsub, nretry, rlheat_total, done)
+        pc_saved = pc
+        gc_saved = gc
+        t_saved = t
+
+        def retry_cond(state):
+            _, _, _, _, nretry, _, done, _ = state
+            return ~done
+
+        def retry_body(state):
+            pc_s, gc_s, t_s, nsub, nretry, rlheat_acc, done, max_sub = state
+
+            # Reset to saved state
+            pc_r = pc_saved
+            gc_r = gc_saved
+            t_r = t_saved
+
+            dtime_sub = dtime_orig / nsub
+            rlheat_sub = DTYPE(0.0)
+
+            # Run nsub substeps using fori_loop with max_substeps iterations + masking
+            def substep_body(i, carry):
+                pc_c, gc_c, t_c, rl_c = carry
+                active = i < nsub
+                pc_new, gc_new, t_new, rl_new = microfast_growth_jit(
+                    pc_c, gc_c, t_c, p, rhoa, zmet, rmu, thcond,
+                    re, r_wet, rlow_wet, rup_wet,
+                    rmass_2d, dm_2d, pratt, prat, pden1, palr, dtime_sub)
+                pc_c = jax.tree.map(lambda o, n: jnp.where(active, n, o), pc_c, pc_new)
+                gc_c = jax.tree.map(lambda o, n: jnp.where(active, n, o), gc_c, gc_new)
+                t_c = jnp.where(active, t_new, t_c)
+                rl_c = rl_c + jnp.where(active, rl_new, DTYPE(0.0))
+                return pc_c, gc_c, t_c, rl_c
+
+            pc_r, gc_r, t_r, rlheat_sub = jax.lax.fori_loop(
+                0, max_sub, substep_body, (pc_r, gc_r, t_r, DTYPE(0.0)))
+
+            # Check convergence: did supersaturation change sign?
+            tt_new = t_r[iz]
+            pvapi_new = DTYPE(10.0) * jnp.exp(
+                DTYPE(9.550426) - DTYPE(5723.265) / tt_new
+                + DTYPE(3.53068) * jnp.log(tt_new) - DTYPE(0.00728332) * tt_new)
+            gc_cgs_new = gc_r[iz, 0] / zmet[iz]
+            ss_new = (gc_cgs_new * rvap * tt_new - pvapi_new) / pvapi_new
+
+            sign_changed = (ss0 * ss_new) < DTYPE(0.0)
+            large_change = jnp.abs(ss_new) > DTYPE(0.05)
+            needs_retry = sign_changed & large_change & (nsub < max_sub)
+
+            new_nsub = jnp.where(needs_retry, nsub * 2, nsub)
+            new_nretry = nretry + jnp.where(needs_retry, 1, 0)
+            new_done = ~needs_retry
+
+            return (pc_r, gc_r, t_r, new_nsub, new_nretry, rlheat_sub, new_done, max_sub)
+
+        init_state = (pc, gc, t, jnp.int32(1), jnp.int32(0), DTYPE(0.0),
+                      jnp.bool_(False), jnp.int32(max_substeps))
+
+        pc_f, gc_f, t_f, nsub_f, nretry_f, rlheat_f, _, _ = jax.lax.while_loop(
+            retry_cond, retry_body, init_state)
+
+        return pc_f, gc_f, t_f, rlheat_f
+
+    return microfast_growth_jit, microfast_growth_substep
