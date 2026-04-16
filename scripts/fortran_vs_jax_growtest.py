@@ -18,8 +18,6 @@ from carma.precision import DTYPE
 from carma.constants import *
 from carma.bins import setup_bins
 from carma.setup_atm import setup_atm
-from carma.setup_grow import setup_grow
-from carma.setup_gkern import setup_gkern
 from carma.setup_vf import setup_vf
 from carma.vapor_pressure import vaporp_h2o_murphy2005
 from carma.supersaturation import supersat
@@ -105,7 +103,6 @@ def run_jax(T_val, p_pa_val, gas_mmr_val, N0_val,
                      DTYPE(p_pa_val - 100.0 * rho_air_val * float(GRAV) / 100.0) * RPA2CGS])
 
     rhoa, dz, zmet, zmetl, rmu, thcond, rhoa_wet = setup_atm(t, p_cgs, pl, zc, zl, GridType.I_CART)
-    diffus, rlhe, rlhm = setup_grow(t, p_cgs, rhoa, zmet, igash2o=0, igash2so4=-1, ngas=1, do_cnst_rlh=False)
 
     r_wet = jnp.broadcast_to(r[None, :, None], (NZ, NBIN, NGROUP))
     rlow_wet = jnp.broadcast_to(rlow[None, :, None], (NZ, NBIN, NGROUP))
@@ -115,12 +112,8 @@ def run_jax(T_val, p_pa_val, gas_mmr_val, N0_val,
     rmass_2d = rmass[:, None] * jnp.ones((1, NGROUP), dtype=DTYPE)
     dm_2d = dm[:, None] * jnp.ones((1, NGROUP), dtype=DTYPE)
 
+    # Compute fall velocity (for Reynolds number — T-independent for fixed particles)
     vf, re, bpm = setup_vf(None, t, rhoa, zmet, rmu, r_wet, rhop_wet, rrat_arr, rrat_arr)
-    _, akelvin, akelvini, gro, gro1, gro2, ft_arr, thcondnc = setup_gkern(
-        t, p_cgs, rhoa, zmet, rmu, thcond, diffus, rlhe, rlhm,
-        re, r_wet, rlow_wet, rrat_arr, jnp.array([1.0]), jnp.array([True]),
-        gwtmol_arr, jnp.array([0]), 1.0, 1.0, 1.0, NBIN, NGROUP, NGAS,
-    )
 
     pc = jnp.full((NZ, NBIN, NELEM), SMALL_PC, dtype=DTYPE)
     pc = pc.at[0, 0, 0].set(DTYPE(N0_val) * zmet[0])
@@ -130,9 +123,9 @@ def run_jax(T_val, p_pa_val, gas_mmr_val, N0_val,
     t0 = timer.time()
     for istep in range(NSTEP):
         pc, gc, t, _ = growth_step(
-            pc, gc, t, 0, rhoa, zmet, rlhe, rlhm,
-            akelvin, akelvini, gro, gro1,
-            rup_wet, rmass_2d, dm_2d, pratt, prat, pden1, palr, DTYPE(DTIME))
+            pc, gc, t, p_cgs, rhoa, zmet, rmu, thcond,
+            re, r_wet, rlow_wet, rup_wet,
+            rmass_2d, dm_2d, pratt, prat, pden1, palr, DTYPE(DTIME))
     jax.block_until_ready(pc)
     t1 = timer.time()
 
@@ -181,23 +174,24 @@ def main():
     print("Building JIT growth step...", flush=True)
     growth_step = make_microfast_growth(NBIN, NELEM, NGROUP, NGAS, float(WTMOL_H2O), True)
 
-    # Warmup JIT
+    # Warmup JIT — use realistic dummy inputs
     pc_w = jnp.full((NZ, NBIN, NELEM), SMALL_PC, dtype=DTYPE).at[0, 0, 0].set(0.1)
-    gc_w = jnp.array([[3.5e-6 * 1.65e-4]])  # rough rhoa
+    gc_w = jnp.array([[3.5e-6 * 1.65e-4]])
     t_w = jnp.array([190.0])
+    p_w = jnp.array([90000.0])
     rhoa_w = jnp.array([1.65e-4])
     zmet_w = jnp.ones(1, dtype=DTYPE)
-    rlhe_w = jnp.array([[2.5e10]])
-    rlhm_w = jnp.array([[3.34e9]])
-    ak_w = jnp.array([[2.6e-7]])
-    gro_w = jnp.ones((1, NBIN, 1), dtype=DTYPE) * 1e-12
-    gro1_w = jnp.ones((1, NBIN, 1), dtype=DTYPE) * 3e9
-    rup_w = jnp.broadcast_to(rup[None, :, None], (1, NBIN, 1))
+    rmu_w = jnp.array([1.26e-4])
+    thcond_w = jnp.array([1790.0])
+    re_w = jnp.zeros((1, NBIN, 1), dtype=DTYPE)
+    r_wet_w = jnp.broadcast_to(r[None, :, None], (1, NBIN, 1))
+    rlow_wet_w = jnp.broadcast_to(rlow[None, :, None], (1, NBIN, 1))
+    rup_wet_w = jnp.broadcast_to(rup[None, :, None], (1, NBIN, 1))
     rmass_2d_w = rmass[:, None] * jnp.ones((1, 1), dtype=DTYPE)
     dm_2d_w = dm[:, None] * jnp.ones((1, 1), dtype=DTYPE)
-    _ = growth_step(pc_w, gc_w, t_w, 0, rhoa_w, zmet_w, rlhe_w, rlhm_w,
-                    ak_w, ak_w, gro_w, gro1_w, rup_w, rmass_2d_w, dm_2d_w,
-                    pratt, prat, pden1, palr, DTYPE(100.0))
+    _ = growth_step(pc_w, gc_w, t_w, p_w, rhoa_w, zmet_w, rmu_w, thcond_w,
+                    re_w, r_wet_w, rlow_wet_w, rup_wet_w,
+                    rmass_2d_w, dm_2d_w, pratt, prat, pden1, palr, DTYPE(100.0))
     print("Done.", flush=True)
 
     # Random scenarios
