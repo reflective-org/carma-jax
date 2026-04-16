@@ -72,4 +72,43 @@
 
 The coagulation kernel is currently computed **once** and reused for all timesteps. This is valid only when environmental variables (T, p, particle radii) are constant. In the full model (Phase 3+), the kernel must be recomputed when these change. The JIT-compiled `setup_ckern` at 0.04ms/call makes per-step recomputation feasible. See `docs/ASSUMPTIONS.md` for strategy options.
 
-### Phase 3-6: Not Started
+## Phase 3a: Growth + Evaporation — COMPLETE
+
+### Modules Implemented
+- [x] `solvers/psolve.py` — implicit Euler particle solver
+- [x] `solvers/gsolve.py` — forward Euler gas solver (mass conservation)
+- [x] `solvers/tsolve.py` — forward Euler temperature solver (latent heat)
+- [x] `solvers/totalcondensate.py` — ice/liquid mass accumulator
+- [x] `growth/pheat.py` — mass growth rate dm/dt with Kelvin curvature
+- [x] `growth/growp.py` — bin-to-bin growth production
+- [x] `growth/growevapl.py` — PPM (Colella-Woodward 1984) growth/evaporation rates
+- [x] `growth/evapp.py` — evaporation production (within-group, no cores)
+- [x] `microfast_growth.py` — JIT-compiled full growth step
+- [x] `setup_gkern_jit.py` — JIT-compiled growth kernel setup
+- [x] `newstate_calc.py` — adaptive substepping framework
+- [x] 40 unit tests passing
+- [x] Single scenario validation: 0.023% error vs Fortran
+- [x] 1000-scenario validation (supersaturated conditions)
+
+### Phase 3a Validation (1000 scenarios, 24 bins, 50 steps)
+
+| Metric | Value |
+|--------|-------|
+| Median dT error | **5.3e-5** |
+| 84% below 1% | |
+| 94% below 10% | |
+| Fortran vs JAX speed | **0.8-5.5x** (depends on substepping) |
+
+### Physics correctness
+- Full kernel recomputation every step (vapor pressure, diffusivity, latent heats, Knudsen, ventilation, gro/gro1)
+- Adaptive substepping via `jax.lax.while_loop` (doubles substeps on supersaturation sign change)
+- PPM coefficients from exact Fortran formulas (carma_mod.F90 lines 532-569)
+- See ADR 0003 for compromise documentation
+
+### Known Issues
+- 15% of supersaturated scenarios have >0.1% error (mostly in high bins 20-24)
+- Likely from subtle PPM differences or evaporation handling at bin boundaries
+- Fortran growtest also runs without substepping — errors are not from missing substeps
+- Absolute errors remain small (<1 mK for all scenarios)
+
+### Phase 3b-6: Not Started
