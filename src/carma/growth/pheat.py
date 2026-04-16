@@ -63,10 +63,14 @@ def pheat(pc, supsatl, supsati, pvapl, pvapi,
     expon = jnp.maximum(-POWMAX, expon)
     akas = jnp.exp(expon)
 
-    # Growth kernel at bin boundary (ibin+1 in 0-based indexing)
-    # gro array stores values at bin boundaries, indexed by the upper bin
-    g0 = gro[iz, ibin, igroup]
-    g1 = gro1[iz, ibin, igroup]
+    # Growth kernel at bin boundary between ibin and ibin+1.
+    # In Fortran: gro(iz, ibin+1, igroup) where ibin is 1-based.
+    # In our 0-based gro array: gro[iz, ibin+1, ig] stores the value
+    # at the boundary between bin ibin and bin ibin+1, because
+    # setup_gkern computes gro using rlow_wet (lower boundary of each bin),
+    # and rlow[ibin+1] = rup[ibin] = the boundary between bins ibin and ibin+1.
+    g0 = gro[iz, ibin + 1, igroup]
+    g1 = gro1[iz, ibin + 1, igroup]
 
     # Mass growth rate [g/s]
     dmdt = pvap * (ss + DTYPE(1.0) - akas) * g0 / (DTYPE(1.0) + g0 * g1 * pvap)
