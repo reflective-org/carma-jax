@@ -245,86 +245,40 @@ def run_jax_growtest():
         "gas_mmr": [float(gc[0, 0] / rhoa[0])],
     }
 
+    from carma.newstate_calc import newstate_calc_growth
+
     iz = 0
+    rup_wet_arr = jnp.broadcast_to(rup[None, :, None], (NZ, NBIN, NGROUP))
+    rlow_wet_arr = jnp.broadcast_to(rlow[None, :, None], (NZ, NBIN, NGROUP))
+    rmass_2d = rmass[:, None] * jnp.ones((1, NGROUP), dtype=DTYPE)
+    dm_2d = dm[:, None] * jnp.ones((1, NGROUP), dtype=DTYPE)
+
     for istep in range(nstep):
-        # Vapor pressure at current T
-        pvapl_step, pvapi_step = vaporp_h2o_murphy2005(t)
-        pvapl = pvapl_step[None, :]
-        pvapi = pvapi_step[None, :]
-
-        # Supersaturation
-        ssl, ssi = supersat(t, gc[:, 0], pvapl[:, 0], pvapi[:, 0], float(WTMOL_H2O), zmet)
-        supsatl = ssl[:, None]
-        supsati = ssi[:, None]
-
-        # Save condensate before step
-        prev_ice, prev_liq = totalcondensate(
-            pc, rmass[:, None] * jnp.ones((1, NGROUP), dtype=DTYPE),
-            jnp.array([0]), is_ice_arr, igrowgas_arr, NBIN, NGROUP, NGAS, iz,
-        )
-
-        # Growth/evaporation loss rates (PPM)
-        growlg = jnp.zeros((NBIN, NGROUP), dtype=DTYPE)
-        evaplg = jnp.zeros((NBIN, NGROUP), dtype=DTYPE)
-        rup_wet_arr = jnp.broadcast_to(rup[None, :, None], (NZ, NBIN, NGROUP))
-
-        growlg, evaplg = growevapl(
-            pc, growlg, evaplg,
-            supsatl, supsati, pvapl, pvapi,
-            akelvin, akelvini, gro, gro1,
-            rup_wet_arr, rmass[:, None] * jnp.ones((1, NGROUP), dtype=DTYPE),
-            dm[:, None] * jnp.ones((1, NGROUP), dtype=DTYPE),
-            jnp.max(pc[:, :, 0:1] / zmet[:, None, None], axis=1),
+        pc, gc, t, rlheat_val, nsub = newstate_calc_growth(
+            pc, gc, t, iz, dtime,
+            rhoa, zmet, rlhe, rlhm, diffus,
+            akelvin, akelvini, gro, gro1, gro2,
+            rup_wet_arr, rmass_2d, dm_2d, rlow_wet_arr,
             pratt, prat, pden1, palr,
             is_ice_arr, igrowgas_arr, ienconc_arr,
-            dtime, iz, NBIN, NGROUP,
+            jnp.array([0]),  # igroup_arr
+            gwtmol_arr,
+            NBIN, NGROUP, NGAS, NELEM,
+            minsubsteps=1, maxsubsteps=128, maxretries=10,
+            dt_threshold=0.0,
+            ds_threshold_arr=jnp.array([-0.1]),  # sign-change check
+            scale_threshold=1.0,
         )
 
-        # Growth production and solve for each bin
-        growpe = jnp.zeros((NBIN, NELEM), dtype=DTYPE)
-        evappe = jnp.zeros((NBIN, NELEM), dtype=DTYPE)
-        rnucpe = jnp.zeros((NBIN, NELEM), dtype=DTYPE)
-        rhompe = jnp.zeros((NBIN, NELEM), dtype=DTYPE)
-        rnuclg = jnp.zeros((NBIN, NGROUP, NGROUP), dtype=DTYPE)
-        pc_nucl = jnp.zeros_like(pc)
-
-        pconmax = jnp.max(pc[:, :, 0:1] / zmet[:, None, None], axis=1)
-
-        for ibin in range(NBIN):
-            growpe = growp(pc, growpe, growlg, pconmax, iz, ibin, 0, 0, 0)
-            pc, pc_nucl = psolve(
-                pc, pc_nucl, growpe, evappe, rnucpe, rhompe,
-                growlg, evaplg, rnuclg, dtime, iz, ibin, 0, 0, NGROUP,
-            )
-
-        # Gas solver
-        curr_ice, curr_liq = totalcondensate(
-            pc, rmass[:, None] * jnp.ones((1, NGROUP), dtype=DTYPE),
-            jnp.array([0]), is_ice_arr, igrowgas_arr, NBIN, NGROUP, NGAS, iz,
-        )
-
-        rlprod = DTYPE(0.0)
-        gc, rlprod, rc = gsolve(
-            gc, rlprod, prev_ice, prev_liq, curr_ice, curr_liq,
-            rlhe, rlhm, rhoa, dtime, iz, NGAS,
-            jnp.array([0.0]), DTYPE(1.0),
-        )
-
-        # Temperature solver
-        rlheat = jnp.zeros(NZ, dtype=DTYPE)
-        partheat = jnp.zeros(NZ, dtype=DTYPE)
-        t, rlheat, partheat, rc = tsolve(
-            t, rlheat, partheat, rlprod, DTYPE(0.0), dtime, iz, DTYPE(0.0), DTYPE(1.0),
-        )
-
-        # Store results
         time = (istep + 1) * dtime
         mmr_bins = np.array(pc[0, :, 0]) / float(zmet[0]) * rmass_np / float(rhoa[0])
         results["times"].append(time)
         results["t_change"].append(float(t[0]) - t_orig)
-        results["rlheat_val"].append(float(rlheat[0]))
+        results["rlheat_val"].append(rlheat_val)
         results["mmr_bins"].append(mmr_bins)
         results["gas_mmr"].append(float(gc[0, 0] / rhoa[0]))
+        if istep < 5 or istep % 10 == 0:
+            print(f"  Step {istep+1}/{nstep}: dT={float(t[0])-t_orig:.4e}K, substeps={nsub}", flush=True)
 
     results["times"] = np.array(results["times"])
     results["t_change"] = np.array(results["t_change"])
