@@ -359,6 +359,94 @@ def main():
     fig.savefig(outdir / "growtest_comparison.png", dpi=150)
     plt.close(fig)
 
+    # --- Figure 2: Size distribution evolution ---
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    step_indices = [0, 2, 5, 10, 25, 50]
+    step_labels = ["t=0s", "t=200s", "t=500s", "t=1000s", "t=2500s", "t=5000s"]
+
+    for ax, si, label in zip(axes.flat, step_indices, step_labels):
+        if si < nsteps:
+            f_mmr = fortran["mmr"][si]
+            j_mmr = jax_data["mmr_bins"][si]
+            ax.semilogy(r_um, f_mmr, "ko-", ms=4, lw=1.5, label="Fortran")
+            ax.semilogy(jax_data["radii"] * 1e4, j_mmr, "r^--", ms=4, lw=1.5, label="JAX")
+            ax.set_xlabel("Radius [um]")
+            ax.set_ylabel("MMR [g/g]")
+            ax.set_title(label)
+            ax.set_ylim(bottom=1e-20, top=1e-7)
+            ax.legend(fontsize=8)
+            ax.grid(True, alpha=0.3)
+
+    fig.suptitle("Size Distribution Evolution: Fortran vs JAX", fontsize=14)
+    fig.tight_layout()
+    fig.savefig(outdir / "growtest_size_evolution.png", dpi=150)
+    plt.close(fig)
+
+    # --- Figure 3: Per-bin time evolution for selected bins ---
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    selected_bins = [0, 3, 6, 9, 12, 15]
+
+    for ax, ib in zip(axes.flat, selected_bins):
+        if ib < fortran["nbin"]:
+            f_bin = fortran["mmr"][:nsteps, ib]
+            j_bin = jax_data["mmr_bins"][:nsteps, ib]
+            ax.plot(fortran["times"][:nsteps], f_bin, "k-", lw=2, label="Fortran")
+            ax.plot(jax_data["times"][:nsteps], j_bin, "r--", lw=2, label="JAX")
+            ax.set_xlabel("Time [s]")
+            ax.set_ylabel("MMR [g/g]")
+            ax.set_title(f"Bin {ib+1} (r={r_um[ib]:.1f} um)")
+            ax.set_yscale("symlog", linthresh=1e-15)
+            ax.legend(fontsize=8)
+            ax.grid(True, alpha=0.3)
+
+    fig.suptitle("Per-Bin MMR Time Evolution", fontsize=14)
+    fig.tight_layout()
+    fig.savefig(outdir / "growtest_perbin_evolution.png", dpi=150)
+    plt.close(fig)
+
+    # --- Figure 4: Supersaturation and ice saturation ratio ---
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+    # Ice saturation ratio from Fortran (satice from gas output)
+    f_satice = [fortran["gas"][i][2] for i in range(nsteps)]
+    ax = axes[0]
+    ax.plot(fortran["times"][:nsteps], f_satice, "ko-", ms=3, label="Fortran satice")
+    ax.set_xlabel("Time [s]")
+    ax.set_ylabel("Ice saturation ratio")
+    ax.set_title("Ice Saturation Ratio (Fortran)")
+    ax.axhline(1.0, color="gray", ls=":", lw=1)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # Peak bin position over time
+    ax = axes[1]
+    f_peak = [np.argmax(fortran["mmr"][i]) + 1 for i in range(nsteps)]
+    j_peak = [np.argmax(jax_data["mmr_bins"][i]) + 1 for i in range(nsteps)]
+    ax.plot(fortran["times"][:nsteps], f_peak, "ko-", ms=3, label="Fortran")
+    ax.plot(jax_data["times"][:nsteps], j_peak, "r^--", ms=3, label="JAX")
+    ax.set_xlabel("Time [s]")
+    ax.set_ylabel("Peak bin index")
+    ax.set_title("Peak Bin Position Over Time")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # Total particle mass (mmr) over time
+    ax = axes[2]
+    f_pmass = [fortran["mmr"][i].sum() for i in range(nsteps)]
+    j_pmass = jax_data["mmr_bins"][:nsteps].sum(axis=1)
+    ax.plot(fortran["times"][:nsteps], f_pmass, "ko-", ms=3, label="Fortran")
+    ax.plot(jax_data["times"][:nsteps], j_pmass, "r^--", ms=3, label="JAX")
+    ax.set_xlabel("Time [s]")
+    ax.set_ylabel("Total particle MMR [g/g]")
+    ax.set_title("Total Particle Mass Over Time")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    fig.suptitle("Growth Diagnostics", fontsize=14)
+    fig.tight_layout()
+    fig.savefig(outdir / "growtest_diagnostics.png", dpi=150)
+    plt.close(fig)
+
     # Summary
     print("\n" + "=" * 60)
     print("GROWTEST VALIDATION SUMMARY")
