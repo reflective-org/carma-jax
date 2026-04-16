@@ -23,7 +23,7 @@ from carma.setup_gkern import setup_gkern
 from carma.setup_vf import setup_vf
 from carma.vapor_pressure import vaporp_h2o_murphy2005
 from carma.supersaturation import supersat
-from carma.newstate_calc import newstate_calc_growth
+from carma.microfast_growth import make_microfast_growth
 from carma.enums import GridType
 
 SCRIPT_DIR = Path(__file__).parent
@@ -94,7 +94,7 @@ def run_fortran(T, p_pa, gas_mmr, N0):
 
 def run_jax(T_val, p_pa_val, gas_mmr_val, N0_val,
             r, rmass, vol, dr, dm, rup, rlow, rmassup,
-            pratt, prat, pden1, palr, gwtmol_arr):
+            pratt, prat, pden1, palr, gwtmol_arr, growth_step):
     t = jnp.array([DTYPE(T_val)])
     p_cgs = jnp.array([DTYPE(p_pa_val) * RPA2CGS])
     zc = jnp.array([DTYPE(17000.0) * RM2CGS])
@@ -129,17 +129,11 @@ def run_jax(T_val, p_pa_val, gas_mmr_val, N0_val,
 
     t0 = timer.time()
     for istep in range(NSTEP):
-        pc, gc, t, _, _ = newstate_calc_growth(
-            pc, gc, t, 0, DTIME,
-            rhoa, zmet, rlhe, rlhm, diffus,
-            akelvin, akelvini, gro, gro1, gro2,
-            rup_wet, rmass_2d, dm_2d, rlow_wet,
-            pratt, prat, pden1, palr,
-            jnp.array([True]), jnp.array([0]), jnp.array([0]),
-            jnp.array([0]), gwtmol_arr,
-            NBIN, NGROUP, NGAS, NELEM,
-            minsubsteps=1, maxsubsteps=1, maxretries=0,
-        )
+        pc, gc, t, _ = growth_step(
+            pc, gc, t, 0, rhoa, zmet, rlhe, rlhm,
+            akelvin, akelvini, gro, gro1,
+            rup_wet, rmass_2d, dm_2d, pratt, prat, pden1, palr, DTYPE(DTIME))
+    jax.block_until_ready(pc)
     t1 = timer.time()
 
     rmass_np = np.array(rmass)
@@ -152,7 +146,7 @@ def run_jax(T_val, p_pa_val, gas_mmr_val, N0_val,
 
 def main():
     np.random.seed(42)
-    n_scenarios = 100
+    n_scenarios = 1000
 
     r, rmass, vol, dr, dm, rup, rlow, rmassup = setup_bins(RMIN_CM, RMRAT, NBIN, RHO_P)
 
@@ -183,6 +177,29 @@ def main():
 
     gwtmol_arr = jnp.array([float(WTMOL_H2O)])
 
+    # Build JIT-compiled growth step
+    print("Building JIT growth step...", flush=True)
+    growth_step = make_microfast_growth(NBIN, NELEM, NGROUP, NGAS, float(WTMOL_H2O), True)
+
+    # Warmup JIT
+    pc_w = jnp.full((NZ, NBIN, NELEM), SMALL_PC, dtype=DTYPE).at[0, 0, 0].set(0.1)
+    gc_w = jnp.array([[3.5e-6 * 1.65e-4]])  # rough rhoa
+    t_w = jnp.array([190.0])
+    rhoa_w = jnp.array([1.65e-4])
+    zmet_w = jnp.ones(1, dtype=DTYPE)
+    rlhe_w = jnp.array([[2.5e10]])
+    rlhm_w = jnp.array([[3.34e9]])
+    ak_w = jnp.array([[2.6e-7]])
+    gro_w = jnp.ones((1, NBIN, 1), dtype=DTYPE) * 1e-12
+    gro1_w = jnp.ones((1, NBIN, 1), dtype=DTYPE) * 3e9
+    rup_w = jnp.broadcast_to(rup[None, :, None], (1, NBIN, 1))
+    rmass_2d_w = rmass[:, None] * jnp.ones((1, 1), dtype=DTYPE)
+    dm_2d_w = dm[:, None] * jnp.ones((1, 1), dtype=DTYPE)
+    _ = growth_step(pc_w, gc_w, t_w, 0, rhoa_w, zmet_w, rlhe_w, rlhm_w,
+                    ak_w, ak_w, gro_w, gro1_w, rup_w, rmass_2d_w, dm_2d_w,
+                    pratt, prat, pden1, palr, DTYPE(100.0))
+    print("Done.", flush=True)
+
     # Random scenarios
     T_arr = np.random.uniform(185, 210, n_scenarios)    # TTL range
     p_arr = np.random.uniform(7000, 12000, n_scenarios)  # 70-120 hPa
@@ -209,7 +226,7 @@ def main():
         j_dT, j_mmr, j_gas, j_elapsed = run_jax(
             T, p_pa, gas_mmr, N0,
             r, rmass, vol, dr, dm, rup, rlow, rmassup,
-            pratt, prat, pden1, palr, gwtmol_arr,
+            pratt, prat, pden1, palr, gwtmol_arr, growth_step,
         )
         jax_total += j_elapsed
 
