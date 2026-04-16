@@ -14,6 +14,7 @@ from carma.vapor_pressure import vaporp_h2o_murphy2005
 from carma.supersaturation import supersat
 from carma.growth.growevapl import growevapl
 from carma.growth.growp import growp
+from carma.growth.evapp import evapp, downgevapply
 from carma.solvers.psolve import psolve
 from carma.solvers.gsolve import gsolve
 from carma.solvers.tsolve import tsolve
@@ -73,9 +74,9 @@ def microfast_growth(pc, gc, t, iz, dtime,
         dtime, iz, nbin, ngroup,
     )
 
-    # Growth production and solve per bin
+    # Growth production and solve per bin (step 1: growth only via psolve)
     growpe = jnp.zeros((nbin, nelem), dtype=DTYPE)
-    evappe = jnp.zeros((nbin, nelem), dtype=DTYPE)
+    evappe_psolve = jnp.zeros((nbin, nelem), dtype=DTYPE)  # zero for psolve (evap applied separately)
     rnucpe = jnp.zeros((nbin, nelem), dtype=DTYPE)
     rhompe = jnp.zeros((nbin, nelem), dtype=DTYPE)
     rnuclg = jnp.zeros((nbin, ngroup, ngroup), dtype=DTYPE)
@@ -87,9 +88,21 @@ def microfast_growth(pc, gc, t, iz, dtime,
             igrow = int(igrowgas_arr[ielem])
             growpe = growp(pc, growpe, growlg, pconmax, iz, ibin, ielem, ig, igrow)
             pc, pc_nucl = psolve(
-                pc, pc_nucl, growpe, evappe, rnucpe, rhompe,
+                pc, pc_nucl, growpe, evappe_psolve, rnucpe, rhompe,
                 growlg, evaplg, rnuclg, dtime, iz, ibin, ielem, ig, ngroup,
             )
+
+    # Step 2: Evaporation production (particles shrinking from bin i to bin i-1)
+    evappe = jnp.zeros((nbin, nelem), dtype=DTYPE)
+    itype_arr = jnp.array([2])  # I_VOLATILE = 2 for growtest
+    evappe = evapp(
+        pc, evappe, evaplg, pconmax, ienconc_arr, itype_arr,
+        iz, nbin, ngroup, nelem,
+    )
+
+    # Step 3: Apply evaporation production
+    rnucpe_zero = jnp.zeros((nbin, nelem), dtype=DTYPE)
+    pc = downgevapply(pc, evappe, rnucpe_zero, dtime, iz, nbin, nelem)
 
     # Gas solver
     curr_ice, curr_liq = totalcondensate(
