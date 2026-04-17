@@ -317,166 +317,198 @@ def main():
         mmr0[2, ibin] = float(pc[0, ibin, 2]) / float(rhoa[0])  # core mass element
     history["mmr_elem"].append(mmr0)
 
+    # --- Substepping parameters ---
+    MAX_SUBSTEPS = 256
+    MAX_RETRIES = 8
+
     for istep in range(NSTEP):
-        # --- 1. Atmospheric setup (recompute T-dependent quantities) ---
-        rmu_step = rmu  # Could recompute from T, but small changes
-        thcond_step = thcond
+        # Save state for retry
+        pc_saved = pc
+        gc_saved = gc
+        t_saved = t
+        ssi_saved = supsati_old
 
-        # --- 2. Growth setup (T-dependent) ---
-        diffus, rlhe, rlhm = setup_grow(
-            t, p_cgs, rhoa, zmet, igash2o=0, igash2so4=-1,
-            ngas=NGAS, do_cnst_rlh=False,
-        )
+        # --- Estimate substeps from physical CFL (Fortran nsubsteps approach) ---
+        # Compute dmdt at each ice bin boundary, set nsub = ceil(max_cfl)
+        ntsubsteps = 1
 
-        # --- 3. Growth kernels (T-dependent, both groups) ---
-        rrat = jnp.ones((NBIN, NGROUP), dtype=DTYPE)
-        eshape_arr = jnp.array([1.0, 3.0])  # sulfate=sphere, ice=aspect 3
-
-        surfctwa, akelvin, akelvini, gro, gro1, gro2, ft_arr, thcondnc = setup_gkern(
-            t, p_cgs, rhoa, zmet, rmu_step, thcond_step, diffus, rlhe, rlhm,
-            re, r_wet, rlow_wet, rrat, eshape_arr, is_ice_arr,
-            gwtmol_arr, igrowgas_arr, 1.0, 1.0, 1.0,  # gstickl, gsticki, tstick
-            NBIN, NGROUP, NGAS,
-        )
-
-        # --- 4. Vapor pressure and supersaturation ---
-        pvapl, pvapi = vaporp_h2o_murphy2005(t)
-        pvapl_2d = pvapl[None, :]  # (1, NZ) → need (NZ, NGAS)
-        pvapi_2d = pvapi[None, :]
-        # Reshape to (NZ, NGAS)
-        pvapl_2d = jnp.broadcast_to(pvapl[:, None], (NZ, NGAS))
-        pvapi_2d = jnp.broadcast_to(pvapi[:, None], (NZ, NGAS))
-
-        ssl, ssi = supersat(t, gc[:, 0], pvapl_2d[:, 0], pvapi_2d[:, 0],
-                            float(WTMOL_H2O), zmet)
-
-        # Store supersaturation for output
-        supsatl_2d = jnp.broadcast_to(ssl[:, None], (NZ, NGAS))
-        supsati_2d = jnp.broadcast_to(ssi[:, None], (NZ, NGAS))
-
-        # --- 5. Compute pconmax ---
-        pconmax = jnp.zeros((NZ, NGROUP), dtype=DTYPE)
+        # Recompute growth kernels for estimation
+        diffus_e, rlhe_e, rlhm_e = setup_grow(t, p_cgs, rhoa, zmet, 0, -1, NGAS, False)
+        _, akelvin_e, akelvini_e, gro_e, gro1_e, _, _, _ = setup_gkern(
+            t, p_cgs, rhoa, zmet, rmu, thcond, diffus_e, rlhe_e, rlhm_e,
+            re, r_wet, rlow_wet, jnp.ones((NBIN, NGROUP), dtype=DTYPE),
+            jnp.array([1.0, 3.0]), is_ice_arr, gwtmol_arr, igrowgas_arr,
+            1.0, 1.0, 1.0, NBIN, NGROUP, NGAS)
+        pvapl_e, pvapi_e = vaporp_h2o_murphy2005(t)
+        _, ssi_e = supersat(t, gc[:, 0], pvapl_e, pvapi_e, float(WTMOL_H2O), zmet)
+        pconmax_e = jnp.zeros((NZ, NGROUP), dtype=DTYPE)
         for ig in range(NGROUP):
             ie = int(ienconc_arr[ig])
-            pconmax = pconmax.at[:, ig].set(
-                jnp.max(pc[:, :, ie], axis=1) / zmet
-            )
+            pconmax_e = pconmax_e.at[:, ig].set(jnp.max(pc[:, :, ie], axis=1) / zmet)
 
-        # --- 6. Nucleation rates (Koop + Murray) ---
-        rnuclg = jnp.zeros((NBIN, NGROUP, NGROUP), dtype=DTYPE)
+        if float(pconmax_e[0, 1]) > float(FEW_PC):
+            max_cfl = 0.0
+            ig_ice = 1
+            for ibin in range(NBIN - 1):
+                g0 = float(gro_e[0, ibin + 1, ig_ice])
+                g1 = float(gro1_e[0, ibin + 1, ig_ice])
+                if g0 > 0:
+                    pvap_i = float(pvapi_e[0])
+                    ss_i = float(ssi_e[0])
+                    r_bnd = float(rup_wet[0, ibin, ig_ice])
+                    akelv = float(akelvini_e[0, 0])
+                    expon = min(akelv / max(r_bnd, 1e-30), 700.0)
+                    akas = np.exp(expon)
+                    dmdt_val = abs(pvap_i * (ss_i + 1.0 - akas) * g0 / (1 + g0 * g1 * pvap_i))
+                    dm_val = float(dm_2d[ibin, ig_ice])
+                    if dm_val > 0:
+                        max_cfl = max(max_cfl, dmdt_val * DTIME / dm_val)
+            if max_cfl > 1.0:
+                ntsubsteps = min(MAX_SUBSTEPS, int(np.ceil(max_cfl)) * 2)
 
-        # Koop freezing: sulfate → ice
-        rnuclg_koop = freezaerl_koop2000(
-            t[0], p_cgs[0], ssi[0], ssl[0],
-            akelvin[0, 0],
-            r1, vol1, DTYPE(1.78),
-            pconmax[0, 0],
-            NBIN,
-        )
+        # Also check Fortran Condition 3: freezing at cold T with high SSi
+        if float(ssi_e[0]) > 0.4 and float(t[0]) < 233.0:
+            ntsubsteps = max(ntsubsteps, 128)
 
-        # Murray freezing
-        rnuclg_murray = freezglaerl_murray2010(
-            t[0], ssi[0], supsati_old,
-            pconmax[0, 0],
-            DTIME, NBIN,
-        )
+        # --- Run substeps ---
+        nretries = 0
+        converged = False
 
-        supsati_old = ssi[0]
+        while not converged:
+            # Reset to saved state
+            pc = pc_saved
+            gc = gc_saved
+            t = t_saved
+            supsati_old_sub = ssi_saved
 
-        # Set rnuclg: loss rate from group 0 (sulfate) to group 1 (ice)
-        total_nuc_rate = rnuclg_koop + rnuclg_murray
-        rnuclg = rnuclg.at[:, 0, 1].set(total_nuc_rate)
+            dt_sub = DTIME / ntsubsteps
 
-        # --- 7. Save condensate before growth ---
-        prev_ice, prev_liq = totalcondensate(
-            pc, rmass_2d, igroup_arr, is_ice_arr, igrowgas_arr,
-            NBIN, NGROUP, NGAS, iz,
-        )
+            # Record initial supersaturation for convergence check
+            pvapl_0, pvapi_0 = vaporp_h2o_murphy2005(t)
+            ssl_0, ssi_0 = supersat(t, gc[:, 0], pvapl_0, pvapi_0, float(WTMOL_H2O), zmet)
+            ssi_start = float(ssi_0[0])
 
-        # --- 8. Growth/evaporation loss rates (PPM) ---
-        growlg = jnp.zeros((NBIN, NGROUP), dtype=DTYPE)
-        evaplg = jnp.zeros((NBIN, NGROUP), dtype=DTYPE)
-
-        growlg, evaplg = growevapl(
-            pc, growlg, evaplg,
-            supsatl_2d, supsati_2d, pvapl_2d, pvapi_2d,
-            akelvin, akelvini, gro, gro1,
-            rup_wet, rmass_2d, dm_2d, pconmax,
-            pratt, prat, pden1, palr,
-            is_ice_arr, igrowgas_arr, ienconc_arr,
-            DTIME, iz, NBIN, NGROUP,
-        )
-
-        # --- 9. Growth + nucleation + psolve per element per bin ---
-        growpe_arr = jnp.zeros((NBIN, NELEM), dtype=DTYPE)
-        evappe_arr = jnp.zeros((NBIN, NELEM), dtype=DTYPE)
-        rnucpe_arr = jnp.zeros((NBIN, NELEM), dtype=DTYPE)
-        rhompe_arr = jnp.zeros((NBIN, NELEM), dtype=DTYPE)
-        pc_nucl = jnp.zeros_like(pc)
-
-        for ielem in range(NELEM):
-            ig = int(igroup_arr[ielem])
-            # Use GROUP-level growth gas (from number concentration element),
-            # not per-element growth gas. All elements in a growing group
-            # participate in growth (volatile + core move together).
-            iepart = int(ienconc_arr[ig])
-            igrow = int(igrowgas_arr[iepart])
-
-            for ibin in range(NBIN):
-                # Growth production (from bin i-1 growing into bin i)
-                growpe_arr = growp(pc, growpe_arr, growlg, pconmax, iz, ibin, ielem, ig, igrow)
-
-                # Nucleation production (from other groups nucleating into this bin)
-                rnucpe_arr = upgxfer(
-                    rnucpe_arr, rnuclg, pc, rmass_2d, pconmax,
-                    ielem, ibin, iz,
-                    nuc_tables['nnucelem'], nuc_tables['inucelem'],
-                    nuc_tables['nnucbin'], nuc_tables['inucbin'],
-                    igroup_arr, itype_arr, NBIN, NGROUP,
+            for isub in range(ntsubsteps):
+                # --- Recompute T-dependent quantities each substep ---
+                diffus, rlhe, rlhm = setup_grow(
+                    t, p_cgs, rhoa, zmet, igash2o=0, igash2so4=-1,
+                    ngas=NGAS, do_cnst_rlh=False,
                 )
 
-                # Solve for new particle concentration
-                pc, pc_nucl = psolve(
-                    pc, pc_nucl, growpe_arr, evappe_arr, rnucpe_arr, rhompe_arr,
-                    growlg, evaplg, rnuclg, DTIME, iz, ibin, ielem, ig, NGROUP,
+                rrat = jnp.ones((NBIN, NGROUP), dtype=DTYPE)
+                eshape_arr = jnp.array([1.0, 3.0])
+                surfctwa, akelvin, akelvini, gro, gro1, gro2, ft_arr, thcondnc = setup_gkern(
+                    t, p_cgs, rhoa, zmet, rmu, thcond, diffus, rlhe, rlhm,
+                    re, r_wet, rlow_wet, rrat, eshape_arr, is_ice_arr,
+                    gwtmol_arr, igrowgas_arr, 1.0, 1.0, 1.0,
+                    NBIN, NGROUP, NGAS,
                 )
 
-        # --- 10. Evaporation production ---
-        evappe_arr = jnp.zeros((NBIN, NELEM), dtype=DTYPE)
-        evappe_arr = evapp(
-            pc, evappe_arr, evaplg, pconmax, ienconc_arr, itype_arr,
-            igroup_arr, iz, NBIN, NGROUP, NELEM,
-        )
+                pvapl, pvapi = vaporp_h2o_murphy2005(t)
+                pvapl_2d = jnp.broadcast_to(pvapl[:, None], (NZ, NGAS))
+                pvapi_2d = jnp.broadcast_to(pvapi[:, None], (NZ, NGAS))
+                ssl, ssi = supersat(t, gc[:, 0], pvapl_2d[:, 0], pvapi_2d[:, 0],
+                                    float(WTMOL_H2O), zmet)
+                supsatl_2d = jnp.broadcast_to(ssl[:, None], (NZ, NGAS))
+                supsati_2d = jnp.broadcast_to(ssi[:, None], (NZ, NGAS))
 
-        # Apply evaporation
-        rnucpe_zero = jnp.zeros((NBIN, NELEM), dtype=DTYPE)
-        pc = downgevapply(pc, evappe_arr, rnucpe_zero, DTIME, iz, NBIN, NELEM)
+                pconmax = jnp.zeros((NZ, NGROUP), dtype=DTYPE)
+                for ig in range(NGROUP):
+                    ie = int(ienconc_arr[ig])
+                    pconmax = pconmax.at[:, ig].set(
+                        jnp.max(pc[:, :, ie], axis=1) / zmet)
 
-        # --- 11. Gas solver (mass conservation) ---
-        curr_ice, curr_liq = totalcondensate(
-            pc, rmass_2d, igroup_arr, is_ice_arr, igrowgas_arr,
-            NBIN, NGROUP, NGAS, iz,
-        )
+                # Nucleation rates (scale Murray by substep fraction)
+                rnuclg_koop = freezaerl_koop2000(
+                    t[0], p_cgs[0], ssi[0], ssl[0], akelvin[0, 0],
+                    r1, vol1, DTYPE(1.78), pconmax[0, 0], NBIN)
+                rnuclg_murray = freezglaerl_murray2010(
+                    t[0], ssi[0], supsati_old_sub, pconmax[0, 0], dt_sub, NBIN)
+                supsati_old_sub = ssi[0]
+                rnuclg = jnp.zeros((NBIN, NGROUP, NGROUP), dtype=DTYPE)
+                rnuclg = rnuclg.at[:, 0, 1].set(rnuclg_koop + rnuclg_murray)
 
-        rlprod = DTYPE(0.0)
-        for igas in range(NGAS):
-            gasprod = (
-                (prev_ice[igas] - curr_ice[igas])
-                + (prev_liq[igas] - curr_liq[igas])
-            ) / DTIME
+                # Save condensate
+                prev_ice, prev_liq = totalcondensate(
+                    pc, rmass_2d, igroup_arr, is_ice_arr, igrowgas_arr,
+                    NBIN, NGROUP, NGAS, iz)
 
-            ice_change = prev_ice[igas] - curr_ice[igas]
-            liq_change = prev_liq[igas] - curr_liq[igas]
-            rlprod = rlprod - (
-                ice_change * (rlhe[iz, igas] + rlhm[iz, igas])
-                + liq_change * rlhe[iz, igas]
-            ) / (CP * rhoa[iz] * DTIME)
+                # growevapl with substep dt
+                growlg = jnp.zeros((NBIN, NGROUP), dtype=DTYPE)
+                evaplg = jnp.zeros((NBIN, NGROUP), dtype=DTYPE)
+                growlg, evaplg = growevapl(
+                    pc, growlg, evaplg,
+                    supsatl_2d, supsati_2d, pvapl_2d, pvapi_2d,
+                    akelvin, akelvini, gro, gro1,
+                    rup_wet, rmass_2d, dm_2d, pconmax,
+                    pratt, prat, pden1, palr,
+                    is_ice_arr, igrowgas_arr, ienconc_arr,
+                    dt_sub, iz, NBIN, NGROUP,
+                )
 
-            gc = gc.at[iz, igas].add(DTIME * gasprod)
+                # growp + upgxfer + psolve
+                growpe_arr = jnp.zeros((NBIN, NELEM), dtype=DTYPE)
+                evappe_arr = jnp.zeros((NBIN, NELEM), dtype=DTYPE)
+                rnucpe_arr = jnp.zeros((NBIN, NELEM), dtype=DTYPE)
+                rhompe_arr = jnp.zeros((NBIN, NELEM), dtype=DTYPE)
+                pc_nucl = jnp.zeros_like(pc)
 
-        # --- 12. Temperature solver ---
-        dt_val = DTIME * rlprod
-        t = t.at[iz].add(dt_val)
+                for ielem in range(NELEM):
+                    ig = int(igroup_arr[ielem])
+                    iepart = int(ienconc_arr[ig])
+                    igrow = int(igrowgas_arr[iepart])
+                    for ibin in range(NBIN):
+                        growpe_arr = growp(pc, growpe_arr, growlg, pconmax,
+                                          iz, ibin, ielem, ig, igrow)
+                        rnucpe_arr = upgxfer(
+                            rnucpe_arr, rnuclg, pc, rmass_2d, pconmax,
+                            ielem, ibin, iz,
+                            nuc_tables['nnucelem'], nuc_tables['inucelem'],
+                            nuc_tables['nnucbin'], nuc_tables['inucbin'],
+                            igroup_arr, itype_arr, NBIN, NGROUP)
+                        pc, pc_nucl = psolve(
+                            pc, pc_nucl, growpe_arr, evappe_arr, rnucpe_arr, rhompe_arr,
+                            growlg, evaplg, rnuclg, dt_sub, iz, ibin, ielem, ig, NGROUP)
+
+                # evapp + downgevapply
+                evappe_arr = jnp.zeros((NBIN, NELEM), dtype=DTYPE)
+                evappe_arr = evapp(
+                    pc, evappe_arr, evaplg, pconmax, ienconc_arr, itype_arr,
+                    igroup_arr, iz, NBIN, NGROUP, NELEM)
+                pc = downgevapply(pc, evappe_arr, jnp.zeros((NBIN, NELEM), dtype=DTYPE),
+                                  dt_sub, iz, NBIN, NELEM)
+
+                # gsolve
+                curr_ice, curr_liq = totalcondensate(
+                    pc, rmass_2d, igroup_arr, is_ice_arr, igrowgas_arr,
+                    NBIN, NGROUP, NGAS, iz)
+                for igas in range(NGAS):
+                    gasprod = ((prev_ice[igas] - curr_ice[igas])
+                               + (prev_liq[igas] - curr_liq[igas])) / dt_sub
+                    ice_change = prev_ice[igas] - curr_ice[igas]
+                    liq_change = prev_liq[igas] - curr_liq[igas]
+                    gc = gc.at[iz, igas].add(dt_sub * gasprod)
+
+                # tsolve
+                rlprod = -(ice_change * (rlhe[iz, 0] + rlhm[iz, 0])
+                           + liq_change * rlhe[iz, 0]) / (CP * rhoa[iz] * dt_sub)
+                t = t.at[iz].add(dt_sub * rlprod)
+            # --- Convergence check: supersaturation sign change ---
+            pvapl_f, pvapi_f = vaporp_h2o_murphy2005(t)
+            ssl_f, ssi_f = supersat(t, gc[:, 0], pvapl_f, pvapi_f, float(WTMOL_H2O), zmet)
+            ssi_end = float(ssi_f[0])
+
+            sign_changed = (ssi_start * ssi_end) < 0
+            large_change = abs(ssi_end) > 0.05
+
+            if sign_changed and large_change and ntsubsteps < MAX_SUBSTEPS and nretries < MAX_RETRIES:
+                ntsubsteps = min(ntsubsteps * 2, MAX_SUBSTEPS)
+                nretries += 1
+            else:
+                converged = True
+
+        # Update supsati_old for Murray (use end-of-step value)
+        supsati_old = ssi_f[0]
 
         # --- Store history ---
         history["times"].append(float(istep + 1) * DTIME)
@@ -498,7 +530,8 @@ def main():
             gas_ppm = float(gc[0, 0] / rhoa[0]) * 1e6
             print(f"  Step {istep+1:3d}: T={float(t[0]):.2f}K, "
                   f"sulfate_N={sulfate_N:.1f}, ice_N={ice_N:.2e}, "
-                  f"gas={gas_ppm:.1f}ppm, ssi={float(ssi[0]):.3f}",
+                  f"gas={gas_ppm:.1f}ppm, ssi={float(ssi[0]):.3f}, "
+                  f"nsub={ntsubsteps}",
                   flush=True)
 
     # ======================== COMPARE WITH FORTRAN ========================
