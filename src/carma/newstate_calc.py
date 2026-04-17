@@ -97,7 +97,7 @@ def microfast_growth(pc, gc, t, iz, dtime,
     itype_arr = jnp.array([2])  # I_VOLATILE = 2 for growtest
     evappe = evapp(
         pc, evappe, evaplg, pconmax, ienconc_arr, itype_arr,
-        iz, nbin, ngroup, nelem,
+        igroup_arr, iz, nbin, ngroup, nelem,
     )
 
     # Step 3: Apply evaporation production

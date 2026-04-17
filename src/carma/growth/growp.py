@@ -17,6 +17,12 @@ def growp(pc, growpe, growlg, pconmax, iz, ibin, ielem, igroup, igrowgas):
     Growth production = concentration in bin i-1 × loss rate from bin i-1.
     Particles grow from smaller to larger bins.
 
+    All elements in a growing group participate in growth, not just the
+    volatile element. When particles grow from bin i-1 to bin i, ALL
+    element masses move together (volatile, core, etc.). The igrowgas
+    parameter should be the group-level growth gas (from the number
+    concentration element), NOT the per-element growth gas.
+
     Args:
         pc: Particle concentrations (NZ, NBIN, NELEM).
         growpe: Growth production array (NBIN, NELEM) to update.
@@ -26,12 +32,13 @@ def growp(pc, growpe, growlg, pconmax, iz, ibin, ielem, igroup, igrowgas):
         ibin: Target bin index (0-based).
         ielem: Element index.
         igroup: Group index.
-        igrowgas: Growth gas index for this element (-1 if none).
+        igrowgas: Growth gas index for the GROUP's number concentration
+            element (-1 if the group doesn't grow).
 
     Returns:
         Updated growpe array (NBIN, NELEM).
     """
-    # Only if this element has a growth gas and not the first bin
+    # Only if this group grows (checked via number conc element) and not first bin
     if igrowgas < 0 or ibin == 0:
         return growpe
 

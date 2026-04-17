@@ -81,7 +81,9 @@ def microfast_step(pc, gc, t, iz, dtime,
     # Growth production + nucleation production + solve (per elem, per bin)
     for ielem in range(nelem):
         ig = int(igroup_arr[ielem])
-        igrow = int(igrowgas_arr[ielem])
+        # Use group-level growth gas (all elements in a growing group participate)
+        iepart = int(ienconc_arr[ig])
+        igrow = int(igrowgas_arr[iepart])
         for ibin in range(nbin):
             # Growth production (from bin i-1 growing into bin i)
             growpe_arr = growp(pc, growpe_arr, growlg, pconmax, iz, ibin, ielem, ig, igrow)
@@ -104,7 +106,7 @@ def microfast_step(pc, gc, t, iz, dtime,
     evappe_arr = jnp.zeros((nbin, nelem), dtype=DTYPE)
     evappe_arr = evapp(
         pc, evappe_arr, evaplg, pconmax, ienconc_arr, itype_arr,
-        iz, nbin, ngroup, nelem,
+        igroup_arr, iz, nbin, ngroup, nelem,
     )
 
     # Apply evaporation
