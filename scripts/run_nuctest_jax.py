@@ -419,9 +419,12 @@ def main():
                         jnp.max(pc[:, :, ie], axis=1) / zmet)
 
                 # Nucleation rates (scale Murray by substep fraction)
+                # rhosol = H2SO4 SOLUTE density (1.38), NOT sulfate particle
+                # density (1.78). The Fortran uses rhosol(isol) for volrat in
+                # freezaerl_koop2000.F90.
                 rnuclg_koop = freezaerl_koop2000(
                     t[0], p_cgs[0], ssi[0], ssl[0], akelvin[0, 0],
-                    r1, vol1, DTYPE(1.78), pconmax[0, 0], NBIN)
+                    r1, vol1, DTYPE(1.38), pconmax[0, 0], NBIN)
                 rnuclg_murray = freezglaerl_murray2010(
                     t[0], ssi[0], supsati_old_sub, pconmax[0, 0], dt_sub, NBIN)
                 supsati_old_sub = ssi[0]

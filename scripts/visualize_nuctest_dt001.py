@@ -129,7 +129,7 @@ def run_with_small_dt(dt=0.01, total_time=100.0):
             ie = int(ienconc_arr[ig])
             pconmax = pconmax.at[:, ig].set(jnp.max(pc[:, :, ie], axis=1) / zmet)
 
-        rk = freezaerl_koop2000(t[0], p_cgs[0], ssi[0], ssl[0], ak[0, 0], r1, vol1, DTYPE(1.78), pconmax[0, 0], NBIN)
+        rk = freezaerl_koop2000(t[0], p_cgs[0], ssi[0], ssl[0], ak[0, 0], r1, vol1, DTYPE(1.38), pconmax[0, 0], NBIN)  # H2SO4 solute density
         rm = freezglaerl_murray2010(t[0], ssi[0], supsati_old, pconmax[0, 0], dt, NBIN)
         supsati_old = ssi[0]
         rnuclg = jnp.zeros((NBIN, NGROUP, NGROUP), dtype=DTYPE).at[:, 0, 1].set(rk + rm)

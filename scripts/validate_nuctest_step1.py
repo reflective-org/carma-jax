@@ -190,7 +190,7 @@ def main():
     # Nucleation rates
     rnuclg_koop = freezaerl_koop2000(
         t[0], p_cgs[0], ssi[0], ssl[0], akelvin[0, 0],
-        r1, vol1, DTYPE(1.78), pconmax[0, 0], NBIN)
+        r1, vol1, DTYPE(1.38), pconmax[0, 0], NBIN)  # H2SO4 solute density
     rnuclg_murray = freezglaerl_murray2010(
         t[0], ssi[0], DTYPE(0.0), pconmax[0, 0], DTIME, NBIN)
     rnuclg = jnp.zeros((NBIN, NGROUP, NGROUP), dtype=DTYPE)
