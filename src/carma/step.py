@@ -71,6 +71,53 @@ def step_transport(
     return pc, gc, t, pcl, gcl, pconmax, sedflux
 
 
+def make_step_transport(config):
+    """Build a JIT'd transport-only step from a CarmaConfig.
+
+    Pre-binds element metadata + static shape / boundary-condition args.
+    Returned closure accepts only the per-timestep state arrays.
+
+    Usage:
+        step_transport = make_step_transport(config)
+        for istep in range(nstep):
+            pc, gc, t, pcl, gcl, pconmax, sedflux = step_transport(
+                pc, gc, t, pcl, gcl, told, zmet,
+                vf, dkz, vd, dz, zc, zl, rhoa, dtime,
+                pc_topbnd, pc_botbnd, ftoppart, fbotpart)
+    """
+    itype_arr = jnp.array([e.itype for e in config.elements])
+    ienconc_arr = jnp.array([g.ienconc for g in config.groups])
+    igelem_arr = jnp.array([e.igroup for e in config.elements])
+    rmass_2d = jnp.stack([g.rmass for g in config.groups], axis=1)
+    igroup_arr_tr = igelem_arr  # transport uses element→group mapping
+    grp_do_vtran = jnp.array([g.do_vtran for g in config.groups])
+    grp_do_drydep = jnp.array([g.do_drydep for g in config.groups])
+
+    do_substep = bool(config.do_substep)
+    do_coag = bool(config.do_coag)
+    nbin, nelem, ngroup = config.nbin, config.nelem, config.ngroup
+    itbnd_pc, ibbnd_pc = int(config.itbnd_pc), int(config.ibbnd_pc)
+    # igridv isn't on CarmaConfig yet; default to Cartesian.
+    igridv = GridType.I_CART
+
+    @jax.jit
+    def step_fn(pc, gc, t, pcl, gcl, told, zmet,
+                vf, dkz, vd, dz, zc, zl, rhoa, dtime,
+                pc_topbnd, pc_botbnd, ftoppart, fbotpart):
+        return step_transport(
+            pc, gc, t, pcl, gcl, told, zmet,
+            itype_arr, ienconc_arr, igelem_arr, rmass_2d,
+            vf, dkz, vd, dz, zc, zl, rhoa, dtime,
+            pc_topbnd, pc_botbnd, ftoppart, fbotpart,
+            igroup_arr_tr, grp_do_vtran, grp_do_drydep,
+            itbnd_pc=itbnd_pc, ibbnd_pc=ibbnd_pc, igridv=igridv,
+            nbin=nbin, nelem=nelem, ngroup=ngroup,
+            do_substep=do_substep, do_coag=do_coag,
+        )
+
+    return step_fn
+
+
 def make_step_coag(config):
     """Build a JIT'd coagulation-only step from a CarmaConfig.
 
