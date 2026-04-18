@@ -34,11 +34,11 @@ def setup_bins(rmin, rmrat, nbin, rho):
     rmrat = DTYPE(rmrat)
     rho = DTYPE(rho)
 
-    # Volume ratio between bins
-    vrfact = DTYPE(4.0 / 3.0) * PI
+    # Constant cpi = 4/3 * PI (mass = cpi * rho * r^3)
+    cpi = DTYPE(4.0 / 3.0) * PI
 
     # Mass of smallest bin
-    rmass_min = vrfact * rho * rmin**3
+    rmass_min = cpi * rho * rmin**3
 
     # Geometric progression of masses
     ibin = jnp.arange(nbin, dtype=DTYPE)
@@ -46,29 +46,25 @@ def setup_bins(rmin, rmrat, nbin, rho):
 
     # Radii from masses
     vol = rmass / rho
-    r = (vol / vrfact) ** (DTYPE(1.0) / DTYPE(3.0))
+    r = (rmass / rho / cpi) ** (DTYPE(1.0) / DTYPE(3.0))
 
-    # Bin boundaries (geometric mean of adjacent bin masses)
-    # Upper boundary of bin i = geometric mean of rmass[i] and rmass[i+1]
-    # For the last bin, extrapolate
-    rmassup_interior = jnp.sqrt(rmass[:-1] * rmass[1:])
-    rmassup_last = rmass[-1] * jnp.sqrt(rmrat)
-    rmassup = jnp.concatenate([rmassup_interior, rmassup_last[None]])
+    # --- Bin boundaries (EXACT Fortran formulas from setupbins.F90) ---
+    # rmassup = 2*rmrat/(rmrat+1) * rmass
+    rmassup = DTYPE(2.0) * rmrat / (rmrat + DTYPE(1.0)) * rmass
 
-    # Lower boundary of bin i = upper boundary of bin i-1
-    # For the first bin, extrapolate
-    rlow_first = rmass[0] / jnp.sqrt(rmrat)
-    rlow_first = (rlow_first / (rho * vrfact)) ** (DTYPE(1.0) / DTYPE(3.0))
-    rlow_interior = (rmassup[:-1] / (rho * vrfact)) ** (DTYPE(1.0) / DTYPE(3.0))
-    rlow = jnp.concatenate([rlow_first[None], rlow_interior])
+    # dm = 2*(rmrat-1)/(rmrat+1) * rmass
+    dm = DTYPE(2.0) * (rmrat - DTYPE(1.0)) / (rmrat + DTYPE(1.0)) * rmass
 
-    rup = (rmassup / (rho * vrfact)) ** (DTYPE(1.0) / DTYPE(3.0))
+    # rup from rmassup
+    rup = (rmassup / rho / cpi) ** (DTYPE(1.0) / DTYPE(3.0))
 
-    # Bin widths
-    dr = rup - rlow
-    dm = rmassup - jnp.concatenate([
-        (rmass[0] / jnp.sqrt(rmrat))[None],
-        rmassup[:-1],
-    ])
+    # dr = vrfact * (rmass/rho)^(1/3) where vrfact is from Fortran
+    vrfact = ((DTYPE(3.0) / (DTYPE(2.0) * PI * (rmrat + DTYPE(1.0))))
+              ** (DTYPE(1.0) / DTYPE(3.0))
+              * (rmrat ** (DTYPE(1.0) / DTYPE(3.0)) - DTYPE(1.0)))
+    dr = vrfact * (rmass / rho) ** (DTYPE(1.0) / DTYPE(3.0))
+
+    # rlow = rup - dr
+    rlow = rup - dr
 
     return r, rmass, vol, dr, dm, rup, rlow, rmassup

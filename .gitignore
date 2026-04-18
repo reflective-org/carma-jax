@@ -11,3 +11,4 @@ __pycache__/
 scripts/fortran_runner/test_*
 scripts/fortran_runner/*.nml
 scripts/fortran_runner/*_out.txt
+docs/papers/

@@ -192,10 +192,19 @@ def growevapl(pc, growlg, evaplg,
                 DTYPE(6.0) * (dpc[ibin] - DTYPE(0.5) * (ar[ibin] + al[ibin]))
             )
 
+        # Per-bin threshold: max concentration in this group for relative check.
+        # The PPM divides dmdt by pc, producing enormous growth rates when
+        # pc is tiny. Use a relative threshold to zero out growth in bins
+        # that are negligible compared to the peak.
+        pc_group_max = jnp.max(pc[iz, :, iepart])
+        bin_threshold = jnp.maximum(FEW_PC, pc_group_max * DTYPE(1e-20))
+
         # Step 6: Flux computation
         for ibin in range(nbin - 1):
             dmdt_val = dmdt[ibin]
             pc_val = pc[iz, ibin, iepart]
+
+            bin_has_particles = pc_val > bin_threshold
 
             # Growth (dmdt > 0): flux from bin ibin to ibin+1
             x_grow = dmdt_val * dtime / dm[ibin, ig]
@@ -207,12 +216,14 @@ def growevapl(pc, growlg, evaplg,
                 ),
                 dmdt_val / dm[ibin, ig],
             )
+            grow_ppm = jnp.where(bin_has_particles, grow_ppm, DTYPE(0.0))
             growlg = growlg.at[ibin, ig].set(
                 jnp.where(dmdt_val > DTYPE(0.0), grow_ppm, growlg[ibin, ig])
             )
 
             # Evaporation (dmdt < 0): flux from bin ibin+1 to ibin
             pc_val_next = pc[iz, ibin + 1, iepart]
+            next_bin_has_particles = pc_val_next > bin_threshold
             x_evap = -dmdt_val * dtime / dm[ibin + 1, ig]
             evap_ppm = jnp.where(
                 x_evap < DTYPE(1.0),
@@ -222,6 +233,7 @@ def growevapl(pc, growlg, evaplg,
                 ),
                 -dmdt_val / dm[ibin + 1, ig],
             )
+            evap_ppm = jnp.where(next_bin_has_particles, evap_ppm, DTYPE(0.0))
             evaplg = evaplg.at[ibin + 1, ig].set(
                 jnp.where(dmdt_val < DTYPE(0.0), evap_ppm, evaplg[ibin + 1, ig])
             )

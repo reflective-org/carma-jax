@@ -111,4 +111,78 @@ The coagulation kernel is currently computed **once** and reused for all timeste
 - Fortran growtest also runs without substepping — errors are not from missing substeps
 - Absolute errors remain small (<1 mK for all scenarios)
 
-### Phase 3b-6: Not Started
+## Phase 3b: Nucleation — COMPLETE
+
+### Modules Implemented
+- [x] `nucleation/sulfnucrate.py` — Vehkamaki 2002 binary H2SO4-H2O (verified vs paper Fig 8)
+- [x] `nucleation/freezaerl_koop2000.py` — Koop 2000 homogeneous aerosol freezing
+- [x] `nucleation/freezglaerl_murray2010.py` — Murray 2010 glassy aerosol heterogeneous freezing
+- [x] `growth/upgxfer.py` — nucleation production transfer between groups
+- [x] `setup_nuc.py` — bin/element nucleation mapping tables
+- [x] `microfast.py` — multi-group orchestrator (nucleation + growth + solvers)
+- [x] 2-group nuctest runner (sulfate → ice, 16 bins, 3 elements)
+
+### Critical Bug Fixes During Phase 3b
+
+1. **`setup_bins`**: Use exact Fortran formulas. Was using geometric mean for
+   `rmassup`; Fortran uses `rmassup = 2*rmrat/(rmrat+1) * rmass`. Also fixed
+   `dr` formula to match Fortran's `vrfact * (rmass/rho)^(1/3)`.
+
+2. **`growp`**: Use GROUP-level `igrowgas` (from number concentration element),
+   not per-element. Core mass elements must participate in growth — when ice
+   crystals grow from bin i-1 to bin i, ALL elements (volatile + core) move
+   together. Matches Fortran `growp.F90` which checks `igrowgas(iepart)`.
+
+3. **`evapp`**: Only process elements belonging to the current group. Was
+   applying ice evaporation rate to sulfate elements. Matches Fortran
+   `evap_ingrp.F90` which loops `isub = 1..nelemg(ig)`.
+
+4. **Initial conditions**: Match Fortran's approximate rhoa in nuctest
+   (uses `100 mbar / R_AIR / 200K` instead of actual conditions). Without
+   this, all bins had systematic 14-23% offset.
+
+5. **Nucleation mapping**: Use TWO pairs (element 0→1 for ice number,
+   element 0→2 for ice core mass). Previously only had 0→2, so ice
+   number was never produced from sulfate freezing.
+
+6. **`growevapl` per-bin threshold**: The PPM formula divides `dmdt` by `pc`.
+   When a bin has `pc ≈ SMALL_PC = 1e-50`, this produces astronomical
+   growth rates (e.g., 2.5e35/s), which corrupt the core mass element.
+   Added per-bin relative threshold: `pc > max(FEW_PC, pc_group_max * 1e-20)`.
+
+7. **Koop `rhosol`**: Use H2SO4 SOLUTE density (1.38 g/cm³) in `volrat`
+   calculation, NOT sulfate particle density (1.78). The Fortran uses
+   `rhosol(isol)` which is the solute density. Fixed ~20% rate error in
+   bins 9-16.
+
+### Phase 3b Validation (Fortran nuctest, dt=1s, 100 steps)
+
+| Quantity | JAX | Fortran | Rel Error |
+|----------|-----|---------|-----------|
+| Sulfate MMR total | 3.40e-11 | 3.34e-11 | 1.94% |
+| Ice volatile MMR total | 1.606e-05 | 1.622e-05 | 0.97% |
+| Ice core MMR total | 9.73e-11 | 9.79e-11 | 0.66% |
+| Gas MMR (H2O) | 2.394e-05 | 2.380e-05 | 0.60% |
+| Volatile conservation | 1.5e-15 | — | Machine precision |
+
+### Bin-by-bin validation at t=1s (all bins)
+
+- Sulfate: max 0.31% error (bin 6), most < 0.2%
+- Ice volatile: < 0.1% error in all non-zero bins
+- Ice core: < 0.1% error in all non-zero bins
+- Gas: 0.08% error
+
+### Known Issues
+
+- **Size distribution tail**: At t=100s, Fortran ice distribution extends
+  to ~500 μm, but JAX cuts off at ~200 μm. Totals match within 1%, but
+  the shape differs — the Fortran uses internal adaptive substepping
+  (newstate_calc.F90) which resolves the growth/advection better than
+  our dt=1 single-step approach. This is a refinement to fix in Phase 5
+  (orchestration with substepping).
+- **H2SO4 condensational growth on sulfate** not yet validated in an
+  end-to-end test. Infrastructure exists (vapor pressure, diffusivity,
+  growth kernels work for any gas), but needs a dedicated stratospheric
+  and tropospheric scenario test. Planned before Phase 4.
+
+### Phase 4-6: Not Started

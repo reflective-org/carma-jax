@@ -12,12 +12,15 @@ from carma.precision import DTYPE
 
 
 def evapp(pc, evappe, evaplg, pconmax, ienconc_arr, itype_arr,
-          iz, nbin, ngroup, nelem):
+          igroup_arr, iz, nbin, ngroup, nelem):
     """Compute evaporation production terms.
 
     For the simple case (no cores, I_VOLATILE), particles evaporating
     from bin i contribute to bin i-1:
         evappe[i-1, ie] += pc[iz, i, ie] * evaplg[i, ig]
+
+    Only elements belonging to the current group are processed (matching
+    Fortran evap_ingrp which uses nelemg(ig) to iterate group elements).
 
     Args:
         pc: Particle concentrations (NZ, NBIN, NELEM).
@@ -26,6 +29,7 @@ def evapp(pc, evappe, evaplg, pconmax, ienconc_arr, itype_arr,
         pconmax: Max concentration per group (NZ, NGROUP).
         ienconc_arr: Number concentration element per group (NGROUP,).
         itype_arr: Element type per element (NELEM,).
+        igroup_arr: Group index per element (NELEM,).
         iz: Vertical level index.
         nbin, ngroup, nelem: Dimensions.
 
@@ -50,8 +54,10 @@ def evapp(pc, evappe, evaplg, pconmax, ienconc_arr, itype_arr,
             # Only if evaporation is happening (evdrop > 0)
             should_evap = has_particles & (evdrop > DTYPE(0.0))
 
-            # Within-group evaporation: particles from bin i → bin i-1
+            # Within-group evaporation: only elements in this group
             for ie in range(nelem):
+                if int(igroup_arr[ie]) != ig:
+                    continue
                 prod = pc[iz, ibin, ie] * evaplg[ibin, ig]
                 prod = jnp.where(should_evap, prod, DTYPE(0.0))
                 evappe = evappe.at[ibin - 1, ie].add(prod)
