@@ -3,10 +3,12 @@
 Composes the per-step physics: prestep → vertical transport →
 [microslow (coag)] → [microfast (growth/nucleation)].
 
-This is the MVP driver; microslow and microfast orchestration are
-handled through their existing make_*/driver functions and must be
-plumbed in by callers via the step_microphysics argument. The minimal
-path (transport only) is fully implemented here.
+Currently implemented:
+  step_transport — prestep + vertical (no microphysics).
+  step_coag      — prestep + microslow.
+microfast orchestration is still handled by Phase 3 driver scripts;
+its integration into step() is deferred until the microfast driver
+is refactored onto the unified CarmaState interface.
 
 Ported from: step.F90, newstate.F90
 """
@@ -18,6 +20,7 @@ import jax
 import jax.numpy as jnp
 
 from carma.enums import BoundaryCondition, GridType
+from carma.microslow import make_microslow
 from carma.precision import DTYPE
 from carma.prestep import prestep
 from carma.transport.vertical import vertical
@@ -66,3 +69,60 @@ def step_transport(
         t = t + d_t
 
     return pc, gc, t, pcl, gcl, pconmax, sedflux
+
+
+def make_step_coag(config):
+    """Build a JIT'd coagulation-only step from a CarmaConfig.
+
+    Pre-binds the expensive pair arrays and element metadata once so that
+    repeated calls inside a simulation loop avoid re-tracing.
+
+    Usage:
+        step_coag = make_step_coag(config)
+        for istep in range(nstep):
+            pc, gc, t, pcl, gcl, pconmax = step_coag(
+                pc, gc, t, pcl, gcl, told, zmet, ckernel, dtime)
+    """
+    itype_arr = jnp.array([e.itype for e in config.elements])
+    ienconc_arr = jnp.array([g.ienconc for g in config.groups])
+    igelem_arr = jnp.array([e.igroup for e in config.elements])
+    rmass_2d = jnp.stack([g.rmass for g in config.groups], axis=1)  # (NBIN, NGROUP)
+
+    microslow_jit = make_microslow(
+        nbin=config.nbin, nelem=config.nelem, ngroup=config.ngroup,
+        elem_igroup=jnp.array([e.igroup for e in config.elements]),
+        icoag=config.coag.icoag,
+        volx=config.coag.volx,
+        icoagelem=config.coag.icoagelem,
+        npairu=config.coag.npairu, npairl=config.coag.npairl,
+        iup=config.coag.iup, jup=config.coag.jup,
+        igup=config.coag.igup, jgup=config.coag.jgup,
+        ilow=config.coag.ilow, jlow=config.coag.jlow,
+        iglow=config.coag.iglow, jglow=config.coag.jglow,
+        pkernel=config.coag.pkernel,
+        ienconc_arr=ienconc_arr,
+        elem_itypes=itype_arr,
+    )
+
+    do_substep = bool(config.do_substep)
+    do_coag = bool(config.do_coag)
+
+    @jax.jit
+    def step_coag(pc, gc, t, pcl, gcl, told, zmet, ckernel, dtime):
+        """Prestep → microslow for one timestep.
+
+        Gas / temperature are carried through unchanged (coagulation does
+        not touch them).
+        """
+        pc, gc, t, pcl, gcl, d_gc, d_t, pconmax = prestep(
+            pc, gc, t, pcl, gcl, told, zmet,
+            itype_arr, ienconc_arr, igelem_arr, rmass_2d,
+            do_substep=do_substep, do_coag=do_coag,
+        )
+        pc = microslow_jit(pc, pcl, ckernel, pconmax, zmet, DTYPE(dtime))
+        if do_substep:
+            gc = gc + d_gc
+            t = t + d_t
+        return pc, gc, t, pcl, gcl, pconmax
+
+    return step_coag

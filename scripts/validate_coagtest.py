@@ -22,7 +22,7 @@ from carma.coagulation.setup_coag import setup_coag
 from carma.config import ElementConfig, GroupConfig, CarmaConfig
 from carma.setup_vf import setup_vf
 from carma.setup_ckern import setup_ckern
-from carma.microslow import microslow
+from carma.step import make_step_coag
 
 # ---------- Parse Fortran benchmark ----------
 
@@ -154,14 +154,22 @@ def run_jax_coagtest():
     pc = jnp.full((NZ, NBIN, NELEM), SMALL_PC, dtype=DTYPE)
     pc = pc.at[0, 0, 0].set(DTYPE(1e6))
 
+    # Build unified step driver — prestep + microslow
+    step_coag = make_step_coag(config)
+
+    # Aux state (unused by coag but required by prestep signature)
+    gc = jnp.zeros((NZ, 0), dtype=DTYPE)
+    gcl = jnp.zeros((NZ, 0), dtype=DTYPE)
+    told = t
+    pcl = pc
+
     # Store time history at level 0
     nd_history = [np.array(pc[0, :, 0])]  # time 0
 
     # Time integration
     for istep in range(nstep):
-        pcl = pc
-        pconmax = jnp.max(pc[:, :, 0:1] / zmet[:, None, None], axis=1)
-        pc = microslow(config, pc, pcl, ckernel, pconmax, zmet, dtime)
+        pc, gc, t, pcl, gcl, pconmax = step_coag(
+            pc, gc, t, pcl, gcl, told, zmet, ckernel, DTYPE(dtime))
         nd_history.append(np.array(pc[0, :, 0]))
 
     times = np.arange(0, nstep + 1) * dtime
