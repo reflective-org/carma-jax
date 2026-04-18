@@ -36,7 +36,7 @@ def vertdif(dkz_column, dz, rhoa, zmet, igridv, itbnd, ibbnd):
         level k from level k-1.
     """
     nz = dz.shape[0]
-    nzm1 = max(1, nz - 1)
+    nzm1 = max(0, nz - 2)  # 0-based Fortran NZ-1
     itwo = min(1, nz - 1)  # 0-based Fortran 2
 
     vertdifu = jnp.zeros(nz + 1, dtype=DTYPE)
