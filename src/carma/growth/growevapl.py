@@ -56,9 +56,11 @@ def growevapl(pc, growlg, evaplg,
 
         is_ice = bool(is_ice_arr[ig])
         has_particles = pconmax[iz, ig] > FEW_PC
-
-        if not has_particles:
-            continue
+        # Don't short-circuit on has_particles here — the per-bin
+        # bin_has_particles mask in the flux computation below already
+        # zeros out contributions from negligible bins. Short-circuiting
+        # via Python `if` would break JIT tracing since has_particles is
+        # a traced boolean.
 
         # Compute dmdt for all bin boundaries (bin 0 to NBIN-2)
         dmdt = jnp.zeros(nbin, dtype=DTYPE)
