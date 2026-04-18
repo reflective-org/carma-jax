@@ -28,6 +28,10 @@
   - **Option C**: Compute kernel on-the-fly inside the coagulation loop (fuse setup_ckern into microslow). Avoids materializing the full (NZ,NBIN,NBIN,NG,NG) array in memory.
   - Decision deferred to Phase 5 orchestration. The JIT-compiled setup functions are fast enough that Option A is likely sufficient.
 
+- **Size distribution tail with dt=1s** — In the nuctest at t=100s, Fortran ice distribution extends to ~500 μm, but JAX cuts off at ~200 μm. Totals match within 1%, but the tail shape differs. Hypothesis: the Fortran uses internal adaptive substepping (`newstate_calc.F90` doubles substeps when supersaturation sign changes) which resolves the rapid mass-space advection during the initial growth burst (t<10s). Without substepping at dt=1s, our PPM implementation loses some tail shape. Matching totals suggests the conservation laws are correct, but the advection is slightly under-resolved. Will be fixed in Phase 5 when the full `newstate_calc` orchestration with adaptive substepping is ported. Note: dt=0.01s gives the same totals with slightly better distribution, confirming this is a dt-resolution issue, not a physics error.
+
+- **H2SO4 condensational growth** — Infrastructure exists (Ayers 1980 vapor pressure in `vapor_pressure.py`, H2SO4 diffusivity in `setup_grow.py`, growth kernels in `setup_gkern.py`), but end-to-end validation with sulfate nucleation + condensation has not been run. Planned as stratospheric and tropospheric background scenarios before Phase 4.
+
 ## Rejected
 
 (None yet)
