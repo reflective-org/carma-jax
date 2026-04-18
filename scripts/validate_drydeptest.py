@@ -145,7 +145,7 @@ def main():
         vf, r_wet, bpm, t_k, rmu, rhoa, zmet, zmetl,
         lndfv, ocnfv, icefv, lndram, ocnram, iceram,
         lndfrac, ocnfrac, icefrac,
-        igroup_arr=None, grp_do_drydep=grp_do_drydep, igridv=GridType.I_CART)
+        grp_do_drydep=grp_do_drydep, igridv=GridType.I_CART)
     print(f"vd range: group 1 (drydep) {float(vd[:,0].min()):.3e} - {float(vd[:,0].max()):.3e} cm/s")
     print(f"vd range: group 2 (no drydep, = vfall) {float(vd[:,1].min()):.3e} - {float(vd[:,1].max()):.3e} cm/s")
     print(f"vd[OUTBIN=14] drydep={float(vd[OUTBIN,0]):.4e} no_drydep={float(vd[OUTBIN,1]):.4e}")
