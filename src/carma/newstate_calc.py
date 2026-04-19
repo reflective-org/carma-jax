@@ -30,7 +30,8 @@ def microfast_growth(pc, gc, t, iz, dtime,
                      is_ice_arr, igrowgas_arr, ienconc_arr,
                      igroup_arr, gwtmol_arr,
                      nbin, ngroup, ngas, nelem,
-                     dt_threshold, ds_threshold_arr, scale_threshold):
+                     dt_threshold, ds_threshold_arr, scale_threshold,
+                     itype_arr=None):
     """Execute one microfast growth step at one level.
 
     Computes: vapor pressure → supersaturation → condensate →
@@ -97,7 +98,11 @@ def microfast_growth(pc, gc, t, iz, dtime,
 
     # Step 2: Evaporation production (particles shrinking from bin i to bin i-1)
     evappe = jnp.zeros((nbin, nelem), dtype=DTYPE)
-    itype_arr = jnp.array([2])  # I_VOLATILE = 2 for growtest
+    # itype_arr default matches the growtest case (single I_VOLATILE element).
+    # Callers targeting JIT should pass a Python tuple so evapp's `int()`
+    # indexing is trace-time, not traced.
+    if itype_arr is None:
+        itype_arr = (2,)  # I_VOLATILE
     evappe = evapp(
         pc, evappe, evaplg, pconmax, ienconc_arr, itype_arr,
         igroup_arr, iz, nbin, ngroup, nelem,

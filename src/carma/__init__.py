@@ -13,10 +13,9 @@ Currently implemented drivers:
     make_step_transport(config) — prestep + vertical (sedimentation,
         Brownian diffusion, dry deposition).
     make_step_coag(config) — prestep + microslow (coagulation).
-
-The microfast (growth + nucleation) driver is still called directly
-via the Phase 3 scripts; integration into the unified step() awaits
-a JIT refactor of microfast_growth.
+    make_step_microfast(config, ntsubsteps) — fixed-substep growth /
+        evaporation microphysics (JIT'd). Adaptive retry is still
+        available via the Python-level newstate_calc_growth.
 """
 
 from carma.config import (
@@ -29,7 +28,12 @@ from carma.config import (
 )
 from carma.state import CarmaState
 from carma.prestep import prestep
-from carma.step import make_step_coag, make_step_transport, step_transport
+from carma.step import (
+    make_step_coag,
+    make_step_microfast,
+    make_step_transport,
+    step_transport,
+)
 from carma.utils.smallconc import maxconc, smallconc
 
 __all__ = [
@@ -41,6 +45,7 @@ __all__ = [
     "GroupConfig",
     "SoluteConfig",
     "make_step_coag",
+    "make_step_microfast",
     "make_step_transport",
     "maxconc",
     "prestep",
