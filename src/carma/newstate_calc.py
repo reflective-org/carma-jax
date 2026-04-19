@@ -5,6 +5,7 @@ returns RC_WARNING_RETRY, double the substeps and retry from saved state.
 Ported from: newstate_calc.F90
 """
 
+import jax
 import jax.numpy as jnp
 
 from carma.constants import SMALL_PC, FEW_PC, CP, RGAS, WTMOL_H2O
@@ -44,14 +45,16 @@ def microfast_growth(pc, gc, t, iz, dtime,
     pvapl = pvapl_1d[None, :]  # (1, 1)
     pvapi = pvapi_1d[None, :]
 
-    # Supersaturation
+    # Supersaturation. gwtmol is treated as a traced scalar; supersat casts
+    # internally so this is JIT-clean even when gwtmol_arr comes in as a
+    # concrete numpy array.
     ssl, ssi = supersat(t, gc[:, 0], pvapl[:, 0], pvapi[:, 0],
-                        float(gwtmol_arr[0]), zmet)
+                        gwtmol_arr[0], zmet)
     supsatl = ssl[:, None]
     supsati = ssi[:, None]
 
-    # Save previous supersaturation for convergence check
-    prev_supsati = float(ssi[iz])
+    # Save previous supersaturation for convergence check (traced scalar).
+    prev_supsati = ssi[iz]
 
     # Total condensate before growth
     prev_ice, prev_liq = totalcondensate(
@@ -125,21 +128,19 @@ def microfast_growth(pc, gc, t, iz, dtime,
         dt_threshold, scale_threshold,
     )
 
-    # Check supersaturation convergence
+    # Check supersaturation convergence (all traced)
     pvapl_new, pvapi_new = vaporp_h2o_murphy2005(t)
     ssl_new, ssi_new = supersat(t, gc[:, 0], pvapl_new[None, :][:, 0],
                                 pvapi_new[None, :][:, 0],
-                                float(gwtmol_arr[0]), zmet)
-    new_supsati = float(ssi_new[iz])
+                                gwtmol_arr[0], zmet)
+    new_supsati = ssi_new[iz]
 
-    # Simple convergence check: if supersaturation changed sign, retry
-    rc = RC_OK
-    sign_change = (prev_supsati * new_supsati) < 0
-    large_change = abs(new_supsati) > 0.01
-    if sign_change and large_change:
-        rc = RC_WARNING_RETRY
+    # If supersaturation changed sign AND absolute change is large, flag retry.
+    sign_change = (prev_supsati * new_supsati) < DTYPE(0.0)
+    large_change = jnp.abs(new_supsati) > DTYPE(0.01)
+    rc = jnp.where(sign_change & large_change, RC_WARNING_RETRY, RC_OK)
 
-    return pc, gc, t, float(rlheat[iz]), rc
+    return pc, gc, t, rlheat[iz], rc
 
 
 def newstate_calc_growth(pc, gc, t, iz, dtime_orig,
