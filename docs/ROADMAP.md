@@ -1,5 +1,10 @@
 # CARMA-JAX Porting Roadmap
 
+> **This document describes the original phased plan.** For current
+> status, completed work, and open items, see
+> [`PROGRESS.md`](PROGRESS.md). Phases 1–5e are complete; Phase 6
+> (performance + float32) is next.
+
 ## Strategy
 
 Port CARMA process-by-process from Fortran 90 to JAX. Validate each process against Fortran benchmark outputs before moving to the next. Six phases, each gated by integration tests.

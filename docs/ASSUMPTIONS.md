@@ -16,6 +16,12 @@
 
 - **Python loops over NGROUP are acceptable at trace time** — For NGROUP=1, group loops resolve at trace time inside JIT. For multi-group, these are small static loops that unroll during compilation. (Confirmed: coagulation loss computation with einsum)
 
+- **Coagulation kernel recomputation strategy = Option A (per-step)** — The JIT-compiled setup routines are fast enough that recomputing every step (matching Fortran) is the right default. `make_step_coag` passes `ckernel` in as a traced arg; callers that vary atmospheric state between steps just rebuild it. (Resolved in Phase 5b.)
+
+- **`rhoa_wet` vs `rhoa_dry` for pc ↔ mmr conversion** — CARMA internally stores `pc = mmr * rhoa_wet`, where `rhoa_wet` is the hydrostatic layer-mean density (`|dp|/g/dz`), *not* the ideal-gas center density (`p/R_air/T`). These differ by ~3% in the mesosphere. All validation scripts now convert via `rhoa_wet`. (Resolved during vdiftest validation, Phase 4.)
+
+- **CARMA default particle BC is `I_FIXED_CONC`** — not `I_FLUX_SPEC`. This makes the top and bottom boundaries absorbing, so mass that advects past the surface leaves the column. (Resolved during falltest validation, Phase 4.)
+
 ## Open
 
 - **Coagulation kernel memory is manageable** — `ckernel(NZ,NBIN,NBIN,NGROUP,NGROUP)` at NZ=1, NBIN=47, NGROUP=1 is ~17 KB. At NZ=200, NBIN=47, NGROUP=5 would be ~44 MB. May need on-the-fly computation for large multi-group problems.
@@ -28,9 +34,9 @@
   - **Option C**: Compute kernel on-the-fly inside the coagulation loop (fuse setup_ckern into microslow). Avoids materializing the full (NZ,NBIN,NBIN,NG,NG) array in memory.
   - Decision deferred to Phase 5 orchestration. The JIT-compiled setup functions are fast enough that Option A is likely sufficient.
 
-- **Size distribution tail with dt=1s** — In the nuctest at t=100s, Fortran ice distribution extends to ~500 μm, but JAX cuts off at ~200 μm. Totals match within 1%, but the tail shape differs. Hypothesis: the Fortran uses internal adaptive substepping (`newstate_calc.F90` doubles substeps when supersaturation sign changes) which resolves the rapid mass-space advection during the initial growth burst (t<10s). Without substepping at dt=1s, our PPM implementation loses some tail shape. Matching totals suggests the conservation laws are correct, but the advection is slightly under-resolved. Will be fixed in Phase 5 when the full `newstate_calc` orchestration with adaptive substepping is ported. Note: dt=0.01s gives the same totals with slightly better distribution, confirming this is a dt-resolution issue, not a physics error.
+- **Size distribution tail with fixed ntsubsteps** — In the nuctest at t=100s, Fortran ice distribution extends to ~500 μm, but JAX cuts off at ~200 μm. Totals match within 1%, mass conservation is machine-precision. Fortran uses adaptive substepping (doubles when supersaturation sign-flips); our `make_step_microfast` runs fixed `ntsubsteps` and does not retry. Expected to resolve once the JIT-native adaptive retry lands (deferred — see PROGRESS.md Phase 5 deferred list, item 1). Note: smaller fixed `dtime` converges toward the Fortran tail, confirming this is a dt-resolution artefact, not a physics bug.
 
-- **H2SO4 condensational growth** — Infrastructure exists (Ayers 1980 vapor pressure in `vapor_pressure.py`, H2SO4 diffusivity in `setup_grow.py`, growth kernels in `setup_gkern.py`), but end-to-end validation with sulfate nucleation + condensation has not been run. Planned as stratospheric and tropospheric background scenarios before Phase 4.
+- **H2SO4 condensational growth** — Infrastructure exists (Ayers 1980 vapor pressure, H2SO4 diffusivity, growth kernels) and is exercised by `validate_sulfate_realistic.py`. Not yet driven through the unified `make_step_microfast` factory (which currently assumes the growtest element/gas layout); the realistic sulfate scripts still call the Phase 3 driver directly.
 
 ## Rejected
 
