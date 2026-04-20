@@ -1,6 +1,6 @@
 # CARMA-JAX Progress Tracker
 
-## Current Phase: 5e (Microfast JIT) — COMPLETE. Next: Phase 6 (perf + float32)
+## Current Phase: 6b (precision overlay) — COMPLETE. Float32 evaluated and parked.
 
 ## Phase Summary
 
@@ -16,6 +16,9 @@
 | 5c: make_step_transport + public API | COMPLETE | PR #9 merged |
 | 5d: JIT-readiness cleanups in microfast | COMPLETE | PR #10 merged |
 | 5e: microfast_growth JITs + make_step_microfast | COMPLETE | PR #11 |
+| growtest cliff fix | COMPLETE | PR #14 |
+| 6a: fp64 precision-comparison harness | COMPLETE | PR #13 |
+| 6b: fp32 overlay — float32 evaluated, parked | COMPLETE | PR #15 |
 
 ## Phase 1 (Foundation + Coagulation) — COMPLETE
 
@@ -259,6 +262,8 @@ These are tracked here explicitly so we don't lose them:
 
 6. **Size distribution shape at large radii** — the nuctest at t=100s shows Fortran's ice distribution extending to ~500 μm vs JAX's ~200 μm. Totals match within 1% and mass conservation is machine-precision, but the tail shape is under-resolved. Fortran's adaptive substepping catches it — our fixed-ntsubsteps drivers don't yet. Expected to resolve once the adaptive retry in item 1 is JIT'd.
 
-7. **Float32 path** — `precision.py` already parameterises the dtype. Phase 6 work: integration tests with relaxed tolerances, and checking whether Vehkamaki's large exponents require float64 even when the rest runs float32.
+7. **Float32 path** — evaluated in Phase 6b (PR #15) and *parked*. `precision.py` already parameterises the dtype via `CARMA_DTYPE=fp32`, and `scripts/compare_precision.py` + `scripts/plot_precision_overlay.py` measure the cost. Findings: coagtest and vdiftest run cleanly in fp32 (precision cost < 0.1%); falltest / drydeptest / growtest blow up because `SMALL_PC = 1e-50` underflows in fp32 (min subnormal ~1.4e-45), turning the `jnp.maximum(pc, SMALL_PC)` denominator-floor into a true zero. Fixable with dtype-aware constants + a few `.astype(float64)` islands (vapor pressure is the strongest candidate), but not worth the maintenance cost while Fortran-parity precision is the reference and CPU throughput isn't a bottleneck. Revisit only if (a) CPU fp64 becomes a throughput blocker, or (b) we target GPU batched runs where the 2× memory / ~2–3× throughput benefit justifies the mixed-precision plumbing. The harness stays in-tree as measurement infrastructure for that future decision.
 
-8. **GPU / vmap benchmarks** — every JIT'd factory should compose with `jax.vmap` over a column batch axis already, but we haven't run the numbers.
+8. **CPU throughput benchmark vs Fortran** — prerequisite for reopening item 7. If JAX fp64 is within ~2× of Fortran on the same benchmarks, fp32 is unlikely to be worth the complexity.
+
+9. **GPU / vmap benchmarks** — every JIT'd factory should compose with `jax.vmap` over a column batch axis already, but we haven't run the numbers.
