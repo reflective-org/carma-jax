@@ -1,6 +1,23 @@
 # CARMA-JAX Progress Tracker
 
-## Current Phase: 1 (Foundation + Coagulation) — COMPLETE
+## Current Phase: 5e (Microfast JIT) — COMPLETE. Next: Phase 6 (perf + float32)
+
+## Phase Summary
+
+| Phase | Status | Gate |
+|-------|--------|------|
+| 1: Foundation + coagulation | COMPLETE | coagtest within 0.02% |
+| 2: Thermodynamics + growth setup | COMPLETE | falltest ready, vapor pressure validated |
+| 3a: Growth (one-group) | COMPLETE | growtest T rel err 1.15e-3 |
+| 3b: Nucleation + microfast multi-group | COMPLETE | nuctest, sulfatetest |
+| 4: Vertical transport | COMPLETE | falltest, vdiftest, drydeptest all <0.1% median |
+| 5a: prestep + utilities + step_transport | COMPLETE | PR #7 merged |
+| 5b: make_step_coag factory | COMPLETE | PR #8 merged |
+| 5c: make_step_transport + public API | COMPLETE | PR #9 merged |
+| 5d: JIT-readiness cleanups in microfast | COMPLETE | PR #10 merged |
+| 5e: microfast_growth JITs + make_step_microfast | COMPLETE | PR #11 |
+
+## Phase 1 (Foundation + Coagulation) — COMPLETE
 
 ### Phase 1 Milestones
 
@@ -185,4 +202,63 @@ The coagulation kernel is currently computed **once** and reused for all timeste
   growth kernels work for any gas), but needs a dedicated stratospheric
   and tropospheric scenario test. Planned before Phase 4.
 
-### Phase 4-6: Not Started
+## Phase 4: Vertical transport — COMPLETE
+
+### Implemented
+- `transport/vertadv.py` — PPM advection rates (Colella-Woodward 1984) with monotonicity limiter
+- `transport/vertdif.py` — Brownian diffusion rates at layer edges
+- `transport/versol.py` — Thomas tridiagonal solver via `jax.lax.scan`
+- `transport/vertical.py` — JIT'd driver, `vmap` over (NBIN, NELEM)
+- `setup_bdif.py` — Einstein-Stokes diffusivity + layer-edge interpolation
+- `setup_vdry.py` — Zhang 2001 dry deposition velocity
+
+### Validation
+
+| Test | Process | Median err | Peak MMR: JAX vs Fortran |
+|------|---------|-----------|--------------------------|
+| falltest | PPM sedimentation | 0.053% | 3.159e-18 vs 3.160e-18 |
+| vdiftest | Brownian diffusion | 0.053% | 8.290e-06 vs 8.290e-06 |
+| drydeptest | Zhang 2001 drydep | 0.063% | 1.081e-10 vs 1.080e-10 |
+
+### Key fixes found during validation
+- `vertdif.py` top-boundary index was Fortran-style (`nz-1`) giving `log(1)/0` at the top edge. Fixed to `max(0, nz-2)` for 0-based indexing.
+- Validation scripts now convert `pc ↔ mmr` via `rhoa_wet` (hydrostatic, CARMA internal) instead of `rhoa` (ideal gas) — these differ by ~3% in the mesosphere.
+- Falltest uses `I_FIXED_CONC` (CARMA default), not `I_FLUX_SPEC`.
+
+## Phase 5 (Orchestration) — COMPLETE
+
+### Implemented
+- `utils/smallconc.py` — `smallconc()` (per-element floor) + `maxconc()` (per-(level, group) max)
+- `prestep.py` — d_gc/d_t substep increments, rewind gc/t, apply smallconc, compute pconmax
+- `step.py` — three step factories: `make_step_transport`, `make_step_coag`, `make_step_microfast`
+- `__init__.py` — public API surface (`carma.make_step_*`, `carma.CarmaConfig`, etc.)
+- JIT-readiness cleanups in `newstate_calc.microfast_growth` and `growth/growevapl` so the microfast chain compiles end-to-end
+
+### Speedups from JIT-ing the factories
+| Script | Before | After | Speedup |
+|--------|--------|-------|---------|
+| validate_coagtest.py | ~12s physics loop | ~0.1s | ~100x |
+| validate_growtest.py | 9.4s | 3.5s | ~2.7x |
+| validate_falltest.py | ~60s | 2.3s | ~25x |
+| validate_vdiftest.py | ~180s | 2.5s | ~70x |
+| validate_drydeptest.py | ~25 min | 2.7s | ~550x |
+
+### Deferred to Phase 6 / later
+
+These are tracked here explicitly so we don't lose them:
+
+1. **Adaptive retry inside JIT** — `newstate_calc_growth` currently uses a Python-level `while True` + `for isubstep in range(ntsubsteps)` retry loop. A JIT-native implementation would use `jax.lax.while_loop` for the retry doubling and `jax.lax.fori_loop(0, max_substeps, body_with_mask)` for the substep sweep. Callers that need retry (only triggered when supersaturation sign-flips with large magnitude) still go through the Python wrapper.
+
+2. **`step_full(config)` composition** — a single driver that chains `prestep → vertical → microslow → microfast` conditionally on the `do_*` flags. Blocked on the adaptive retry work because multi-level microfast with substepping needs the retry story settled. The three factories in isolation already cover every benchmark we have.
+
+3. **Multi-level microfast orchestration** — `make_step_microfast` currently operates at one `iz`. Fortran's `newstate_calc.F90` iterates top-down (or bottom-up for sigma grids) and threads sedimentation-into-layer accumulations (`dpc_sed`) between levels. Single-column tests don't exercise this; stratospheric column tests eventually will.
+
+4. **In-cloud / clear-sky split** — scale particle concentrations by `cldfrc`, run the microphysics twice, recombine. Not exercised by any current benchmark (all tests are cloud-free or set cldfrc=1). Can wait until we run a CAM-coupled scenario.
+
+5. **Utility modules still missing** — `fixcorecol`, `coremasscheck`, `zeromicro` (the last is implicit in JAX because fresh arrays are allocated every call, but the first two matter for core-mass conservation in coupled nucleation+coagulation runs).
+
+6. **Size distribution shape at large radii** — the nuctest at t=100s shows Fortran's ice distribution extending to ~500 μm vs JAX's ~200 μm. Totals match within 1% and mass conservation is machine-precision, but the tail shape is under-resolved. Fortran's adaptive substepping catches it — our fixed-ntsubsteps drivers don't yet. Expected to resolve once the adaptive retry in item 1 is JIT'd.
+
+7. **Float32 path** — `precision.py` already parameterises the dtype. Phase 6 work: integration tests with relaxed tolerances, and checking whether Vehkamaki's large exponents require float64 even when the rest runs float32.
+
+8. **GPU / vmap benchmarks** — every JIT'd factory should compose with `jax.vmap` over a column batch axis already, but we haven't run the numbers.
