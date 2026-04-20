@@ -5,27 +5,28 @@ drydeptest, growtest), captures the final state + metrics vs the
 Fortran reference, and writes both per-test data (.npz) and a
 one-page overview dashboard.
 
-Phase 6a: this run is the float64 baseline. Phase 6b will re-run in
-float32 and overlay.
+Precision is selected via the ``CARMA_DTYPE`` env var (see
+``carma.precision``):
+
+    python scripts/compare_precision.py                     # fp64 baseline
+    CARMA_DTYPE=fp32 python scripts/compare_precision.py    # fp32 run
+
+Output files and the dashboard image are suffixed with the active
+dtype. Running both produces data that ``plot_precision_overlay.py``
+stitches into an fp64-vs-fp32-vs-Fortran overlay dashboard.
 
 Known pre-existing deltas reflected here (not introduced by this
 harness):
-  - growtest per-bin MMR ~88%: size-distribution tail under-resolution
-    documented in docs/PROGRESS.md deferred item 6. The physical T /
-    gas-MMR metrics match Fortran within 0.1% (see validate_growtest).
+  - growtest outer-tail delta: size-distribution tail under-resolution
+    documented in docs/PROGRESS.md deferred item 6.
   - drydeptest max ~108%: single outlier at a depleted tail bin
-    (Fortran ~1e-25) — median is still 0.06%.
-
-Usage:
-    python scripts/compare_precision.py           # run fp64 baseline
+    (Fortran ~1e-25) — median still < 0.07%.
 """
 
 import time
 from pathlib import Path
 
-import jax
-jax.config.update("jax_enable_x64", True)
-
+# Precision (x64 flag) is set inside carma.precision from CARMA_DTYPE.
 import jax.numpy as jnp
 import numpy as np
 import matplotlib.pyplot as plt
@@ -478,7 +479,11 @@ def run_growtest():
 # Dashboard plot
 # ---------------------------------------------------------------------------
 
-def make_dashboard(results, outdir, title):
+def _dtype_tag():
+    return "fp64" if jnp.dtype(DTYPE).itemsize == 8 else "fp32"
+
+
+def make_dashboard(results, outdir, title, tag):
     outdir.mkdir(parents=True, exist_ok=True)
     n = len(results)
     fig = plt.figure(figsize=(5 * n, 10))
@@ -511,7 +516,7 @@ def make_dashboard(results, outdir, title):
 
     fig.suptitle(title, fontweight="bold", fontsize=14)
     fig.tight_layout()
-    out_path = outdir / "dashboard.png"
+    out_path = outdir / f"dashboard_{tag}.png"
     fig.savefig(out_path, dpi=130)
     plt.close(fig)
     print(f"Dashboard: {out_path}")
@@ -535,6 +540,8 @@ def make_summary_table(results):
 
 def main():
     DATADIR.mkdir(parents=True, exist_ok=True)
+    tag = _dtype_tag()
+    print(f"Running compare_precision in {tag} mode.")
     runs = [
         ("coagtest", run_coagtest),
         ("falltest", run_falltest),
@@ -547,10 +554,15 @@ def main():
         print(f"\n── {name} ──")
         res = fn()
         results.append(res)
-        np.savez(DATADIR / f"{name}_fp64.npz", **{k: np.asarray(v) for k, v in res.items()
-                                                    if k != "name" and k != "xaxis" and k != "ylabel"})
+        np.savez(
+            DATADIR / f"{name}_{tag}.npz",
+            **{k: np.asarray(v) for k, v in res.items()
+               if k not in ("name", "xaxis", "ylabel")},
+        )
     make_summary_table(results)
-    make_dashboard(results, OUTDIR, "CARMA-JAX float64 baseline")
+    title = {"fp64": "CARMA-JAX float64 baseline",
+             "fp32": "CARMA-JAX float32 run"}[tag]
+    make_dashboard(results, OUTDIR, title, tag)
 
 
 if __name__ == "__main__":
