@@ -256,30 +256,63 @@ def run_jax_growtest():
         "gas_mmr": [float(gc[0, 0] / rhoa[0])],
     }
 
-    from carma.newstate_calc import newstate_calc_growth
+    # Build a minimal CarmaConfig so we can use the unified
+    # make_step_microfast factory (JIT'd fixed-substep microfast).
+    from carma.config import CarmaConfig, GroupConfig, ElementConfig, GasConfig
+    from carma.coagulation.setup_coag import setup_coag
+    from carma.step import make_step_microfast
+
+    _groups = (GroupConfig(
+        name='ice', ishape=1, ienconc=0, is_ice=True, is_cloud=False,
+        is_sulfate=False, do_vtran=False, do_drydep=False, ifallrtn=1,
+        irhswell=0, rmrat=rmrat, eshape=1.0, rmin=rmin_cm,
+        r=r, rmass=rmass, vol=vol, dr=dr, dm=dm, rmassup=rmassup, rup=rup, rlow=rlow,
+        rrat=jnp.ones(NBIN, dtype=DTYPE), rprat=jnp.ones(NBIN, dtype=DTYPE),
+        arat=jnp.ones(NBIN, dtype=DTYPE),
+    ),)
+    _elements = (ElementConfig(
+        name='ice', rho=jnp.full(NBIN, rho_particle, dtype=DTYPE), igroup=0,
+        itype=int(ElementType.I_VOLATILE), icomposition=0, isolute=-1, kappa=0.0,
+    ),)
+    _gases = (GasConfig(
+        name='h2o', wtmol=float(WTMOL_H2O), ivaprtn=1, icomposition=1,
+        dgc_threshold=0.0, ds_threshold=0.0,
+    ),)
+    _coag = setup_coag(NBIN, NGROUP, NELEM, _groups, _elements,
+                       np.array([[0]], dtype=np.int32),
+                       np.array([[0]], dtype=np.int32))
+    _config = CarmaConfig(
+        nbin=NBIN, nelem=NELEM, ngroup=NGROUP, ngas=NGAS, nsolute=0,
+        elements=_elements, groups=_groups, gases=_gases, solutes=(), coag=_coag,
+        do_coag=False, do_grow=True, do_vtran=False, do_vdiff=False,
+        do_thermo=True, do_substep=False, do_explised=False,
+        do_incloud=False, do_clearsky=False, do_detrain=False,
+        do_pheat=False, do_pheatatm=False, do_cnst_rlh=False,
+        itbnd_pc=1, ibbnd_pc=1,
+        maxsubsteps=1, minsubsteps=1, maxretries=0, conmax=0.0,
+        cstick=1.0, gsticki=1.0, gstickl=1.0, tstick=1.0, dt_threshold=0.0,
+        igash2o=0, igash2so4=-1, igasso2=-1,
+    )
+    step_microfast = make_step_microfast(_config, ntsubsteps=1,
+                                          igrowgas_arr=(0,))
 
     iz = 0
     rup_wet_arr = jnp.broadcast_to(rup[None, :, None], (NZ, NBIN, NGROUP))
     rlow_wet_arr = jnp.broadcast_to(rlow[None, :, None], (NZ, NBIN, NGROUP))
     rmass_2d = rmass[:, None] * jnp.ones((1, NGROUP), dtype=DTYPE)
     dm_2d = dm[:, None] * jnp.ones((1, NGROUP), dtype=DTYPE)
+    ds_thr_arr = jnp.array([-0.1], dtype=DTYPE)
 
     for istep in range(nstep):
-        pc, gc, t, rlheat_val, nsub = newstate_calc_growth(
-            pc, gc, t, iz, dtime,
+        pc, gc, t, rlheat_val = step_microfast(
+            pc, gc, t, dtime,
             rhoa, zmet, rlhe, rlhm, diffus,
             akelvin, akelvini, gro, gro1, gro2,
             rup_wet_arr, rmass_2d, dm_2d, rlow_wet_arr,
             pratt, prat, pden1, palr,
-            is_ice_arr, igrowgas_arr, ienconc_arr,
-            jnp.array([0]),  # igroup_arr
-            gwtmol_arr,
-            NBIN, NGROUP, NGAS, NELEM,
-            minsubsteps=1, maxsubsteps=128, maxretries=10,
-            dt_threshold=0.0,
-            ds_threshold_arr=jnp.array([-0.1]),  # sign-change check
-            scale_threshold=1.0,
+            ds_thr_arr,
         )
+        nsub = 1  # fixed substeps for make_step_microfast
 
         time = (istep + 1) * dtime
         mmr_bins = np.array(pc[0, :, 0]) / float(zmet[0]) * rmass_np / float(rhoa[0])

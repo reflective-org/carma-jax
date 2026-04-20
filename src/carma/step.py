@@ -21,6 +21,7 @@ import jax.numpy as jnp
 
 from carma.enums import BoundaryCondition, GridType
 from carma.microslow import make_microslow
+from carma.newstate_calc import microfast_growth
 from carma.precision import DTYPE
 from carma.prestep import prestep
 from carma.transport.vertical import vertical
@@ -173,3 +174,85 @@ def make_step_coag(config):
         return pc, gc, t, pcl, gcl, pconmax
 
     return step_coag
+
+
+def make_step_microfast(config, ntsubsteps=1, igrowgas_arr=None):
+    """Build a JIT'd single-level microfast step from a CarmaConfig.
+
+    Fixed-ntsubsteps growth/evaporation. Does NOT yet include the
+    adaptive retry loop from newstate_calc_growth — see that function
+    for the Python-level retry wrapper.
+
+    Args:
+        config: CarmaConfig.
+        ntsubsteps: Static number of substeps per call.
+        igrowgas_arr: Optional tuple of length NELEM giving the growth gas
+            index for each element (-1 if none). If omitted, defaults to
+            element 0 → gas 0 for every element in a growing group; set
+            explicitly for mixed element/gas configurations.
+
+    Usage:
+        step_microfast = make_step_microfast(config, ntsubsteps=4)
+        for istep in range(nstep):
+            pc, gc, t, rlheat_total = step_microfast(
+                pc, gc, t, dtime,
+                rhoa, zmet, rlhe, rlhm, diffus,
+                akelvin, akelvini, gro, gro1, gro2,
+                rup_wet, rmass_2d, dm_2d, rlow_wet,
+                pratt, prat, pden1, palr,
+                ds_threshold_arr=jnp.zeros(ngas))
+    """
+    # Pre-extract metadata as Python tuples (JIT-friendly).
+    is_ice_arr = tuple(bool(g.is_ice) for g in config.groups)
+    ienconc_arr = tuple(int(g.ienconc) for g in config.groups)
+    igroup_arr = tuple(int(e.igroup) for e in config.elements)
+    itype_arr = tuple(int(e.itype) for e in config.elements)
+    gwtmol_arr = tuple(float(g.wtmol) for g in config.gases) or (18.0,)
+
+    if igrowgas_arr is None:
+        # Default: every element in a growing group maps to gas 0.
+        igrowgas_arr = tuple(
+            0 if (config.do_grow and config.ngas > 0) else -1
+            for _ in config.elements
+        )
+    else:
+        igrowgas_arr = tuple(int(x) for x in igrowgas_arr)
+
+    nbin = config.nbin
+    nelem = config.nelem
+    ngroup = config.ngroup
+    ngas = config.ngas
+    dt_threshold = float(config.dt_threshold)
+    _ntsubsteps = int(ntsubsteps)
+
+    @jax.jit
+    def step_microfast(pc, gc, t, dtime,
+                       rhoa, zmet, rlhe, rlhm, diffus,
+                       akelvin, akelvini, gro, gro1, gro2,
+                       rup_wet, rmass_2d, dm_2d, rlow_wet,
+                       pratt, prat, pden1, palr,
+                       ds_threshold_arr, iz=0, scale_threshold=1.0):
+        """Run ntsubsteps of microfast_growth at one level."""
+        dt_sub = DTYPE(dtime) / DTYPE(_ntsubsteps)
+
+        def body(_, carry):
+            pc_c, gc_c, t_c, rlheat_acc = carry
+            pc_c, gc_c, t_c, rl_val, _rc = microfast_growth(
+                pc_c, gc_c, t_c, iz, dt_sub,
+                rhoa, zmet, rlhe, rlhm, diffus,
+                akelvin, akelvini, gro, gro1, gro2,
+                rup_wet, rmass_2d, dm_2d, rlow_wet,
+                pratt, prat, pden1, palr,
+                is_ice_arr, igrowgas_arr, ienconc_arr,
+                igroup_arr, gwtmol_arr,
+                nbin, ngroup, ngas, nelem,
+                DTYPE(dt_threshold), ds_threshold_arr, DTYPE(scale_threshold),
+                itype_arr=itype_arr,
+            )
+            return (pc_c, gc_c, t_c, rlheat_acc + rl_val)
+
+        init = (pc, gc, t, DTYPE(0.0))
+        pc, gc, t, rlheat_total = jax.lax.fori_loop(0, _ntsubsteps, body, init)
+        return pc, gc, t, rlheat_total
+
+    return step_microfast
