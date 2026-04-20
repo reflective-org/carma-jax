@@ -265,21 +265,18 @@ These are tracked here explicitly so we don't lose them:
 
 7. **Float32 path** — evaluated in Phase 6b (PR #15) and *parked*. `precision.py` already parameterises the dtype via `CARMA_DTYPE=fp32`, and `scripts/compare_precision.py` + `scripts/plot_precision_overlay.py` measure the cost. Findings: coagtest and vdiftest run cleanly in fp32 (precision cost < 0.1%); falltest / drydeptest / growtest blow up because `SMALL_PC = 1e-50` underflows in fp32 (min subnormal ~1.4e-45), turning the `jnp.maximum(pc, SMALL_PC)` denominator-floor into a true zero. Fixable with dtype-aware constants + a few `.astype(float64)` islands (vapor pressure is the strongest candidate), but not worth the maintenance cost while Fortran-parity precision is the reference and CPU throughput isn't a bottleneck. Revisit only if (a) CPU fp64 becomes a throughput blocker, or (b) we target GPU batched runs where the 2× memory / ~2–3× throughput benefit justifies the mixed-precision plumbing. The harness stays in-tree as measurement infrastructure for that future decision.
 
-8. **CPU throughput benchmark vs Fortran** — ran Phase 6c (`scripts/benchmark_cpu.py`, `plots/cpu_benchmark/benchmark.png`). JAX fp64 vs Fortran wall time, median of 3 runs, steady-state (post-JIT) for JAX:
+8. **CPU throughput benchmark vs Fortran** — ran Phase 6c (`scripts/benchmark_cpu.py`, `plots/cpu_benchmark/benchmark.png`). JAX fp64 vs Fortran wall time, median of 3 steady-state runs after a warm-up call that drains the JIT cache into the hot path. `.block_until_ready()` on both sides so we're timing actual compute, not async dispatch.
 
-    | test | Fortran | JAX | ratio |
-    |------|---------|-----|-------|
-    | coagtest | 11 ms | 74 ms | 6.6× |
-    | falltest | 64 ms | 217 ms | 3.4× |
-    | growtest | 5 ms | 1486 ms | **318.9×** |
+    | test | Fortran | JAX (steady) | ratio |
+    |------|---------|--------------|-------|
+    | coagtest | 10 ms | 12 ms | 1.2× |
+    | falltest | 61 ms | 31 ms | **0.5×** (JAX faster) |
+    | growtest | 5 ms | 10 ms | 2.1× |
 
-    Implications:
-    - Transport is 3–7× slower than Fortran — modest, probably XLA CPU limitations. Not a blocker.
-    - **growtest is 300× slower** — dominated by per-step dispatch of `microfast_growth`. Even though the inner function is JIT'd, the Python-level loops inside it (`for ibin in range(nbin): for ielem in range(nelem):` × many `.at[].set()` ops) unroll into a large XLA graph that CPU executes slowly. This is the real perf target, not fp32 — no precision change will recover 300×.
-    - fp32 re-evaluation (item 7) is not justified by these numbers. Only growtest would benefit meaningfully from fp32, and fp32 won't deliver anywhere near 300×. The growtest lever is **structural** (item 10 below), not precision.
+    Implication: **JAX fp64 is competitive with Fortran on CPU.** No case for pursuing fp32 on performance grounds. Item 7 (fp32) stays parked.
+
+    Earlier draft numbers in PR #16 initially reported a 319× gap on growtest. That was a measurement bug — growtest's `loop_s` was timing the entire `run_jax_growtest()` function (atmosphere setup, growth-kernel setup, config build, JIT compile, *and* the stepping loop), while the other runners measured only the stepping loop. Fixed by adding explicit warm-up + `.block_until_ready()` and reporting `step_loop_s` separately.
 
 9. **GPU / vmap benchmarks** — every JIT'd factory should compose with `jax.vmap` over a column batch axis already, but we haven't run the numbers.
-
-10. **Optimize microfast hot path** — new item, identified by item 8. Likely approach: replace the per-bin `.at[ibin, ielem].set(...)` pattern with a single vectorised update over the bin dimension (`jnp.where` + whole-array writes), and vmap over elements instead of Python-looping. Expected to recover 1–2 orders of magnitude on growtest and make it competitive with falltest's 3.4× ratio.
 
 9. **GPU / vmap benchmarks** — every JIT'd factory should compose with `jax.vmap` over a column batch axis already, but we haven't run the numbers.
