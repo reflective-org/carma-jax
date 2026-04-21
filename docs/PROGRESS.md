@@ -1,6 +1,6 @@
 # CARMA-JAX Progress Tracker
 
-## Current Phase: 6b (precision overlay) — COMPLETE. Float32 evaluated and parked.
+## Current Phase: 7.1 (sulfate_utils) — IN PROGRESS
 
 ## Phase Summary
 
@@ -19,7 +19,8 @@
 | growtest cliff fix | COMPLETE | PR #14 |
 | 6a: fp64 precision-comparison harness | COMPLETE | PR #13 |
 | 6b: fp32 overlay — float32 evaluated, parked | COMPLETE | PR #15 |
-| 6c: CPU benchmark JAX vs Fortran | COMPLETE | this PR |
+| 6c: CPU benchmark JAX vs Fortran | COMPLETE | PR #16 — JAX 1.2× / 0.5× / 2.1× of Fortran |
+| 7.1: sulfate_utils (wtpct, density, surf_tens) | COMPLETE | 14 unit tests, 5 figures |
 
 ## Phase 1 (Foundation + Coagulation) — COMPLETE
 

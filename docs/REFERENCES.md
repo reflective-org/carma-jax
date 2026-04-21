@@ -10,6 +10,25 @@
 
 ## Papers by Phase
 
+### Phase 7: H₂SO₄ sulfate physics
+
+- Tabazadeh, A., R.P. Turco, M.Z. Jacobson (1997). "A model for studying the composition and chemical effects of stratospheric aerosols." J. Geophys. Res. 99(D6), 12897–12914.
+  - Wt% H₂SO₄ piecewise activity fits, valid T = 185–260 K, activity = 0.01–1
+  - Used by `wtpct_tabaz` in `src/carma/sulfate_utils.py`
+
+- Washburn, E.W. ed. (1928). "International Critical Tables." NRC.
+  - Tabulated H₂SO₄/H₂O solution densities at 0–100 °C
+  - Used by `sulfate_density` in `src/carma/sulfate_utils.py`
+
+- Beyer, K.D., A.R. Ravishankara, E.R. Lovejoy (1996). "Measurements of the surface tension and density of sulfuric acid solutions at low temperatures." J. Geophys. Res. 101(D9), 14519–14524.
+  - Validates linear-in-T extrapolation of Washburn density to 180–380 K
+
+- Sabinina, L. and L. Terpugow (1935). "Die Oberflächenspannung des Systems Schwefelsäure-Wasser." Z. phys. Chem. A 173, 237–241.
+  - Surface tension fits used by `sulfate_surf_tens` in `src/carma/sulfate_utils.py`
+
+- Mills, M.J. (1996). "Stratospheric Sulfate Aerosol: A Microphysical Model." Ph.D. Thesis, Univ. of Colorado.
+  - Source of the surface-tension table coefficients (`stwtp`, `stc0`, `stc1`)
+
 ### Phase 1: Coagulation
 
 - Fuchs, N.A. (1964). "The Mechanics of Aerosols." Pergamon Press.
