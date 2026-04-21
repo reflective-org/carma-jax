@@ -29,6 +29,13 @@
 - Mills, M.J. (1996). "Stratospheric Sulfate Aerosol: A Microphysical Model." Ph.D. Thesis, Univ. of Colorado.
   - Source of the surface-tension table coefficients (`stwtp`, `stc0`, `stc1`)
 
+- Petters, M.D. and S.M. Kreidenweis (2007). "A single parameter representation of hygroscopic growth and cloud condensation nucleus activity." Atmos. Chem. Phys. 7, 1961–1971.
+  - κ-Köhler framework; Eq. 6 is the wet-radius formula used in `wetr.py::I_PETTERS`
+  - PDF: `docs/papers/Petters-Kreidenweis-2007.pdf`
+
+- Yu, P., et al. (2015). "A new volatility basis set approach to accommodate temperature effects on secondary organic aerosol." J. Adv. Model. Earth Syst. 7, 1905–1922.
+  - Low-temperature RH rescale used when T ≤ 190 K in `wetr.py::_wetr_petters`
+
 ### Phase 1: Coagulation
 
 - Fuchs, N.A. (1964). "The Mechanics of Aerosols." Pergamon Press.
