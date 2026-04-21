@@ -303,6 +303,21 @@ def run_jax_growtest():
     dm_2d = dm[:, None] * jnp.ones((1, NGROUP), dtype=DTYPE)
     ds_thr_arr = jnp.array([-0.1], dtype=DTYPE)
 
+    # Warm-up call — triggers JIT compile of step_microfast so the
+    # subsequent timing loop reflects steady-state per-step cost only.
+    pc_warm, gc_warm, t_warm, _ = step_microfast(
+        pc, gc, t, dtime,
+        rhoa, zmet, rlhe, rlhm, diffus,
+        akelvin, akelvini, gro, gro1, gro2,
+        rup_wet_arr, rmass_2d, dm_2d, rlow_wet_arr,
+        pratt, prat, pden1, palr,
+        ds_thr_arr,
+    )
+    pc_warm.block_until_ready()
+
+    import time as _time
+    _step_t0 = _time.time()
+
     for istep in range(nstep):
         pc, gc, t, rlheat_val = step_microfast(
             pc, gc, t, dtime,
@@ -312,6 +327,7 @@ def run_jax_growtest():
             pratt, prat, pden1, palr,
             ds_thr_arr,
         )
+        pc.block_until_ready()
         nsub = 1  # fixed substeps for make_step_microfast
 
         time = (istep + 1) * dtime
@@ -331,6 +347,7 @@ def run_jax_growtest():
     results["gas_mmr"] = np.array(results["gas_mmr"])
     results["radii"] = np.array(r)
     results["rmass"] = rmass_np
+    results["step_loop_s"] = _time.time() - _step_t0
 
     return results
 

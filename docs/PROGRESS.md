@@ -19,6 +19,7 @@
 | growtest cliff fix | COMPLETE | PR #14 |
 | 6a: fp64 precision-comparison harness | COMPLETE | PR #13 |
 | 6b: fp32 overlay — float32 evaluated, parked | COMPLETE | PR #15 |
+| 6c: CPU benchmark JAX vs Fortran | COMPLETE | this PR |
 
 ## Phase 1 (Foundation + Coagulation) — COMPLETE
 
@@ -264,6 +265,18 @@ These are tracked here explicitly so we don't lose them:
 
 7. **Float32 path** — evaluated in Phase 6b (PR #15) and *parked*. `precision.py` already parameterises the dtype via `CARMA_DTYPE=fp32`, and `scripts/compare_precision.py` + `scripts/plot_precision_overlay.py` measure the cost. Findings: coagtest and vdiftest run cleanly in fp32 (precision cost < 0.1%); falltest / drydeptest / growtest blow up because `SMALL_PC = 1e-50` underflows in fp32 (min subnormal ~1.4e-45), turning the `jnp.maximum(pc, SMALL_PC)` denominator-floor into a true zero. Fixable with dtype-aware constants + a few `.astype(float64)` islands (vapor pressure is the strongest candidate), but not worth the maintenance cost while Fortran-parity precision is the reference and CPU throughput isn't a bottleneck. Revisit only if (a) CPU fp64 becomes a throughput blocker, or (b) we target GPU batched runs where the 2× memory / ~2–3× throughput benefit justifies the mixed-precision plumbing. The harness stays in-tree as measurement infrastructure for that future decision.
 
-8. **CPU throughput benchmark vs Fortran** — prerequisite for reopening item 7. If JAX fp64 is within ~2× of Fortran on the same benchmarks, fp32 is unlikely to be worth the complexity.
+8. **CPU throughput benchmark vs Fortran** — ran Phase 6c (`scripts/benchmark_cpu.py`, `plots/cpu_benchmark/benchmark.png`). JAX fp64 vs Fortran wall time, median of 3 steady-state runs after a warm-up call that drains the JIT cache into the hot path. `.block_until_ready()` on both sides so we're timing actual compute, not async dispatch.
+
+    | test | Fortran | JAX (steady) | ratio |
+    |------|---------|--------------|-------|
+    | coagtest | 10 ms | 12 ms | 1.2× |
+    | falltest | 61 ms | 31 ms | **0.5×** (JAX faster) |
+    | growtest | 5 ms | 10 ms | 2.1× |
+
+    Implication: **JAX fp64 is competitive with Fortran on CPU.** No case for pursuing fp32 on performance grounds. Item 7 (fp32) stays parked.
+
+    Earlier draft numbers in PR #16 initially reported a 319× gap on growtest. That was a measurement bug — growtest's `loop_s` was timing the entire `run_jax_growtest()` function (atmosphere setup, growth-kernel setup, config build, JIT compile, *and* the stepping loop), while the other runners measured only the stepping loop. Fixed by adding explicit warm-up + `.block_until_ready()` and reporting `step_loop_s` separately.
+
+9. **GPU / vmap benchmarks** — every JIT'd factory should compose with `jax.vmap` over a column batch axis already, but we haven't run the numbers.
 
 9. **GPU / vmap benchmarks** — every JIT'd factory should compose with `jax.vmap` over a column batch axis already, but we haven't run the numbers.

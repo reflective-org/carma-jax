@@ -229,6 +229,10 @@ def run_coagtest():
     gc = jnp.zeros((NZ, 0)); gcl = jnp.zeros((NZ, 0)); told = t_k; pcl = pc
     dtime, nstep = 600.0, 72
 
+    # Warm-up: trigger JIT compile before timing.
+    _pc, *_ = step(pc, gc, t_k, pcl, gcl, told, zmet, ckernel, DTYPE(dtime))
+    _pc.block_until_ready()
+
     t0 = time.time()
     nd_hist = [np.array(pc[0, :, 0])]
     for _ in range(nstep):
@@ -314,14 +318,23 @@ def run_falltest():
     step = make_step_transport(cfg)
     gc = jnp.zeros((NZ, 0)); gcl = jnp.zeros((NZ, 0)); told = t_k; pcl = pc
     zeros_bc = jnp.zeros((NBIN, NELEM))
+    zc_cgs = jnp.array(zc_m) * RM2CGS
+    zl_cgs = jnp.array(zl_m) * RM2CGS
+
+    # Warm-up: trigger JIT compile before timing.
+    _pc, *_ = step(pc, gc, t_k, pcl, gcl, told, zmet,
+                   vf, dkz, vd, dz, zc_cgs, zl_cgs,
+                   rhoa, DTYPE(dtime), zeros_bc, zeros_bc, zeros_bc, zeros_bc)
+    _pc.block_until_ready()
 
     t0 = time.time()
     for _ in range(nstep):
         pc, gc, t_k, pcl, gcl, _, _ = step(
             pc, gc, t_k, pcl, gcl, told, zmet,
-            vf, dkz, vd, dz, jnp.array(zc_m) * RM2CGS, jnp.array(zl_m) * RM2CGS,
+            vf, dkz, vd, dz, zc_cgs, zl_cgs,
             rhoa, DTYPE(dtime),
             zeros_bc, zeros_bc, zeros_bc, zeros_bc)
+    pc.block_until_ready()
     loop_s = time.time() - t0
 
     jax_mmr = np.array(pc[:, 0, 0]) / np.array(rhoa_wet)
@@ -448,14 +461,16 @@ def run_drydeptest():
 
 
 def run_growtest():
-    """Growtest — reuse existing validate_growtest machinery."""
+    """Growtest — uses validate_growtest's runner, which now reports a
+    separate ``step_loop_s`` (steady-state stepping loop, after JIT
+    compile) so the measurement is comparable with the other runners.
+    """
     import sys
     sys.path.insert(0, str(Path(__file__).parent))
     from validate_growtest import run_jax_growtest, parse_growtest_bench
 
-    t0 = time.time()
     jax_res = run_jax_growtest()
-    loop_s = time.time() - t0
+    loop_s = jax_res.get("step_loop_s", jax_res.get("total_s", 0.0))
 
     fort = parse_growtest_bench(BENCH_DIR / "carma_growtest.txt")
     jax_mmr = jax_res["mmr_bins"][-1]
