@@ -1,6 +1,6 @@
 # CARMA-JAX Progress Tracker
 
-## Current Phase: 7.1 (sulfate_utils) — IN PROGRESS
+## Current Phase: 7.2 (wetr + hygroscopicity) — IN PROGRESS
 
 ## Phase Summary
 
@@ -21,6 +21,7 @@
 | 6b: fp32 overlay — float32 evaluated, parked | COMPLETE | PR #15 |
 | 6c: CPU benchmark JAX vs Fortran | COMPLETE | PR #16 — JAX 1.2× / 0.5× / 2.1× of Fortran |
 | 7.1: sulfate_utils (wtpct, density, surf_tens) | COMPLETE | 14 unit tests, 5 figures |
+| 7.2: wetr (κ-Köhler + WTPCT) + hygroscopicity | COMPLETE | 15 unit tests, 4 figures |
 
 ## Phase 1 (Foundation + Coagulation) — COMPLETE
 
