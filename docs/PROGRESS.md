@@ -1,6 +1,6 @@
 # CARMA-JAX Progress Tracker
 
-## Current Phase: 8.4 (nsubsteps) — IN PROGRESS
+## Current Phase: 8.5 (versub) — IN PROGRESS
 
 ## Phase Summary
 
@@ -32,6 +32,7 @@
 | 8.2: evap_mono + evap_poly | COMPLETE | 11 unit tests, 1 figure |
 | 8.3: downgxfer (evap-direction nucleation xfer) | COMPLETE | 8 unit tests |
 | 8.4: nsubsteps (adaptive substep-count estimator) | COMPLETE | 10 unit tests |
+| 8.5: versub (explicit-substepping sed solver) | COMPLETE | 8 unit tests, 2 figures |
 
 ## Phase 1 (Foundation + Coagulation) — COMPLETE
 
