@@ -1,6 +1,6 @@
 # CARMA-JAX Progress Tracker
 
-## Current Phase: 7.4b (sulfhetnucrate) — IN PROGRESS
+## Current Phase: 7.5 (sulfnuc driver) — IN PROGRESS
 
 ## Phase Summary
 
@@ -25,6 +25,7 @@
 | 7.3: rhopart (multi-element bin density) | COMPLETE | 9 unit tests, 3 figures |
 | 7.4a: binary_nuc_zhao1995 (classical H2SO4/H2O) | COMPLETE | 8 unit tests, 4 figures |
 | 7.4b: sulfhetnucrate (heterogeneous nucleation) | COMPLETE | 8 unit tests, 4 figures |
+| 7.5: sulfnuc (hom + het driver) | COMPLETE | 17 unit tests, 4 figures |
 
 ## Phase 1 (Foundation + Coagulation) — COMPLETE
 
