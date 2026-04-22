@@ -36,6 +36,23 @@
 - Yu, P., et al. (2015). "A new volatility basis set approach to accommodate temperature effects on secondary organic aerosol." J. Adv. Model. Earth Syst. 7, 1905–1922.
   - Low-temperature RH rescale used when T ≤ 190 K in `wetr.py::_wetr_petters`
 
+- Zhao, J. and R.P. Turco (1995). "Nucleation simulations in the wake of a jet aircraft in stratospheric bypass flow." J. Aerosol Sci. 26, 779–795.
+  - Classical binary H2SO4/H2O nucleation parameterisation
+  - Implemented as `binary_nuc_zhao1995` in `src/carma/nucleation/sulfnucrate.py`
+  - PDF: `docs/papers/Zhao-Turco-1995.pdf`
+
+- Giauque, W.F., E.W. Hornung, J.E. Kunzler, T.R. Rubin (1960). "The thermodynamic properties of aqueous sulfuric acid solutions and hydrates from 15 to 300 °K." J. Amer. Chem. Soc. 82, 62–70.
+  - Partial molal Gibbs energy table used by Zhao-Turco nucleation
+
+- Ayers, G.P., R.W. Gillett, J.L. Gras (1980). "On the vapor pressure of sulfuric acid." Geophys. Res. Lett. 7, 433–436.
+  - H2SO4 equilibrium vapour pressure used in Zhao-Turco
+
+- Lin, J.S. and A. Tabazadeh (2001). "Model calculations of binary liquid–solid and liquid–liquid phase boundaries in the aqueous H2SO4–HNO3 system." J. Geophys. Res. 106(D22), 28117–28134.
+  - Water vapour pressure over H2SO4/H2O solutions (eqn 5)
+
+- Jaecker-Voirol, A. and P. Mirabel (1988). "Nucleation rate in a binary mixture of sulfuric acid and water vapor." J. Phys. Chem. 92, 3518–3521.
+  - Zeldovitch non-equilibrium factor used in Zhao-Turco rate
+
 ### Phase 1: Coagulation
 
 - Fuchs, N.A. (1964). "The Mechanics of Aerosols." Pergamon Press.
