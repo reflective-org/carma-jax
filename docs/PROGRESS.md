@@ -1,6 +1,6 @@
 # CARMA-JAX Progress Tracker
 
-## Current Phase: 7.6a (gasexchange) — IN PROGRESS
+## Current Phase: 7.6b (make_step_sulfate) — IN PROGRESS
 
 ## Phase Summary
 
@@ -27,6 +27,7 @@
 | 7.4b: sulfhetnucrate (heterogeneous nucleation) | COMPLETE | 8 unit tests, 4 figures |
 | 7.5: sulfnuc (hom + het driver) | COMPLETE | 17 unit tests, 4 figures |
 | 7.6a: gasexchange (nuc + growth/evap gas flux) | COMPLETE | 10 unit tests, 3 figures |
+| 7.6b: sulfate_step + make_step_sulfate factory | COMPLETE | 8 unit tests, 4 figures, mass cons <1e-4 @ 6h |
 
 ## Phase 1 (Foundation + Coagulation) — COMPLETE
 
