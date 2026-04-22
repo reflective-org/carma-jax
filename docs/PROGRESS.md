@@ -1,6 +1,6 @@
 # CARMA-JAX Progress Tracker
 
-## Current Phase: 7.2 (wetr + hygroscopicity) — IN PROGRESS
+## Current Phase: 7.3 (rhopart) — IN PROGRESS
 
 ## Phase Summary
 
@@ -22,6 +22,7 @@
 | 6c: CPU benchmark JAX vs Fortran | COMPLETE | PR #16 — JAX 1.2× / 0.5× / 2.1× of Fortran |
 | 7.1: sulfate_utils (wtpct, density, surf_tens) | COMPLETE | 14 unit tests, 5 figures |
 | 7.2: wetr (κ-Köhler + WTPCT) + hygroscopicity | COMPLETE | 15 unit tests, 4 figures |
+| 7.3: rhopart (multi-element bin density) | COMPLETE | 9 unit tests, 3 figures |
 
 ## Phase 1 (Foundation + Coagulation) — COMPLETE
 
