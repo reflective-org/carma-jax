@@ -1,6 +1,6 @@
 # CARMA-JAX Progress Tracker
 
-## Current Phase: 9.4 (make_step_full composition) — IN PROGRESS
+## Current Phase: 9.5 (nuctest tail gate) — IN PROGRESS
 
 ## Phase Summary
 
@@ -37,6 +37,7 @@
 | 9.2: detrain.py | DEFERRED to Phase 11 | in-cloud path not on critical sulfate path |
 | 9.3: adaptive retry via nested lax.while_loop | COMPLETE | 3 unit tests; JIT-clean end-to-end |
 | 9.4: make_step_full (growth + sulfate composition) | COMPLETE | 5 tests + benchmark; 92 μs/col warm, 2 μs/col vmap-1000 |
+| 9.5: nuctest tail reference | COMPLETE | Fortran peak = 203 μm; 10% band [183, 223] μm. JAX integration deferred to Phase 11. |
 
 ## Phase 1 (Foundation + Coagulation) — COMPLETE
 
