@@ -1,6 +1,6 @@
 # CARMA-JAX Progress Tracker
 
-## Current Phase: 9.1 (newstate dispatcher) — IN PROGRESS
+## Current Phase: 9.3 (adaptive retry, JIT) — IN PROGRESS
 
 ## Phase Summary
 
@@ -34,6 +34,8 @@
 | 8.4: nsubsteps (adaptive substep-count estimator) | COMPLETE | 10 unit tests |
 | 8.5: versub (explicit-substepping sed solver) | COMPLETE | 8 unit tests, 2 figures |
 | 9.1: newstate dispatcher (clear-sky only) | COMPLETE | 3 unit tests; in-cloud stubbed to Phase 11 |
+| 9.2: detrain.py | DEFERRED to Phase 11 | in-cloud path not on critical sulfate path |
+| 9.3: adaptive retry via nested lax.while_loop | COMPLETE | 3 unit tests; JIT-clean end-to-end |
 
 ## Phase 1 (Foundation + Coagulation) — COMPLETE
 
