@@ -1,6 +1,6 @@
 # CARMA-JAX Progress Tracker
 
-## Current Phase: 8.1 (fixcorecol + coremasscheck) — IN PROGRESS
+## Current Phase: 8.2 (evap_mono + evap_poly) — IN PROGRESS
 
 ## Phase Summary
 
@@ -29,6 +29,7 @@
 | 7.6a: gasexchange (nuc + growth/evap gas flux) | COMPLETE | 10 unit tests, 3 figures |
 | 7.6b: sulfate_step + make_step_sulfate factory | COMPLETE | 8 unit tests, 4 figures, mass cons <1e-4 @ 6h |
 | 8.1: fixcorecol + coremasscheck | COMPLETE | 13 unit tests, 1 figure, col mass cons 1e-16 |
+| 8.2: evap_mono + evap_poly | COMPLETE | 11 unit tests, 1 figure |
 
 ## Phase 1 (Foundation + Coagulation) — COMPLETE
 
