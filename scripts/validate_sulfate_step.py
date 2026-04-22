@@ -148,16 +148,14 @@ def fig_time_evolution():
     )
 
     # --- Right panel: continuous source, ~stratospheric production ---
-    # 1e5 molec/cm³/s ≈ stratospheric SO2+OH flux
+    # 1e5 molec/cm³/s ≈ stratospheric SO2+OH flux. Uniform dt to avoid
+    # the mass-gate artefact: each step injects ``src · dt`` of gas;
+    # changing dt mid-run changes the injection pulse size and causes
+    # the gate to fire asymmetrically at the schedule boundary.
     src_molec_per_s = 1e5
     src_g_per_s = src_molec_per_s * _GWTMOL_H2SO4 / float(AVG)
     gc_start = jnp.asarray([gc0[0], 0.0])  # start with no H2SO4
-    schedule_source = [
-        (0.01, 100),   # 0–1 s
-        (0.1, 90),     # 1–10 s
-        (1.0, 90),     # 10–100 s
-        (10.0, 90),    # 100–1000 s
-    ]
+    schedule_source = [(0.1, 10000)]       # uniform 0.1-s dt for 1000 s
     t_src, gc_src, pc_src = _run_with_source(
         cfg, gc_start, pvapl, T, src_g_per_s, schedule_source,
     )
