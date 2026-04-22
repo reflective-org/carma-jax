@@ -1,6 +1,6 @@
 # CARMA-JAX Progress Tracker
 
-## Current Phase: 8.5 (versub) — IN PROGRESS
+## Current Phase: 9.1 (newstate dispatcher) — IN PROGRESS
 
 ## Phase Summary
 
@@ -33,6 +33,7 @@
 | 8.3: downgxfer (evap-direction nucleation xfer) | COMPLETE | 8 unit tests |
 | 8.4: nsubsteps (adaptive substep-count estimator) | COMPLETE | 10 unit tests |
 | 8.5: versub (explicit-substepping sed solver) | COMPLETE | 8 unit tests, 2 figures |
+| 9.1: newstate dispatcher (clear-sky only) | COMPLETE | 3 unit tests; in-cloud stubbed to Phase 11 |
 
 ## Phase 1 (Foundation + Coagulation) — COMPLETE
 
