@@ -49,16 +49,24 @@ def main():
     evdrop = 1.0
     evcore = jnp.asarray([0.0, 1.0])
 
-    # Three regimes
+    # Three regimes. Pick coreavg values so factor = coreavg/rmass[jbin]
+    # is close to 1 in each boundary case; that way the three panels
+    # are visually comparable. For an oversized/undersized coreavg the
+    # factor would scale particle number by that factor (Fortran
+    # conserves core mass, not number, at the grid boundaries).
     mono_cases = [
-        ("too_small", 0, dict(too_small=True, too_big=False, nuc_small=False),
-         0.1 * float(rmass[0, 0])),
-        ("interior (iavg=6)", 6, dict(too_small=False, too_big=False, nuc_small=False),
+        ("too_small (coreavg = 0.7·rmass[0])", 0,
+         dict(too_small=True, too_big=False, nuc_small=False),
+         0.7 * float(rmass[0, 0])),
+        ("interior (iavg=6)", 6,
+         dict(too_small=False, too_big=False, nuc_small=False),
          0.5 * (float(rmass[5, 0]) + float(rmass[6, 0]))),
-        ("too_big", nbin - 1, dict(too_small=False, too_big=True, nuc_small=False),
-         10.0 * float(rmass[-1, 0])),
+        ("too_big (coreavg = 1.3·rmass[nbin-1])", nbin - 1,
+         dict(too_small=False, too_big=True, nuc_small=False),
+         1.3 * float(rmass[-1, 0])),
     ]
     width = 0.28
+    totals = []
     for k, (label, iavg, flags, coreavg) in enumerate(mono_cases):
         delta = evap_mono(
             evdrop=evdrop, evcore=evcore, coreavg=coreavg, iavg=iavg,
@@ -68,11 +76,14 @@ def main():
         )
         ax.bar(bin_idx + (k - 1) * width, np.asarray(delta[:, 0]),
                width=width, label=label)
+        totals.append(float(jnp.sum(delta[:, 0])))
     ax.set_xlabel("target bin")
-    ax.set_ylabel("number scatter (share of evdrop)")
-    ax.set_title("evap_mono: three regimes")
+    ax.set_ylabel("number scatter [per evdrop]")
+    ax.set_title(
+        f"evap_mono — Σ number = [{totals[0]:.2f}, {totals[1]:.2f}, {totals[2]:.2f}]"
+    )
     ax.grid(True, axis="y", alpha=0.3)
-    ax.legend()
+    ax.legend(fontsize=8)
 
     # ------ evap_poly panel ------
     ax = axes[1]
