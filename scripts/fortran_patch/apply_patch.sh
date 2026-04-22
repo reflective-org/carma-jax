@@ -33,7 +33,9 @@ if grep -qF "${CMAKE_LINE}" "${CMAKELISTS}"; then
   echo "==> CMake entry already present"
 else
   echo "==> Appending CMake entry to ${CMAKELISTS}"
-  echo "${CMAKE_LINE}" >> "${CMAKELISTS}"
+  # Prefix with newline — some CMakeLists don't end with one, so
+  # a raw append would glue the entry onto the previous line.
+  printf '\n%s\n' "${CMAKE_LINE}" >> "${CMAKELISTS}"
 fi
 
 if [[ ! -d "${BUILD_DIR}" ]]; then
@@ -44,9 +46,9 @@ fi
 echo "==> Rebuilding in ${BUILD_DIR}"
 cd "${BUILD_DIR}"
 cmake .. >/dev/null
-make SULFATE_ENSEMBLE.exe
+make test_sulfate_ensemble
 
-BINARY="${BUILD_DIR}/carma/SULFATE_ENSEMBLE.exe"
+BINARY="${BUILD_DIR}/test_sulfate_ensemble"
 if [[ -x "${BINARY}" ]]; then
   echo ""
   echo "SUCCESS. Binary at: ${BINARY}"

@@ -173,10 +173,17 @@ def main():
                         default=Path("data/sulfate_fortran_outputs.npz"))
     parser.add_argument("--max-workers", type=int, default=None)
     parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument("--n", type=int, default=None,
+                        help="Override scenario count (for smoke tests)")
     args = parser.parse_args()
 
     from generate_sulfate_scenarios import load_scenarios
     scenarios = load_scenarios(args.scenarios)
+    if args.n is not None:
+        scenarios = {k: (v[:args.n] if hasattr(v, "shape") and v.ndim > 0
+                         else v)
+                     for k, v in scenarios.items()}
+        scenarios["_n"] = args.n
     n = int(scenarios["_n"])
     print(f"Running {n} scenarios through {args.binary}...")
 
