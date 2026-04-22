@@ -36,17 +36,18 @@ Split the work:
    H₂SO₄ decay). Lets every orchestrator test run in <1 s without
    a Fortran build.
 
-3. **Fortran patch (reference only).**
-   ``scripts/fortran_patch/carma_sulfatetest_ensemble.F90.template``
-   is a skeleton showing the exact Fortran modifications the
-   orchestrator expects. It is **not** committed to
-   ``../original-carma``. Either:
-   - copy it alongside ``carma_sulfatetest.F90`` and add to
-     CMakeLists, OR
-   - patch the existing ``carma_sulfatetest.F90`` in place.
+3. **Fortran patch (full, ready to apply).**
+   ``scripts/fortran_patch/carma_sulfatetest_ensemble.F90`` is a
+   complete working Fortran source mirroring
+   ``carma_sulfatetest.F90`` with the hard-coded constants
+   replaced by scenario-file reads. ``apply_patch.sh`` copies it
+   into ``../original-carma/CARMA/tests/``, appends one
+   ``create_standard_test`` entry to the CMakeLists, and rebuilds
+   to produce ``SULFATE_ENSEMBLE.exe``.
 
-   Either way, the build produces a binary that the orchestrator
-   can call.
+   The patch is kept in our repo (not committed to
+   ``../original-carma``) so upstream pulls don't clobber it;
+   re-running ``apply_patch.sh`` is idempotent.
 
 ## Interface contract
 
