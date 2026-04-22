@@ -39,6 +39,8 @@
 | 9.4: make_step_full (growth + sulfate composition) | COMPLETE | 5 tests + benchmark; 92 μs/col warm, 2 μs/col vmap-1000 |
 | 9.5: nuctest tail reference | COMPLETE | Fortran peak = 203 μm; 10% band [183, 223] μm. JAX integration deferred to Phase 11. |
 | 10.1: scenario generator (LHS over 6 axes) | COMPLETE | 9 unit tests, 2 figures, 1000-scenario NPZ (47 KB) |
+| 10.2: Fortran orchestrator + apply_patch.sh | COMPLETE | 7 unit tests + real Fortran build validated, 10/10 scenarios ok |
+| 10.3: JAX ensemble run | COMPLETE | 1000 scenarios, 1000/1000 ok, 170 KB outputs.npz committed |
 
 ## Phase 1 (Foundation + Coagulation) — COMPLETE
 
