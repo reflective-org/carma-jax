@@ -1,6 +1,6 @@
 # CARMA-JAX Progress Tracker
 
-## Current Phase: 7.4a (Zhao-Turco 1995 nucleation) — IN PROGRESS
+## Current Phase: 7.4b (sulfhetnucrate) — IN PROGRESS
 
 ## Phase Summary
 
@@ -24,6 +24,7 @@
 | 7.2: wetr (κ-Köhler + WTPCT) + hygroscopicity | COMPLETE | 15 unit tests, 4 figures |
 | 7.3: rhopart (multi-element bin density) | COMPLETE | 9 unit tests, 3 figures |
 | 7.4a: binary_nuc_zhao1995 (classical H2SO4/H2O) | COMPLETE | 8 unit tests, 4 figures |
+| 7.4b: sulfhetnucrate (heterogeneous nucleation) | COMPLETE | 8 unit tests, 4 figures |
 
 ## Phase 1 (Foundation + Coagulation) — COMPLETE
 

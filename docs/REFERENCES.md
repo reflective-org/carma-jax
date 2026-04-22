@@ -53,6 +53,9 @@
 - Jaecker-Voirol, A. and P. Mirabel (1988). "Nucleation rate in a binary mixture of sulfuric acid and water vapor." J. Phys. Chem. 92, 3518–3521.
   - Zeldovitch non-equilibrium factor used in Zhao-Turco rate
 
+- Fletcher, N.H. (1958). "Size effect in heterogeneous nucleation." J. Chem. Phys. 29, 572–576.
+  - Geometric factor fv1(xm, contact_angle) used in `src/carma/nucleation/sulfhetnucrate.py`
+
 ### Phase 1: Coagulation
 
 - Fuchs, N.A. (1964). "The Mechanics of Aerosols." Pergamon Press.
