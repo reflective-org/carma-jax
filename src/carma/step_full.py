@@ -1,0 +1,177 @@
+"""End-to-end single-column microphysics step (``make_step_full``).
+
+Composes the adaptive-retry growth kernel (``newstate_calc_growth_jit``)
+with the sulfate nucleation + gas-exchange step
+(``sulfate_step_one_level``) into one ``@jax.jit`` closure. This is
+the per-column driver the Phase 10 ensemble will ``vmap`` across
+1000 scenarios.
+
+Scope
+-----
+
+- **Included**: growth (adaptive retry), sulfate nucleation,
+  H2SO4 gas balance. One JIT'd closure.
+- **Not included**: vertical transport, coagulation. Those stay as
+  separate factories (``make_step_transport`` / ``make_step_coag``)
+  so that 1-D column users can schedule them at the appropriate
+  outer-loop position. Composition into a single flat factory is a
+  design exercise deferred until the Phase 10 ensemble identifies
+  whether it's needed for performance.
+- **Not included yet**: mixed-group configs (e.g. sulfate + ice).
+  Single-group sulfate is the Phase 10 headline use case. Extension
+  to multi-group lands naturally when Phase 11 introduces ice
+  groups.
+
+Interface
+---------
+
+Factory takes a ``CarmaConfig``; closure accepts traced state +
+environmental fields that change per timestep. All static config
+(bin tables, element types, method strings, step counts) is bound
+at factory time.
+"""
+
+from functools import partial
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+from carma.newstate_calc_jit import newstate_calc_growth_jit
+from carma.precision import DTYPE
+from carma.sulfate_step import sulfate_step_one_level
+
+
+def make_step_full(
+    config,
+    igroup_sulfate=0,
+    igas_h2so4=1,
+    igas_h2o=0,
+    do_grow=True,
+    do_sulfate=True,
+    method="ZhaoTurco",
+    minsubsteps=1,
+    maxsubsteps=128,
+    maxretries=10,
+):
+    """Build a JIT'd end-to-end single-column microphysics step.
+
+    Args:
+        config: ``CarmaConfig`` with bin/group/gas tables.
+        igroup_sulfate: Index of the sulfate group (default 0).
+        igas_h2so4, igas_h2o: Gas-index of H2SO4/H2O.
+        do_grow: Run adaptive-retry growth step.
+        do_sulfate: Run sulfate nucleation + gas exchange.
+        method: Sulfate nucleation method (``"ZhaoTurco"`` default).
+        minsubsteps, maxsubsteps, maxretries: Growth substep bounds.
+
+    Returns:
+        ``step(pc, gc, t, dtime, **env)`` closure that returns
+        ``(pc_new, gc_new, t_new, diag)``.
+
+    ``env`` contains the per-timestep environmental fields needed by
+    growth: ``rhoa, zmet, rlhe, rlhm, diffus, akelvin, akelvini, gro,
+    gro1, gro2, rup_wet, rlow_wet, pratt, prat, pden1, palr, pvapl,
+    ds_threshold_arr``.
+    """
+    group = config.groups[igroup_sulfate]
+    nbin = int(config.nbin)
+    ngas = int(config.ngas)
+    nelem = int(config.nelem)
+    ngroup = int(config.ngroup)
+
+    # Bin tables for sulfate path
+    r_bins = jnp.asarray(group.r, dtype=DTYPE)
+    rmass = jnp.asarray(group.rmass, dtype=DTYPE)
+    rmassup = jnp.asarray(group.rmassup, dtype=DTYPE)
+    rmass_2d = jnp.asarray(
+        jnp.stack([jnp.asarray(g.rmass, dtype=DTYPE) for g in config.groups],
+                  axis=1)
+    )   # (nbin, ngroup)
+    dm_2d = jnp.asarray(
+        jnp.stack([jnp.asarray(g.dm, dtype=DTYPE) for g in config.groups],
+                  axis=1)
+    )
+    rmrat_val = float(group.rmrat)
+
+    # Diffmass for sulfate (single group)
+    col = rmass[:, None]
+    diffmass_sulf = (col[:, :, None, None] - col[None, None, :, :]).astype(DTYPE)
+
+    # inuc2bin: sulfate-onto-self bin i → i+1, top has no target
+    i2_map = jnp.arange(nbin, dtype=jnp.int32) + 1
+    i2_map = jnp.where(i2_map < nbin, i2_map,
+                        jnp.asarray(-1, dtype=jnp.int32))
+    inuc2bin = i2_map.reshape(nbin, 1, 1)
+
+    # Static element / group descriptors for microfast
+    is_ice_arr = tuple(bool(g.is_ice) for g in config.groups)
+    igrowgas_arr = tuple(
+        0 if (do_grow and ngas > 0) else -1
+        for _ in config.elements
+    )
+    ienconc_arr = tuple(int(g.ienconc) for g in config.groups)
+    igroup_arr = tuple(int(e.igroup) for e in config.elements)
+    gwtmol_arr = tuple(float(g.wtmol) for g in config.gases) or (18.0,)
+
+    @jax.jit
+    def step(
+        pc, gc, t, dtime,
+        rhoa, zmet, rlhe, rlhm, diffus,
+        akelvin, akelvini, gro, gro1, gro2,
+        rup_wet, rlow_wet,
+        pratt, prat, pden1, palr,
+        pvapl,
+        ds_threshold_arr,
+        iz=0, scale_threshold=1.0,
+    ):
+        """Advance single-column state by ``dtime``.
+
+        Pipeline: growth (if enabled) → sulfate nucleation + gas
+        exchange (if enabled). All state updates are explicit Euler
+        after the relevant pure-function kernel computes rates.
+
+        Diagnostics: dict with growth substeps used and sulfate
+        rhompe / rnuclg / gasprod.
+        """
+        diag = {}
+
+        # --- Growth (adaptive retry, JIT-clean) ---
+        if do_grow:
+            pc, gc, t, rlheat, nts_used = newstate_calc_growth_jit(
+                pc, gc, t, iz, dtime,
+                rhoa, zmet, rlhe, rlhm, diffus,
+                akelvin, akelvini, gro, gro1, gro2,
+                rup_wet, rmass_2d, dm_2d, rlow_wet,
+                pratt, prat, pden1, palr,
+                is_ice_arr, igrowgas_arr, ienconc_arr,
+                igroup_arr, gwtmol_arr,
+                nbin, ngroup, ngas, nelem,
+                minsubsteps=minsubsteps, maxsubsteps=maxsubsteps,
+                maxretries=maxretries,
+                ds_threshold_arr=ds_threshold_arr,
+                scale_threshold=DTYPE(scale_threshold),
+            )
+            diag["growth_substeps"] = nts_used
+            diag["rlheat"] = rlheat
+
+        # --- Sulfate nucleation + gas exchange ---
+        if do_sulfate:
+            # Pull sulfate group's pc, h2so4 gas
+            pc_sulf = pc[iz, :, int(config.groups[igroup_sulfate].ienconc)]
+            gc_h2so4 = gc[iz, igas_h2so4]
+            gc_h2o = gc[iz, igas_h2o]
+            pc_sulf_new, gc_h2so4_new, sulf_diag = sulfate_step_one_level(
+                pc_sulf, gc_h2so4, gc_h2o, t[iz], pvapl, zmet[iz], dtime,
+                r_bins, rmass, rmassup, diffmass_sulf, inuc2bin,
+                rmrat_val, method=method,
+            )
+            # Scatter back
+            pc = pc.at[iz, :,
+                int(config.groups[igroup_sulfate].ienconc)].set(pc_sulf_new)
+            gc = gc.at[iz, igas_h2so4].set(gc_h2so4_new)
+            diag["sulfate"] = sulf_diag
+
+        return pc, gc, t, diag
+
+    return step
