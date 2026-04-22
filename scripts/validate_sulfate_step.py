@@ -92,70 +92,161 @@ def _strat_state(T=220.0, rh=0.5, h2so4_ppbv=1.0, p_hpa=50.0, zmet=1.0):
     return gc, pvapl, T
 
 
-def fig_time_evolution():
-    cfg, r = _make_config()
-    step = make_step_sulfate(cfg, ntsubsteps=4)
-    gc, pvapl, T = _strat_state()
+def _run_with_source(cfg, gc0, pvapl, T, source_h2so4_per_s,
+                      schedule, ntsubsteps=1):
+    """Integrate under a prescribed H2SO4 production rate.
 
-    nstep = 360
-    dtime = 60.0
-    times = np.arange(nstep + 1) * dtime
-
+    ``schedule`` is a list of ``(dt_s, n_steps)`` pairs; the source
+    rate is applied as an explicit increment to gc before each step.
+    Returns logged (times, gc_h2so4, total_pc) per step.
+    """
+    step = make_step_sulfate(cfg, ntsubsteps=ntsubsteps)
     pc = jnp.zeros(cfg.nbin)
-    pcs = [float(jnp.sum(pc))]
-    gcs = [float(gc[1])]
+    gc = gc0
+    t_cur = 0.0
+    times = [0.0]
+    gc_log = [float(gc[1])]
+    pc_log = [0.0]
+    for dt, n in schedule:
+        for _ in range(n):
+            # Inject fresh H2SO4 (SO2 + OH photochemistry surrogate)
+            gc = gc.at[1].add(source_h2so4_per_s * dt)
+            pc, gc, _ = step(pc, gc, T, pvapl, 1.0, dt)
+            t_cur += dt
+            times.append(t_cur)
+            gc_log.append(float(gc[1]))
+            pc_log.append(float(jnp.sum(pc)))
+    return np.asarray(times), np.asarray(gc_log), np.asarray(pc_log)
 
-    for _ in range(nstep):
-        pc, gc, _ = step(pc, gc, T, pvapl, 1.0, dtime)
-        pcs.append(float(jnp.sum(pc)))
-        gcs.append(float(gc[1]))
 
-    fig, ax1 = plt.subplots(figsize=(7, 5))
-    ax2 = ax1.twinx()
-    l1 = ax1.plot(times / 3600, np.array(gcs) / float(gc[1] + 1e-40),
+def fig_time_evolution():
+    """Two-panel time evolution.
+
+    Left: 'puff' scenario — initial H2SO4, no source. Depletion is
+        effectively instantaneous on the integrator's time scale
+        (<<1 μs at saturated conditions) so we resolve it with a
+        very fine dt and show the curve on a log-time axis.
+    Right: 'continuous source' scenario — fresh H2SO4 produced at
+        a constant rate (stratospheric SO2 + OH analogue, ~1e5
+        molec/cm³/s). Shows the quasi-steady-state where nucleation
+        consumes incoming gas.
+    """
+    cfg, r = _make_config()
+    gc0, pvapl, T = _strat_state()
+    gc0_h2so4 = float(gc0[1])
+
+    # --- Left panel: puff + no source, ultra-fine dt to resolve ---
+    schedule_puff = [
+        (1e-7, 100),    # 0–10 μs at 0.1-μs dt
+        (1e-6, 90),     # 10–100 μs at 1-μs dt
+        (1e-5, 90),     # 0.1–1 ms at 10-μs dt
+        (1e-4, 90),     # 1–10 ms at 100-μs dt
+        (1e-3, 90),     # 10–100 ms at 1-ms dt
+    ]
+    t_puff, gc_puff, pc_puff = _run_with_source(
+        cfg, gc0, pvapl, T, 0.0, schedule_puff,
+    )
+
+    # --- Right panel: continuous source, ~stratospheric production ---
+    # 1e5 molec/cm³/s ≈ stratospheric SO2+OH flux
+    src_molec_per_s = 1e5
+    src_g_per_s = src_molec_per_s * _GWTMOL_H2SO4 / float(AVG)
+    gc_start = jnp.asarray([gc0[0], 0.0])  # start with no H2SO4
+    schedule_source = [
+        (0.01, 100),   # 0–1 s
+        (0.1, 90),     # 1–10 s
+        (1.0, 90),     # 10–100 s
+        (10.0, 90),    # 100–1000 s
+    ]
+    t_src, gc_src, pc_src = _run_with_source(
+        cfg, gc_start, pvapl, T, src_g_per_s, schedule_source,
+    )
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+    # LEFT: puff depletion
+    ax = axes[0]
+    ax2 = ax.twinx()
+    l1 = ax.plot(np.maximum(t_puff, 1e-9), gc_puff / gc0_h2so4,
                   "C0-", lw=2, label="H$_2$SO$_4$ / H$_2$SO$_4$(0)")
-    l2 = ax2.plot(times / 3600, pcs, "C3--", lw=2, label="total pc [#/cm$^3$]")
-    ax1.set_xlabel("time [hours]")
-    ax1.set_ylabel("H$_2$SO$_4$ / initial", color="C0")
-    ax2.set_ylabel("total particle number [#/cm$^3$]", color="C3")
-    ax1.set_yscale("log")
+    l2 = ax2.plot(np.maximum(t_puff, 1e-9), np.maximum(pc_puff, 1e-10),
+                   "C3--", lw=2, label="total pc [#/cm$^3$]")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
     ax2.set_yscale("log")
+    ax.set_xlabel("time [s]")
+    ax.set_ylabel("H$_2$SO$_4$ / initial", color="C0")
+    ax2.set_ylabel("total particle number [#/cm$^3$]", color="C3")
     lines = l1 + l2
-    ax1.legend(lines, [l.get_label() for l in lines], loc="lower left")
-    ax1.grid(True, which="both", alpha=0.3)
-    ax1.set_title("Sulfate factory evolution (T=220K, RH=50%, 1 ppbv H2SO4)")
+    ax.legend(lines, [l.get_label() for l in lines], loc="center right")
+    ax.grid(True, which="both", alpha=0.3)
+    ax.set_title("Puff: instantaneous depletion at saturated conditions")
+
+    # RIGHT: continuous source
+    ax = axes[1]
+    ax2 = ax.twinx()
+    l1 = ax.plot(np.maximum(t_src, 1e-3), np.maximum(gc_src, 1e-30),
+                  "C0-", lw=2, label="H$_2$SO$_4$ [g/cm$^3$]")
+    l2 = ax2.plot(np.maximum(t_src, 1e-3), np.maximum(pc_src, 1e-10),
+                   "C3--", lw=2, label="total pc [#/cm$^3$]")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax2.set_yscale("log")
+    ax.set_xlabel("time [s]")
+    ax.set_ylabel("H$_2$SO$_4$ [g/cm$^3$]", color="C0")
+    ax2.set_ylabel("total particle number [#/cm$^3$]", color="C3")
+    lines = l1 + l2
+    ax.legend(lines, [l.get_label() for l in lines], loc="center right")
+    ax.grid(True, which="both", alpha=0.3)
+    ax.set_title(r"Continuous source (10$^5$ molec/cm$^3$/s) — quasi-steady")
+
+    fig.suptitle(
+        "Sulfate factory evolution at T = 220 K, RH = 50%")
     fig.tight_layout()
     fig.savefig(OUTDIR / "fig1_time_evolution.png", dpi=140)
     plt.close(fig)
 
 
 def fig_size_distribution_evolution():
+    """Snapshots of pc(bin) during the depletion episode and the
+    subsequent plateau. Uses the same ms-scale resolution as fig 1."""
     cfg, r = _make_config()
-    step = make_step_sulfate(cfg, ntsubsteps=4)
+    step = make_step_sulfate(cfg, ntsubsteps=1)
     gc, pvapl, T = _strat_state()
 
-    snap_hours = [0.0, 1.0, 6.0, 24.0]
+    # Snapshot times (seconds): early (in-depletion), mid, late
+    snap_times_s = [0.0, 0.005, 0.05, 1.0, 60.0]
     pc = jnp.zeros(cfg.nbin)
-    dtime = 60.0
-    snapshots = {}
-    for hr in snap_hours:
-        n_steps_needed = int(hr * 3600 / dtime)
-        steps_done = 0
-        for _ in range(n_steps_needed - (0 if 0.0 not in snapshots else 0)):
-            pc, gc, _ = step(pc, gc, T, pvapl, 1.0, dtime)
-            steps_done += 1
-        snapshots[hr] = np.asarray(pc).copy()
+    t_cur = 0.0
+    snapshots = {0.0: np.asarray(pc).copy()}
+
+    # Use variable dt: tiny during the fast phase, coarse afterward
+    schedule = [
+        (0.0001, 50),   # 0–5 ms at 0.1-ms dt
+        (0.001, 45),    # 5–50 ms at 1-ms dt
+        (0.01, 95),     # 50 ms – 1 s at 10-ms dt
+        (0.5, 118),     # 1–60 s at 0.5-s dt
+    ]
+    for dt, n in schedule:
+        for _ in range(n):
+            pc, gc, _ = step(pc, gc, T, pvapl, 1.0, dt)
+            t_cur += dt
+            for st in snap_times_s:
+                if st not in snapshots and t_cur >= st:
+                    snapshots[st] = np.asarray(pc).copy()
 
     r_nm = np.asarray(r) * 1e7
     fig, ax = plt.subplots(figsize=(7, 5))
-    for hr, color in zip(snap_hours, ["C0", "C1", "C2", "C3"]):
-        y = np.maximum(snapshots[hr], 1e-10)
-        ax.plot(r_nm, y, "o-", color=color, lw=1.5, ms=4, label=f"t = {hr} h")
+    colors = ["C0", "C1", "C2", "C3", "C4"]
+    for (t_s, color) in zip(snap_times_s, colors):
+        y = np.maximum(snapshots.get(t_s, snapshots[0.0]), 1e-10)
+        label = f"t = {t_s*1000:.1f} ms" if t_s < 1 else f"t = {t_s:.0f} s"
+        ax.plot(r_nm, y, "o-", color=color, lw=1.5, ms=4, label=label)
     ax.set_xlabel("bin radius [nm]")
     ax.set_ylabel("pc [#/cm$^3$]")
     ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_title("Size distribution evolution (T=220K, RH=50%, 1 ppbv)")
+    ax.set_title("Size distribution during H2SO4 depletion + plateau")
     ax.grid(True, which="both", alpha=0.3)
     ax.legend()
     fig.tight_layout()
@@ -164,30 +255,44 @@ def fig_size_distribution_evolution():
 
 
 def fig_mass_conservation():
+    """Mass-conservation error across the depletion episode.
+    Uses the same ms-scale dt schedule as fig 2 so the error is
+    measured during active nucleation, not on a post-depletion
+    plateau where nothing happens."""
     cfg, r = _make_config()
-    step = make_step_sulfate(cfg, ntsubsteps=4)
+    step = make_step_sulfate(cfg, ntsubsteps=1)
     gc, pvapl, T = _strat_state()
 
     rmass = cfg.groups[0].rmass
     pc = jnp.zeros(cfg.nbin).at[5].set(1e3)
     total0 = float(gc[1]) + float(jnp.sum(pc * rmass))
 
-    nstep = 360
-    dtime = 60.0
-    times = np.arange(nstep + 1) * dtime / 3600
+    t_cur = 0.0
+    times = [0.0]
     errs = [0.0]
 
-    for _ in range(nstep):
-        pc, gc, _ = step(pc, gc, T, pvapl, 1.0, dtime)
-        total = float(gc[1]) + float(jnp.sum(pc * rmass))
-        errs.append(abs(total - total0) / total0)
+    schedule = [
+        (0.0001, 50),
+        (0.001, 45),
+        (0.01, 95),
+        (0.5, 118),
+    ]
+    for dt, n in schedule:
+        for _ in range(n):
+            pc, gc, _ = step(pc, gc, T, pvapl, 1.0, dt)
+            t_cur += dt
+            total = float(gc[1]) + float(jnp.sum(pc * rmass))
+            times.append(t_cur)
+            errs.append(abs(total - total0) / total0)
 
     fig, ax = plt.subplots(figsize=(7, 5))
     ax.plot(times, errs, "C0-", lw=1.5)
-    ax.set_xlabel("time [hours]")
+    ax.set_xlabel("time [s]")
     ax.set_ylabel("|mass error| / initial")
+    ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_title("H$_2$SO$_4$ mass conservation (gas + particle), 6-hour run")
+    ax.set_title(
+        "H$_2$SO$_4$ mass conservation across depletion (gas + particle)")
     ax.grid(True, which="both", alpha=0.3)
     ax.axhline(1e-4, color="red", ls="--", alpha=0.5, label="1e-4 tolerance")
     ax.legend()
