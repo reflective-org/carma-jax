@@ -78,6 +78,43 @@ Recommended next step is Option B for this PR's gate (so the
 Option A in a separate phase (to validate the full Phase 9.4 /
 Phase 11 composition).
 
+## Update after attempting Option B
+
+Tried flipping ``do_grow=.false., do_coag=.false.`` in
+``carma_sulfatetest_ensemble.F90``. Fortran segfaults. Reading
+``microfast.F90``:
+
+```fortran
+  if (do_grow) then          ! line 57
+    ...
+    call sulfnuc(carma, cstate, iz, rc)   ! line 79 — NUCLEATION is here
+    ...
+    call growevapl(...)
+    ...
+  endif
+```
+
+**Fortran CARMA couples sulfate nucleation to the growth branch** —
+``sulfnuc`` only runs if ``do_grow=.true.``. Option B as
+conceived ("Fortran does nucleation + gas exchange only") is not
+achievable by flipping flags. Would require surgery in
+``microfast.F90`` to expose a ``do_nucleate_only`` path.
+
+That makes Option B no cheaper than Option A. The revised
+recommendation is:
+
+- **Option A-lite (proposed next)**: wire ``setup_gkern`` into the
+  JAX ensemble so growth kernels reflect each scenario's T/p/RH.
+  Leaves coagulation composed-out of JAX; Fortran still has coag
+  enabled. Quantify the coag-only residual separately.
+- **Option A-full (later)**: also add ``make_step_coag`` into
+  ``make_step_full`` for bit-parity on coag. Larger phase-11-ish
+  scope.
+
+The current state of this PR — both ensembles ran, parity
+comparison infrastructure works, gap clearly documented — is
+already a useful deliverable even before we close the gate.
+
 ## Consequences
 
 - Phase 10.4 gate technically fails on the current `make_step_full`
