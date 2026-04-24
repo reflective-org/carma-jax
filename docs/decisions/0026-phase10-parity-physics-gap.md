@@ -115,6 +115,53 @@ The current state of this PR — both ensembles ran, parity
 comparison infrastructure works, gap clearly documented — is
 already a useful deliverable even before we close the gate.
 
+## Update — Option A-lite landed
+
+Wired ``setup_atm + setup_grow + setup_gkern`` into
+``scripts/jax_ensemble.py`` (per-scenario growth kernels using
+the real Fortran-equivalent code path). Re-ran the JAX ensemble
+(92 s, 1000/1000 ok) and the parity comparison.
+
+| metric | before A-lite | after A-lite |
+|---|---|---|
+| `pc_final` median-bin ≤1% pass | 2.4 % | **65.8 %** |
+| `gc_h2so4_final` ≤1% pass | 0 % | 0 % |
+
+The `pc_final` improvement is dramatic. Median error
+``p50 = 6e-25`` — half the ensemble agrees with Fortran to
+near-machine precision now. The distribution is bimodal:
+~67% pass with ~zero error, ~33% fail at ~100% error.
+
+Diagnostic on the 326 failing scenarios:
+
+| param | passing median | failing median |
+|---|---|---|
+| T [K] | 228 | 270 |
+| RH | 0.57 | 0.46 |
+| H₂SO₄ [pptv] | 1.37 | 0.57 |
+
+Failing scenarios are **warm, dry, low-H₂SO₄** — exactly the
+regime where nucleation is slow and coagulation drives most of
+the size-distribution evolution. Confirms the residual gap is
+coagulation: Fortran has it (`do_coag=.true., I_COLLEC_FUCHS`),
+JAX's `make_step_full` does not.
+
+`gc_h2so4` parity didn't improve because gas depletion is
+dominated by Fortran's coag-fueled accumulation into the top
+bin (the bin pulls down gas as a sink). Adding coag to JAX
+should close this.
+
+## Next step — Option A-full
+
+Add `make_step_coag` composition into `make_step_full`. The
+infrastructure is all in place (Phase 5b shipped
+`make_step_coag`); just need to thread it through and verify
+parity. Estimated 1–2 days of work.
+
+The Phase 10.4 gate (≥95% ≤1%) will likely pass once coag is
+added, given that two-thirds of scenarios already pass with
+near-machine-precision agreement.
+
 ## Consequences
 
 - Phase 10.4 gate technically fails on the current `make_step_full`

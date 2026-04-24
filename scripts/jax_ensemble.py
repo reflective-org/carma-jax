@@ -35,6 +35,7 @@ sys.path.insert(0, str(_ROOT / "tests" / "unit"))
 
 from generate_sulfate_scenarios import load_scenarios
 from carma.constants import AVG, BK, WTMOL_H2O
+from carma.precision import DTYPE
 from carma.step_full import make_step_full
 from carma.vapor_pressure import vaporp_h2o_murphy2005
 
@@ -132,19 +133,147 @@ def _init_lognormal_pc(r_bins_cm, mu_nm, sigma_g, total_mass_g_per_cm3=1e-18):
     return jnp.asarray(pc)
 
 
-def _env_for_scenario(T_K, p_hPa, rh, h2so4_pptv, mu_nm, sigma_g, cfg):
+def _compute_ppm_coefs(cfg):
+    """PPM coefficient arrays used by growevapl (Colella-Woodward 1984).
+    Depend only on the bin widths, so computed once per config."""
+    import jax.numpy as jnp
+    nbin = cfg.nbin
+    ngroup = cfg.ngroup
+    dm_arr = [np.asarray(g.dm) for g in cfg.groups]
+    rmass_arr = [np.asarray(g.rmass) for g in cfg.groups]
+    rmassup_arr = [np.asarray(g.rmassup) for g in cfg.groups]
+    rmrat_val = float(cfg.groups[0].rmrat)
+
+    pratt = np.zeros((3, nbin, ngroup))
+    prat = np.zeros((4, nbin, ngroup))
+    pden1 = np.zeros((nbin, ngroup))
+    palr = np.zeros((4, ngroup))
+    for ig in range(ngroup):
+        dm_np = dm_arr[ig]
+        rmass_np = rmass_arr[ig]
+        rmassup_np = rmassup_arr[ig]
+        for ibin in range(1, nbin - 1):
+            dm_im1, dm_i, dm_ip1 = dm_np[ibin - 1], dm_np[ibin], dm_np[ibin + 1]
+            pratt[0, ibin, ig] = dm_i / (dm_im1 + dm_i + dm_ip1)
+            pratt[1, ibin, ig] = (2.0 * dm_im1 + dm_i) / (dm_ip1 + dm_i)
+            pratt[2, ibin, ig] = (2.0 * dm_ip1 + dm_i) / (dm_im1 + dm_i)
+        for ibin in range(1, nbin - 2):
+            dm_im1, dm_i = dm_np[ibin - 1], dm_np[ibin]
+            dm_ip1 = dm_np[ibin + 1]
+            dm_ip2 = dm_np[min(ibin + 2, nbin - 1)]
+            prat[0, ibin, ig] = dm_i / (dm_i + dm_ip1)
+            prat[1, ibin, ig] = 2.0 * dm_ip1 * dm_i / (dm_i + dm_ip1)
+            prat[2, ibin, ig] = (dm_im1 + dm_i) / (2.0 * dm_i + dm_ip1)
+            prat[3, ibin, ig] = (dm_ip2 + dm_ip1) / (2.0 * dm_ip1 + dm_i)
+            pden1[ibin, ig] = dm_im1 + dm_i + dm_ip1 + dm_ip2
+        denom_low = rmass_np[1] - rmass_np[0]
+        denom_high = rmass_np[nbin - 1] - rmass_np[nbin - 2]
+        palr[0, ig] = (rmassup_np[0] - rmass_np[0]) / denom_low
+        palr[1, ig] = (rmassup_np[0] / rmrat_val - rmass_np[0]) / denom_low
+        palr[2, ig] = (rmassup_np[nbin - 2] - rmass_np[nbin - 2]) / denom_high
+        palr[3, ig] = (rmassup_np[nbin - 1] - rmass_np[nbin - 2]) / denom_high
+    return (jnp.asarray(pratt), jnp.asarray(prat),
+            jnp.asarray(pden1), jnp.asarray(palr))
+
+
+def _env_for_scenario(T_K, p_hPa, rh, h2so4_pptv, mu_nm, sigma_g, cfg,
+                        ppm_coefs):
     """Produce a populated env dict for one scenario, matching the
-    make_step_full call signature."""
-    base = _growth_env(cfg, T=float(T_K), rh=float(rh),
-                        h2so4_ppbv=float(h2so4_pptv) * 1e-3,
-                        p_hpa=float(p_hPa))
-    r_bins = np.asarray(cfg.groups[0].r)
-    pc_sulf = _init_lognormal_pc(r_bins, float(mu_nm), float(sigma_g))
-    # base["pc"] is (1, nbin, 1) zero; put our lognormal into element 0.
-    pc = jnp.zeros_like(base["pc"])
+    make_step_full call signature. Growth kernels come from
+    setup_atm + setup_grow + setup_gkern per scenario (Option A-lite)."""
+    import jax.numpy as jnp
+    from carma.setup_atm import setup_atm
+    from carma.setup_grow import setup_grow
+    from carma.setup_gkern import setup_gkern
+    from carma.constants import GRAV, R_AIR, RPA2CGS
+
+    nz = 1
+    nbin = cfg.nbin
+    ngroup = cfg.ngroup
+    ngas = cfg.ngas
+
+    # Build a single-layer atmosphere column at the scenario's T, p
+    T = jnp.asarray([T_K], dtype=DTYPE)
+    p_cgs = jnp.asarray([p_hPa * 100.0 * float(RPA2CGS)], dtype=DTYPE)   # hPa → Pa → dyne/cm²
+    rho_approx = float(p_cgs[0]) / (float(R_AIR) * T_K)
+    # Build thin (10 m) column so setup_atm is well-defined; results are
+    # per-layer anyway.
+    deltaz = 1.0e3    # cm
+    zc = jnp.asarray([1.0e5])     # 1 km above the virtual ground
+    zl = jnp.asarray([zc[0] - deltaz / 2, zc[0] + deltaz / 2])
+    pl = jnp.asarray([p_cgs[0] + 0.5 * deltaz * rho_approx * float(GRAV),
+                       p_cgs[0] - 0.5 * deltaz * rho_approx * float(GRAV)])
+
+    from carma.enums import GridType
+    rhoa, dz, zmet, zmetl, rmu, thcond, rhoa_wet = setup_atm(
+        T, p_cgs, pl, zc, zl, GridType.I_CART,
+    )
+
+    # setup_grow: gas diffusivity + latent heats. igash2o=0, igash2so4=1 from cfg.
+    diffus, rlhe, rlhm = setup_grow(
+        T, p_cgs, rhoa, zmet,
+        igash2o=cfg.igash2o, igash2so4=cfg.igash2so4,
+        ngas=ngas, do_cnst_rlh=False,
+    )
+
+    # Wet radii. For sulfate without hygroscopic swelling yet, approximate
+    # r_wet = r_dry (rup_wet = rup_dry, rlow_wet = rlow_dry).
+    r_dry = jnp.asarray(cfg.groups[0].r)
+    rup_dry = jnp.asarray(cfg.groups[0].rup)
+    rlow_dry = jnp.asarray(cfg.groups[0].rlow)
+    r_wet = r_dry[None, :, None]                    # (nz, nbin, ngroup)
+    rup_wet = rup_dry[None, :, None]
+    rlow_wet = rlow_dry[None, :, None]
+    re = jnp.zeros((nz, nbin, ngroup), dtype=DTYPE)   # Reynolds # ~0 for small particles
+    rrat = jnp.ones((nbin, ngroup), dtype=DTYPE)
+    eshape_arr = jnp.asarray([float(g.eshape) for g in cfg.groups], dtype=DTYPE)
+    is_ice_arr = np.asarray([bool(g.is_ice) for g in cfg.groups])
+    gwtmol_arr = jnp.asarray([float(g.wtmol) for g in cfg.gases], dtype=DTYPE)
+    igrowgas_arr = np.asarray(
+        [cfg.igash2so4 for _ in cfg.elements], dtype=np.int32)
+
+    _, akelvin, akelvini, gro, gro1, gro2, _, _ = setup_gkern(
+        T, p_cgs, rhoa, zmet, rmu, thcond, diffus, rlhe, rlhm,
+        re, r_wet, rlow_wet, rrat, eshape_arr, is_ice_arr,
+        gwtmol_arr, igrowgas_arr,
+        cfg.gstickl, cfg.gsticki, cfg.tstick,
+        nbin, ngroup, ngas,
+    )
+
+    # H2SO4 gas mmr from scenario ppbv
+    h2so4_mmr = h2so4_pptv * 1.0e-12 * (98.0 / 29.0)        # g/g
+    # H2O mmr from RH × saturation (Murphy-Koop analytic estimate)
+    pvapl_Pa = jnp.exp(54.842763 - 6763.22 / T_K
+                        - 4.210 * jnp.log(T_K) + 0.000367 * T_K)
+    h2o_mmr = rh * float(pvapl_Pa) * 18.0 / (29.0 * p_hPa * 100.0)
+
+    # gc in CGS: mmr × rhoa (rhoa already includes zmet factor)
+    gc = jnp.asarray([[h2o_mmr * float(rhoa[0]),
+                        h2so4_mmr * float(rhoa[0])]], dtype=DTYPE)
+
+    # Initial lognormal aerosol: seeded with 1e-18 g/g total mass
+    r_bins_np = np.asarray(r_dry)
+    pc_sulf = _init_lognormal_pc(r_bins_np, mu_nm, sigma_g,
+                                   total_mass_g_per_cm3=1e-18)
+    pc = jnp.zeros((nz, nbin, cfg.nelem), dtype=DTYPE)
     pc = pc.at[0, :, 0].set(pc_sulf)
-    base["pc"] = pc
-    return base
+
+    pvapl_arr = pvapl_Pa * float(RPA2CGS)   # Pa → dyne/cm²; used only as scalar hint
+
+    pratt, prat, pden1, palr = ppm_coefs
+
+    ds_threshold_arr = jnp.zeros((ngas,), dtype=DTYPE)
+
+    return dict(
+        pc=pc, gc=gc, t=T,
+        rhoa=rhoa, zmet=zmet, rlhe=rlhe, rlhm=rlhm, diffus=diffus,
+        akelvin=akelvin, akelvini=akelvini,
+        gro=gro, gro1=gro1, gro2=gro2,
+        rup_wet=rup_wet, rlow_wet=rlow_wet,
+        pratt=pratt, prat=prat, pden1=pden1, palr=palr,
+        pvapl=float(pvapl_arr),
+        ds_threshold_arr=ds_threshold_arr,
+    )
 
 
 def run_jax_ensemble(scenarios, dtime_s=1800.0, nstep=100):
@@ -159,6 +288,7 @@ def run_jax_ensemble(scenarios, dtime_s=1800.0, nstep=100):
     print(f"  bin grid: nbin={cfg.nbin}, rmin={float(cfg.groups[0].r[0])*1e7:.1f} nm, "
           f"rmrat={cfg.groups[0].rmrat}, rmax={float(cfg.groups[0].r[-1])*1e4:.2f} μm",
           flush=True)
+    ppm_coefs = _compute_ppm_coefs(cfg)
     step = make_step_full(cfg)
 
     n = int(scenarios["_n"])
@@ -172,7 +302,7 @@ def run_jax_ensemble(scenarios, dtime_s=1800.0, nstep=100):
         env = _env_for_scenario(
             scenarios["T"][i], scenarios["p"][i], scenarios["rh"][i],
             scenarios["h2so4_pptv"][i], scenarios["aerosol_mu_nm"][i],
-            scenarios["aerosol_sigma_g"][i], cfg,
+            scenarios["aerosol_sigma_g"][i], cfg, ppm_coefs,
         )
         pc = env["pc"]
         gc = env["gc"]
