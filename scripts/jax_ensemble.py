@@ -280,10 +280,17 @@ def _env_for_scenario(T_K, p_hPa, rh, h2so4_pptv, mu_nm, sigma_g, cfg,
     gc = jnp.asarray([[h2o_mmr * float(rhoa[0]),
                         h2so4_mmr * float(rhoa[0])]], dtype=DTYPE)
 
-    # Initial lognormal aerosol: seeded with 1e-18 g/g total mass
+    # Initial lognormal aerosol: seeded with 1e-18 g/g total mass.
+    # Fortran patch normalises to mmr=1e-18 (g/g); JAX pc is in
+    # #/cm³/z, so the equivalent target volumetric mass is
+    # 1e-18 * rhoa_cgs (rhoa here is g/cm³/z; divide by zmet for
+    # the volumetric density, but in our 1-layer setup zmet=1 so
+    # rhoa already equals rhoa_cgs in g/cm³).
+    rhoa_cgs_val = float(rhoa[0]) / float(zmet[0])     # g/cm³
+    target_mass_per_cm3 = 1.0e-18 * rhoa_cgs_val       # g/cm³
     r_bins_np = np.asarray(r_dry)
     pc_sulf = _init_lognormal_pc(r_bins_np, mu_nm, sigma_g,
-                                   total_mass_g_per_cm3=1e-18)
+                                   total_mass_g_per_cm3=target_mass_per_cm3)
     pc = jnp.zeros((nz, nbin, cfg.nelem), dtype=DTYPE)
     pc = pc.at[0, :, 0].set(pc_sulf)
 
