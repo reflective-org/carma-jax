@@ -104,10 +104,16 @@ def make_step_full(
                         jnp.asarray(-1, dtype=jnp.int32))
     inuc2bin = i2_map.reshape(nbin, 1, 1)
 
-    # Static element / group descriptors for microfast
+    # Static element / group descriptors for microfast.
+    # igrowgas_arr maps each ELEMENT to its growth gas. For the
+    # sulfate ensemble, the sulfate element grows by H2SO4 vapor —
+    # which is gas index ``igas_h2so4`` (typically 1), NOT 0 (H2O).
+    # The earlier hard-coded `0` was a bug: growth step was crediting
+    # H2O gas with sulfate evaporation, leaving H2SO4 untouched and
+    # silently destroying mass.
     is_ice_arr = tuple(bool(g.is_ice) for g in config.groups)
     igrowgas_arr = tuple(
-        0 if (do_grow and ngas > 0) else -1
+        igas_h2so4 if (do_grow and ngas > 0) else -1
         for _ in config.elements
     )
     ienconc_arr = tuple(int(g.ienconc) for g in config.groups)
