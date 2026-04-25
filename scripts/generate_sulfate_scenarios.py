@@ -42,15 +42,31 @@ _BOUNDS = {
     "aerosol_mu_nm":  (5.0, 500.0),          # nm, LOG
     "aerosol_sigma_g": (1.2, 2.5),           # geometric SD, linear
 }
+
+# Phase 10.4c: realistic stratospheric envelope. Narrowed to UTLS
+# conditions where stratospheric sulfate physics is actually
+# meaningful, with low background aerosol so particles don't grow
+# into the top bin (where Fortran/JAX top-bin handling differs).
+_BOUNDS_REALISTIC = {
+    "T":              (200.0, 240.0),       # K, UTLS / lower stratosphere
+    "p":              (50.0, 200.0),         # hPa, UTLS
+    "rh":             (0.10, 0.80),          # avoid extremes
+    "h2so4_pptv":     (0.01, 5.0),           # background to mildly perturbed
+    "aerosol_mu_nm":  (10.0, 100.0),         # Aitken / fresh nuc mode (NOT coarse)
+    "aerosol_sigma_g": (1.4, 1.8),           # typical stratospheric width
+}
+
 _LOG_AXES = ("h2so4_pptv", "aerosol_mu_nm")
 
 
-def generate_scenarios(n: int, seed: int = 42):
+def generate_scenarios(n: int, seed: int = 42, realistic: bool = False):
     """Return a dict of named arrays of length ``n``.
 
     Args:
         n: number of scenarios.
         seed: PRNG seed for reproducibility.
+        realistic: if True, use the narrow stratospheric envelope
+            (Phase 10.4c). Default False = full hypercube (Phase 10.1).
 
     Returns:
         Dict with one ``(n,)`` numpy array per parameter, plus a
@@ -58,12 +74,14 @@ def generate_scenarios(n: int, seed: int = 42):
     """
     from scipy.stats import qmc
 
-    sampler = qmc.LatinHypercube(d=len(_BOUNDS), seed=seed)
+    bounds = _BOUNDS_REALISTIC if realistic else _BOUNDS
+
+    sampler = qmc.LatinHypercube(d=len(bounds), seed=seed)
     u = sampler.random(n)                     # (n, d) in [0, 1]
 
     out = {}
-    for k, (lo, hi) in _BOUNDS.items():
-        col = u[:, list(_BOUNDS).index(k)]
+    for k, (lo, hi) in bounds.items():
+        col = u[:, list(bounds).index(k)]
         if k in _LOG_AXES:
             out[k] = np.exp(np.log(lo) + col * (np.log(hi) - np.log(lo)))
         else:
@@ -93,14 +111,19 @@ def main():
                         default=Path("data/sulfate_scenarios_1000.npz"),
                         help="Output NPZ path")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--realistic", action="store_true",
+                        help="Use narrow stratospheric envelope")
     args = parser.parse_args()
 
-    print(f"Generating {args.n} scenarios with seed {args.seed}...")
-    scenarios = generate_scenarios(args.n, seed=args.seed)
+    label = "realistic" if args.realistic else "full hypercube"
+    print(f"Generating {args.n} scenarios with seed {args.seed} ({label})...")
+    scenarios = generate_scenarios(args.n, seed=args.seed,
+                                     realistic=args.realistic)
     save_scenarios(scenarios, args.out)
 
     print(f"Saved to {args.out}")
-    for k in _BOUNDS:
+    bounds = _BOUNDS_REALISTIC if args.realistic else _BOUNDS
+    for k in bounds:
         arr = scenarios[k]
         print(f"  {k:18s}: min={arr.min():.4g}  max={arr.max():.4g}"
               f"  mean={arr.mean():.4g}")

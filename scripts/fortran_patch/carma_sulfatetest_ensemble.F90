@@ -175,7 +175,11 @@ subroutine test_sulfate_ensemble()
   satice(:,:)   = -1._f
   mmr(:,:,:)    = 0._f
 
-  ! Lognormal initial aerosol: N(r) ∝ exp(-ln²(r/μ)/(2σ²)) / (r σ √(2π))
+  ! Lognormal initial aerosol shape (mass-weighted), normalised so
+  ! Σ_bin mmr(ibin) = 1e-18 g/g (total particle mass mixing ratio).
+  ! Earlier version used `Σ mmr · rmass = 1e-18` which inflated the
+  ! seed by factor ~Σ_bin(1/rmass) ≈ 1e22 — that was the source of
+  ! the top-bin runaway. Fixed here.
   call CARMAGROUP_Get(carma, 1, rc, r=r, rmass=rmass)
   log_mu_cm = log(mu_nm * 1.e-7_f)
   log_sigma = log(sigma_g)
@@ -184,8 +188,9 @@ subroutine test_sulfate_ensemble()
     r_cm = r(ibin)
     log_r = log(r_cm)
     mmr(1,1,ibin) = exp(-0.5_f * ((log_r - log_mu_cm) / log_sigma)**2) &
-                    / (r_cm * log_sigma * sqrt(2._f * PI))
-    norm = norm + mmr(1,1,ibin) * rmass(ibin)
+                    / (r_cm * log_sigma * sqrt(2._f * PI)) &
+                    * rmass(ibin)             ! mass-weighted shape
+    norm = norm + mmr(1,1,ibin)
   end do
   if (norm > 0._f) then
     mmr(1,1,:) = mmr(1,1,:) * (1.e-18_f / norm)

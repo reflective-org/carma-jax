@@ -96,12 +96,21 @@ def _fortran_matching_config():
                            dgc_threshold=0.0, ds_threshold=0.0)
     solute = SoluteConfig(name="sulfate", ions=3, wtmol=_GWTMOL_H2SO4, rho=rho)
 
+    # Build coagulation tables (sulfate ⊕ sulfate → sulfate, source=number).
+    from carma.coagulation.setup_coag import setup_coag
+    coag_cfg = setup_coag(
+        nbin=nbin, ngroup=1, nelem=1,
+        groups=(group,), elements=(element,),
+        icoag_input=np.asarray([[0]], dtype=np.int32),         # sulfate→sulfate
+        icoagelem_input=np.asarray([[0]], dtype=np.int32),     # number contributes
+    )
+
     return CarmaConfig(
         nbin=nbin, nelem=1, ngroup=1, ngas=2, nsolute=1,
         elements=(element,), groups=(group,),
         gases=(gas_h2o, gas_h2so4), solutes=(solute,),
-        coag=None,
-        do_coag=False, do_grow=True, do_vtran=False, do_vdiff=False,
+        coag=coag_cfg,
+        do_coag=True, do_grow=True, do_vtran=False, do_vdiff=False,
         do_thermo=False, do_substep=False, do_explised=False,
         do_incloud=False, do_clearsky=True, do_detrain=False,
         do_pheat=False, do_pheatatm=False, do_cnst_rlh=False,
@@ -232,12 +241,32 @@ def _env_for_scenario(T_K, p_hPa, rh, h2so4_pptv, mu_nm, sigma_g, cfg,
     igrowgas_arr = np.asarray(
         [cfg.igash2so4 for _ in cfg.elements], dtype=np.int32)
 
+    # Fall velocity, Reynolds number, slip correction (needed for coag kernel
+    # AND for setup_gkern — re is the real Reynolds, not zeros).
+    from carma.setup_vf import setup_vf_jit
+    rmass_2d = jnp.asarray(cfg.groups[0].rmass)[:, None]              # (nbin, ngroup)
+    rho_p_2d = jnp.full((nbin, ngroup), float(cfg.groups[0].rmass[0]
+                                                / cfg.groups[0].vol[0]),
+                         dtype=DTYPE)                                  # (nbin, ngroup)
+    rrat_2d = jnp.ones((nbin, ngroup), dtype=DTYPE)
+    rprat_2d = jnp.ones((nbin, ngroup), dtype=DTYPE)
+    vf, re_real, bpm = setup_vf_jit(
+        T, rhoa, zmet, rmu, r_wet, rho_p_2d, rrat_2d, rprat_2d,
+    )
+
     _, akelvin, akelvini, gro, gro1, gro2, _, _ = setup_gkern(
         T, p_cgs, rhoa, zmet, rmu, thcond, diffus, rlhe, rlhm,
-        re, r_wet, rlow_wet, rrat, eshape_arr, is_ice_arr,
+        re_real, r_wet, rlow_wet, rrat, eshape_arr, is_ice_arr,
         gwtmol_arr, igrowgas_arr,
         cfg.gstickl, cfg.gsticki, cfg.tstick,
         nbin, ngroup, ngas,
+    )
+
+    # Coagulation kernel (Brownian + gravitational, all bin pairs).
+    from carma.setup_ckern import setup_ckern_jit
+    ckernel = setup_ckern_jit(
+        T, rhoa, zmet, rmu, r_wet, rrat_2d, rprat_2d, bpm, rmass_2d,
+        re_real, vf, cfg.cstick,
     )
 
     # H2SO4 gas mmr from scenario ppbv
@@ -273,6 +302,8 @@ def _env_for_scenario(T_K, p_hPa, rh, h2so4_pptv, mu_nm, sigma_g, cfg,
         pratt=pratt, prat=prat, pden1=pden1, palr=palr,
         pvapl=float(pvapl_arr),
         ds_threshold_arr=ds_threshold_arr,
+        # Coag-side inputs (Phase 10.4b):
+        ckernel=ckernel,
     )
 
 
@@ -290,6 +321,8 @@ def run_jax_ensemble(scenarios, dtime_s=1800.0, nstep=100):
           flush=True)
     ppm_coefs = _compute_ppm_coefs(cfg)
     step = make_step_full(cfg)
+    from carma.step import make_step_coag
+    step_coag = make_step_coag(cfg)
 
     n = int(scenarios["_n"])
     T_final = np.zeros(n, dtype=np.float64)
@@ -307,11 +340,23 @@ def run_jax_ensemble(scenarios, dtime_s=1800.0, nstep=100):
         pc = env["pc"]
         gc = env["gc"]
         t = env["t"]
+        ckernel = env["ckernel"]
+        # State carried through prestep:
+        pcl = pc
+        gcl = gc
+        told = t
         env_no_state = {k: v for k, v in env.items()
-                        if k not in ("pc", "gc", "t")}
+                        if k not in ("pc", "gc", "t", "ckernel")}
 
         try:
             for _ in range(nstep):
+                # Coagulation step (Phase 10.4b composition)
+                pc, gc, t, pcl, gcl, _ = step_coag(
+                    pc, gc, t, pcl, gcl, told, env["zmet"], ckernel,
+                    dtime_s,
+                )
+                told = t
+                # Growth + sulfate-nucleation step
                 pc, gc, t, _ = step(pc=pc, gc=gc, t=t, dtime=dtime_s,
                                     **env_no_state)
         except Exception as exc:            # noqa: BLE001
