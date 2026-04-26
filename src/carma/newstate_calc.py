@@ -11,7 +11,7 @@ import jax.numpy as jnp
 from carma.constants import SMALL_PC, FEW_PC, CP, RGAS, WTMOL_H2O
 from carma.enums import RC_OK, RC_WARNING_RETRY
 from carma.precision import DTYPE
-from carma.vapor_pressure import vaporp_h2o_murphy2005
+from carma.vapor_pressure import vaporp_h2o_murphy2005, vaporp_h2so4_ayers1980
 from carma.supersaturation import supersat
 from carma.growth.growevapl import growevapl
 from carma.growth.growp import growp
@@ -20,6 +20,73 @@ from carma.solvers.psolve import psolve
 from carma.solvers.gsolve import gsolve
 from carma.solvers.tsolve import tsolve
 from carma.solvers.totalcondensate import totalcondensate
+
+
+# Vapor pressure dispatch: build per-gas (NZ, NGAS) arrays based on the
+# ivaprtn enum stored in each GasConfig. Mirrors the Fortran prestep's
+# call to vaporp_<gas>_<formula>.F90 per gas.
+#
+# Why this isn't hard-coded to H2O: the sulfate ensemble's growing gas
+# is H2SO4 (gas index 1). The previous version of microfast_growth used
+# Murphy-Koop H2O for *every* gas slot, which gave H2O equilibrium
+# vapor pressure for the H2SO4 column — wildly wrong (off by ~10
+# orders of magnitude) and made physically supersaturated H2SO4 look
+# subsaturated, so growth evaporated the IC instead of growing it.
+def _build_pvapl_pvapi(t, gc, zmet, ivaprtn_arr, igas_h2o, ngas):
+    """Build (NZ, NGAS) pvapl, pvapi arrays.
+
+    ``ivaprtn_arr`` selects the saturation formula per gas:
+        2 → I_VAPRTN_H2O_MURPHY2005
+        4 → I_VAPRTN_H2SO4_AYERS1980
+    Other H2O variants (Buck, Goff) fall back to Murphy-2005.
+    """
+    nz = t.shape[0]
+    pvapl_h2o, pvapi_h2o = vaporp_h2o_murphy2005(t)        # (nz,)
+
+    pvapl = jnp.zeros((nz, ngas), dtype=DTYPE)
+    pvapi = jnp.zeros((nz, ngas), dtype=DTYPE)
+    for igas in range(ngas):
+        ivp = int(ivaprtn_arr[igas])
+        if ivp == 4:
+            # H2SO4 / Ayers-Kulmala — needs H2O gas + pvapl_h2o + zmet.
+            pv, _ = vaporp_h2so4_ayers1980(
+                t, gc[:, igas_h2o], pvapl_h2o, zmet,
+            )
+            pvapl = pvapl.at[:, igas].set(pv)
+            pvapi = pvapi.at[:, igas].set(pv)
+        else:
+            # Default H2O Murphy-2005 (covers the sulfate test's H2O slot).
+            pvapl = pvapl.at[:, igas].set(pvapl_h2o)
+            pvapi = pvapi.at[:, igas].set(pvapi_h2o)
+    return pvapl, pvapi
+
+
+def _build_supsat(t, gc, pvapl, pvapi, gwtmol_arr, zmet, ngas):
+    """Per-gas supsatl/supsati of shape (NZ, NGAS)."""
+    nz = t.shape[0]
+    supsatl = jnp.zeros((nz, ngas), dtype=DTYPE)
+    supsati = jnp.zeros((nz, ngas), dtype=DTYPE)
+    for igas in range(ngas):
+        ssl, ssi = supersat(
+            t, gc[:, igas], pvapl[:, igas], pvapi[:, igas],
+            gwtmol_arr[igas], zmet,
+        )
+        supsatl = supsatl.at[:, igas].set(ssl)
+        supsati = supsati.at[:, igas].set(ssi)
+    return supsatl, supsati
+
+
+def _convergence_gas(igrowgas_arr, ngas):
+    """Pick the gas index used for the substep convergence check.
+
+    Convention: the first element with a valid igrowgas wins. Falls
+    back to gas 0 if no element grows (single-gas degenerate case).
+    """
+    for ielem in range(len(igrowgas_arr)):
+        ig = int(igrowgas_arr[ielem])
+        if 0 <= ig < ngas:
+            return ig
+    return 0
 
 
 def microfast_growth(pc, gc, t, iz, dtime,
@@ -31,7 +98,8 @@ def microfast_growth(pc, gc, t, iz, dtime,
                      igroup_arr, gwtmol_arr,
                      nbin, ngroup, ngas, nelem,
                      dt_threshold, ds_threshold_arr, scale_threshold,
-                     itype_arr=None):
+                     itype_arr=None,
+                     ivaprtn_arr=None, igas_h2o=0):
     """Execute one microfast growth step at one level.
 
     Computes: vapor pressure → supersaturation → condensate →
@@ -41,21 +109,22 @@ def microfast_growth(pc, gc, t, iz, dtime,
     Returns:
         Tuple of (pc, gc, t, rlheat_val, rc)
     """
-    # Vapor pressure at current T
-    pvapl_1d, pvapi_1d = vaporp_h2o_murphy2005(t)
-    pvapl = pvapl_1d[None, :]  # (1, 1)
-    pvapi = pvapi_1d[None, :]
+    # Default: assume every gas is Murphy H2O (legacy single-gas tests).
+    if ivaprtn_arr is None:
+        ivaprtn_arr = tuple(2 for _ in range(ngas))
 
-    # Supersaturation. gwtmol is treated as a traced scalar; supersat casts
-    # internally so this is JIT-clean even when gwtmol_arr comes in as a
-    # concrete numpy array.
-    ssl, ssi = supersat(t, gc[:, 0], pvapl[:, 0], pvapi[:, 0],
-                        gwtmol_arr[0], zmet)
-    supsatl = ssl[:, None]
-    supsati = ssi[:, None]
+    # Vapor pressure at current T — per-gas (NZ, NGAS).
+    pvapl, pvapi = _build_pvapl_pvapi(t, gc, zmet, ivaprtn_arr,
+                                          igas_h2o, ngas)
 
-    # Save previous supersaturation for convergence check (traced scalar).
-    prev_supsati = ssi[iz]
+    # Supersaturation per gas (NZ, NGAS).
+    supsatl, supsati = _build_supsat(t, gc, pvapl, pvapi, gwtmol_arr,
+                                          zmet, ngas)
+
+    # Convergence check tracks the *growing* gas (e.g. H2SO4 for the
+    # sulfate ensemble), not gas 0 unconditionally.
+    iconv = _convergence_gas(igrowgas_arr, ngas)
+    prev_supsati = supsati[iz, iconv]
 
     # Total condensate before growth
     prev_ice, prev_liq = totalcondensate(
@@ -133,17 +202,37 @@ def microfast_growth(pc, gc, t, iz, dtime,
         dt_threshold, scale_threshold,
     )
 
-    # Check supersaturation convergence (all traced)
-    pvapl_new, pvapi_new = vaporp_h2o_murphy2005(t)
-    ssl_new, ssi_new = supersat(t, gc[:, 0], pvapl_new[None, :][:, 0],
-                                pvapi_new[None, :][:, 0],
-                                gwtmol_arr[0], zmet)
-    new_supsati = ssi_new[iz]
+    # Check supersaturation convergence (all traced) on the growing
+    # gas — not gas 0 — so the substep retry tracks H2SO4 saturation
+    # for the sulfate column, not H2O.
+    pvapl_new, pvapi_new = _build_pvapl_pvapi(
+        t, gc, zmet, ivaprtn_arr, igas_h2o, ngas,
+    )
+    supsatl_new, supsati_new = _build_supsat(
+        t, gc, pvapl_new, pvapi_new, gwtmol_arr, zmet, ngas,
+    )
+    new_supsati = supsati_new[iz, iconv]
 
-    # If supersaturation changed sign AND absolute change is large, flag retry.
+    # Retry triggers (any one of these flips rc to RC_WARNING_RETRY):
+    #   1. Supersaturation changes sign AND new |ssi| > 1% (sign-flip
+    #      heuristic from the original kernel).
+    #   2. gsolve flagged dgc_threshold violation on any gas (relative
+    #      gas-concentration change exceeds the per-gas threshold).
+    #   3. tsolve flagged dt_threshold violation (temperature change
+    #      exceeds the threshold from latent heat release).
+    # The previous version discarded rc_gas / rc_t entirely — that's why
+    # the H2SO4 sulfate runs blew through 100 timesteps without ever
+    # substepping, even with dgc_threshold=0.1.
     sign_change = (prev_supsati * new_supsati) < DTYPE(0.0)
     large_change = jnp.abs(new_supsati) > DTYPE(0.01)
-    rc = jnp.where(sign_change & large_change, RC_WARNING_RETRY, RC_OK)
+    rc_supsat = jnp.where(sign_change & large_change, RC_WARNING_RETRY, RC_OK)
+    rc = jnp.where(
+        (rc_supsat == RC_WARNING_RETRY)
+        | (rc_gas == RC_WARNING_RETRY)
+        | (rc_t == RC_WARNING_RETRY),
+        RC_WARNING_RETRY,
+        RC_OK,
+    )
 
     return pc, gc, t, rlheat[iz], rc
 

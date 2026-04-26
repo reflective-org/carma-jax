@@ -119,6 +119,11 @@ def make_step_full(
     ienconc_arr = tuple(int(g.ienconc) for g in config.groups)
     igroup_arr = tuple(int(e.igroup) for e in config.elements)
     gwtmol_arr = tuple(float(g.wtmol) for g in config.gases) or (18.0,)
+    # ivaprtn_arr drives per-gas saturation vapor pressure dispatch
+    # in microfast_growth (Murphy for H2O, Ayers/Kulmala for H2SO4).
+    # Without this, growth treats every gas slot as H2O — see
+    # newstate_calc.py::_build_pvapl_pvapi.
+    ivaprtn_arr = tuple(int(g.ivaprtn) for g in config.gases) or (2,)
 
     @jax.jit
     def step(
@@ -157,6 +162,7 @@ def make_step_full(
                 maxretries=maxretries,
                 ds_threshold_arr=ds_threshold_arr,
                 scale_threshold=DTYPE(scale_threshold),
+                ivaprtn_arr=ivaprtn_arr, igas_h2o=igas_h2o,
             )
             diag["growth_substeps"] = nts_used
             diag["rlheat"] = rlheat

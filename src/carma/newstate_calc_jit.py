@@ -40,6 +40,7 @@ def newstate_calc_growth_jit(
     minsubsteps=1, maxsubsteps=128, maxretries=10,
     dt_threshold=0.0, ds_threshold_arr=None, scale_threshold=1.0,
     itype_arr=None,
+    ivaprtn_arr=None, igas_h2o=0,
 ):
     """JIT-clean adaptive-retry substepped growth.
 
@@ -79,6 +80,7 @@ def newstate_calc_growth_jit(
             nbin, ngroup, ngas, nelem,
             dt_threshold, ds_threshold_arr, scale_threshold,
             itype_arr=itype_arr,
+            ivaprtn_arr=ivaprtn_arr, igas_h2o=igas_h2o,
         )
         return pc_n, gc_n, t_n, rlh + rlh_val, rc_n
 
