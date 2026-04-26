@@ -37,9 +37,9 @@ def _bin_radii_um():
 def main():
     OUTDIR.mkdir(parents=True, exist_ok=True)
 
-    j = np.load(_ROOT / "data" / "sulfate_jax_outputs.npz")
-    f = np.load(_ROOT / "data" / "sulfate_fortran_outputs.npz")
-    s = load_scenarios(_ROOT / "data" / "sulfate_scenarios_1000.npz")
+    j = np.load(_ROOT / "data" / "sulfate_jax_realistic_outputs.npz")
+    f = np.load(_ROOT / "data" / "sulfate_fortran_realistic_outputs.npz")
+    s = load_scenarios(_ROOT / "data" / "sulfate_scenarios_realistic_1000.npz")
 
     n = j["T_final"].shape[0]
     r_um = _bin_radii_um()

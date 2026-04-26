@@ -197,10 +197,15 @@ def sulfate_step_one_level(
     src_tgt_safe = jnp.where(has_target, src_tgt, 0)
     het_contrib = jnp.where(has_target, het_num_transferred, DTYPE(0.0))
 
-    diffmass_het = jnp.diagonal(
-        jnp.diagonal(diffmass, axis1=1, axis2=3), axis1=0, axis2=1
-    )  # (nbin,) — mass gained per seed
-    diffmass_het = jnp.where(has_target, diffmass_het, DTYPE(0.0))
+    # Mass gained per seed for the heterogeneous transfer src→src_tgt:
+    #   diffmass[a, 0, c, 0] = rmass[a] - rmass[c]
+    # We want diffmass_het[c] = rmass[src_tgt[c]] - rmass[c]. The earlier
+    # double-diagonal call read diffmass[c, 0, c, 0] = 0 instead — that
+    # was a parity bug: het_mass_demand evaluated to 0, so the gas-budget
+    # gate never throttled heterogeneous transfer, and bin-to-bin moves
+    # at high pc[i] created particle mass without consuming gas.
+    rmass_tgt = rmass[src_tgt_safe]
+    diffmass_het = jnp.where(has_target, rmass_tgt - rmass, DTYPE(0.0))
 
     # Homogeneous mass demand: rhompe[nucbin] particles of rmass[nucbin]
     hom_mass_demand = jnp.sum(dtime * rhompe_1d * rmass)
