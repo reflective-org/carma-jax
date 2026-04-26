@@ -89,11 +89,13 @@ def _fortran_matching_config():
         name="sulfate_num", rho=jnp.full((nbin,), rho), igroup=0,
         itype=2, icomposition=0, isolute=0, kappa=0.65,
     )
+    # Fortran uses dgc_threshold=ds_threshold=0.1 for both gases
+    # (carma_sulfatetest_ensemble.F90 lines 128, 133).
     gas_h2o = GasConfig(name="H2O", wtmol=18.016, ivaprtn=2, icomposition=1,
-                         dgc_threshold=0.0, ds_threshold=0.0)
+                         dgc_threshold=0.1, ds_threshold=0.1)
     gas_h2so4 = GasConfig(name="H2SO4", wtmol=_GWTMOL_H2SO4, ivaprtn=4,
                            icomposition=2,
-                           dgc_threshold=0.0, ds_threshold=0.0)
+                           dgc_threshold=0.1, ds_threshold=0.1)
     solute = SoluteConfig(name="sulfate", ions=3, wtmol=_GWTMOL_H2SO4, rho=rho)
 
     # Build coagulation tables (sulfate ⊕ sulfate → sulfate, source=number).
@@ -115,8 +117,10 @@ def _fortran_matching_config():
         do_incloud=False, do_clearsky=True, do_detrain=False,
         do_pheat=False, do_pheatatm=False, do_cnst_rlh=False,
         itbnd_pc=1, ibbnd_pc=1,
-        maxsubsteps=32, minsubsteps=1, maxretries=4, conmax=1e-4,
-        cstick=1.0, gsticki=1.0, gstickl=1.0, tstick=1.0, dt_threshold=0.0,
+        # Fortran calls CARMA_Initialize with maxretries=16, maxsubsteps=32,
+        # dt_threshold=1.0 (carma_sulfatetest_ensemble.F90 lines 143-145).
+        maxsubsteps=32, minsubsteps=1, maxretries=16, conmax=1e-4,
+        cstick=1.0, gsticki=1.0, gstickl=1.0, tstick=1.0, dt_threshold=1.0,
         igash2o=0, igash2so4=1, igasso2=-1,
     )
 
@@ -225,14 +229,38 @@ def _env_for_scenario(T_K, p_hPa, rh, h2so4_pptv, mu_nm, sigma_g, cfg,
         ngas=ngas, do_cnst_rlh=False,
     )
 
-    # Wet radii. For sulfate without hygroscopic swelling yet, approximate
-    # r_wet = r_dry (rup_wet = rup_dry, rlow_wet = rlow_dry).
+    # Wet radii via I_WTPCT_H2SO4 (binary H2SO4/H2O Tabazadeh wt%).
+    # Fortran's carma_sulfatetest_ensemble.F90 uses irhswell=I_WTPCT_H2SO4
+    # — sulfate aerosols swell with water uptake. The dry-stub used
+    # earlier was a parity bug (mass collapsed at the smallest bins
+    # because growth/coag kernels saw dry instead of wet radii).
+    from carma.wetr import _wetr_wtpct
+    from carma.constants import RPA2CGS as _RPA2CGS_local
     r_dry = jnp.asarray(cfg.groups[0].r)
     rup_dry = jnp.asarray(cfg.groups[0].rup)
     rlow_dry = jnp.asarray(cfg.groups[0].rlow)
-    r_wet = r_dry[None, :, None]                    # (nz, nbin, ngroup)
-    rup_wet = rup_dry[None, :, None]
-    rlow_wet = rlow_dry[None, :, None]
+    rho_dry = float(cfg.groups[0].rmass[0] / cfg.groups[0].vol[0])
+    # H2O mass concentration [g/cm³] and water saturation pressure [dyn/cm²]
+    # for the Tabazadeh wt% computation.
+    pvap_h2o_Pa_scalar = float(jnp.exp(54.842763 - 6763.22 / T_K
+                                          - 4.210 * jnp.log(T_K)
+                                          + 0.000367 * T_K))
+    pvap_h2o_cgs = pvap_h2o_Pa_scalar * float(_RPA2CGS_local)
+    h2o_mmr_pre = rh * pvap_h2o_Pa_scalar * 18.0 / (29.0 * p_hPa * 100.0)
+    h2o_mass_cgs = jnp.asarray(h2o_mmr_pre * float(rhoa[0]), dtype=DTYPE)
+    rho_arr = jnp.full(nbin, rho_dry, dtype=DTYPE)
+    r_wet_1d, rho_wet_1d = _wetr_wtpct(
+        r_dry, rho_arr, T_K, h2o_mass_cgs,
+        jnp.asarray(pvap_h2o_cgs, dtype=DTYPE), jnp.asarray(98.0, dtype=DTYPE),
+    )
+    # Scale rup/rlow by the same wet/dry ratio (uniform per bin since
+    # wt% depends on T,RH,curvature which is dominated by r itself).
+    wet_scale = r_wet_1d / r_dry
+    rup_wet_1d = rup_dry * wet_scale
+    rlow_wet_1d = rlow_dry * wet_scale
+    r_wet = r_wet_1d[None, :, None]                  # (nz, nbin, ngroup)
+    rup_wet = rup_wet_1d[None, :, None]
+    rlow_wet = rlow_wet_1d[None, :, None]
     re = jnp.zeros((nz, nbin, ngroup), dtype=DTYPE)   # Reynolds # ~0 for small particles
     rrat = jnp.ones((nbin, ngroup), dtype=DTYPE)
     eshape_arr = jnp.asarray([float(g.eshape) for g in cfg.groups], dtype=DTYPE)
@@ -245,9 +273,8 @@ def _env_for_scenario(T_K, p_hPa, rh, h2so4_pptv, mu_nm, sigma_g, cfg,
     # AND for setup_gkern — re is the real Reynolds, not zeros).
     from carma.setup_vf import setup_vf_jit
     rmass_2d = jnp.asarray(cfg.groups[0].rmass)[:, None]              # (nbin, ngroup)
-    rho_p_2d = jnp.full((nbin, ngroup), float(cfg.groups[0].rmass[0]
-                                                / cfg.groups[0].vol[0]),
-                         dtype=DTYPE)                                  # (nbin, ngroup)
+    # Wet particle density per bin (Tabazadeh-corrected for H2SO4-water mix).
+    rho_p_2d = rho_wet_1d[:, None]                                     # (nbin, ngroup)
     rrat_2d = jnp.ones((nbin, ngroup), dtype=DTYPE)
     rprat_2d = jnp.ones((nbin, ngroup), dtype=DTYPE)
     vf, re_real, bpm = setup_vf_jit(
@@ -271,10 +298,10 @@ def _env_for_scenario(T_K, p_hPa, rh, h2so4_pptv, mu_nm, sigma_g, cfg,
 
     # H2SO4 gas mmr from scenario ppbv
     h2so4_mmr = h2so4_pptv * 1.0e-12 * (98.0 / 29.0)        # g/g
-    # H2O mmr from RH × saturation (Murphy-Koop analytic estimate)
-    pvapl_Pa = jnp.exp(54.842763 - 6763.22 / T_K
-                        - 4.210 * jnp.log(T_K) + 0.000367 * T_K)
-    h2o_mmr = rh * float(pvapl_Pa) * 18.0 / (29.0 * p_hPa * 100.0)
+    # H2O mmr from RH × saturation (Murphy-Koop analytic estimate).
+    # pvap_h2o_Pa_scalar already computed above for wetr.
+    pvapl_Pa = pvap_h2o_Pa_scalar
+    h2o_mmr = h2o_mmr_pre
 
     # gc in CGS: mmr × rhoa (rhoa already includes zmet factor)
     gc = jnp.asarray([[h2o_mmr * float(rhoa[0]),
@@ -298,7 +325,11 @@ def _env_for_scenario(T_K, p_hPa, rh, h2so4_pptv, mu_nm, sigma_g, cfg,
 
     pratt, prat, pden1, palr = ppm_coefs
 
-    ds_threshold_arr = jnp.zeros((ngas,), dtype=DTYPE)
+    # ds_threshold: pull from gas configs (Fortran uses 0.1 for both;
+    # see _fortran_matching_config, mirrors carma_sulfatetest_ensemble.F90).
+    ds_threshold_arr = jnp.asarray(
+        [float(g.ds_threshold) for g in cfg.gases], dtype=DTYPE,
+    )
 
     return dict(
         pc=pc, gc=gc, t=T,
