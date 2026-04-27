@@ -41,6 +41,11 @@ def newstate_calc_growth_jit(
     dt_threshold=0.0, ds_threshold_arr=None, scale_threshold=1.0,
     itype_arr=None,
     ivaprtn_arr=None, igas_h2o=0,
+    do_sulfnuc=False,
+    igroup_sulfate=0, igas_h2so4=-1,
+    sulf_r_bins=None, sulf_rmassup=None, sulf_rmrat=2.0,
+    nuc_method="ZhaoTurco",
+    do_homogeneous_nuc=True, do_heterogeneous_nuc=False,
 ):
     """JIT-clean adaptive-retry substepped growth.
 
@@ -81,6 +86,13 @@ def newstate_calc_growth_jit(
             dt_threshold, ds_threshold_arr, scale_threshold,
             itype_arr=itype_arr,
             ivaprtn_arr=ivaprtn_arr, igas_h2o=igas_h2o,
+            do_sulfnuc=do_sulfnuc,
+            igroup_sulfate=igroup_sulfate, igas_h2so4=igas_h2so4,
+            sulf_r_bins=sulf_r_bins, sulf_rmassup=sulf_rmassup,
+            sulf_rmrat=sulf_rmrat,
+            nuc_method=nuc_method,
+            do_homogeneous_nuc=do_homogeneous_nuc,
+            do_heterogeneous_nuc=do_heterogeneous_nuc,
         )
         return pc_n, gc_n, t_n, rlh + rlh_val, rc_n
 

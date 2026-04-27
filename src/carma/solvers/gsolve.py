@@ -58,17 +58,26 @@ def gsolve(gc, rlprod, previous_ice, previous_liquid, total_ice, total_liquid,
         # Update gas concentration
         gc = gc.at[iz, igas].add(dtime * gasprod)
 
-        # Check convergence threshold
-        threshold = dgc_threshold_arr[igas] / scale_threshold
+        # Negative-gc retry (mirrors Fortran gsolve.F90 lines 62-78).
+        # If condensation/nucleation drove gas below zero, the substep
+        # was too long — retry. Without this check, gas can go arbitrarily
+        # negative and the kernel produces spurious mass.
         gc_val = gc[iz, igas]
-        relative_change = jnp.where(
+        rc = jnp.where(gc_val < DTYPE(0.0), RC_WARNING_RETRY, rc)
+
+        # Check convergence threshold (signed change, like Fortran).
+        # Fortran's threshold check only fires on positive
+        # `dtime*gasprod/gc` — typically gas-INCREASE cases (evaporation).
+        # Gas-DECREASE cases (condensation) are caught by the negative-gc
+        # check above instead.
+        threshold = dgc_threshold_arr[igas] / scale_threshold
+        signed_change = jnp.where(
             jnp.abs(gc_val) > DTYPE(1e-50),
-            jnp.abs(dtime * gasprod / gc_val),
+            dtime * gasprod / gc_val,
             DTYPE(0.0),
         )
-        # If threshold > 0 and change exceeds it, suggest retry
         rc = jnp.where(
-            (threshold > DTYPE(0.0)) & (relative_change > threshold),
+            (threshold > DTYPE(0.0)) & (signed_change > threshold),
             RC_WARNING_RETRY,
             rc,
         )
