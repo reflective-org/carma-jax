@@ -2,6 +2,9 @@
 !!
 !! Reads ONE scenario from argv[1], writes per-substep dumps of every
 !! microfast/microslow intermediate array into argv[2] (output directory).
+!! Optional argv[3]: nstep_max — stop after this many timesteps
+!! (default: full simulation). Useful when running across many
+!! scenarios where only the first substep is needed.
 !! No JSON output — pure binary stream files for the Python differential
 !! validation harness.
 !!
@@ -77,10 +80,11 @@ subroutine test_sulfate_diagnostic()
 
   integer, parameter        :: I_H2SO4  = 1
 
-  character(len=512)        :: scenario_path, output_dir
+  character(len=512)        :: scenario_path, output_dir, nstep_max_str
   real(kind=f)              :: T_scen, p_scen_hPa, rh_scen
   real(kind=f)              :: h2so4_pptv, mu_nm, sigma_g
   integer                   :: unit_in, ios
+  integer                   :: nstep_max, nstep_run
 
   type(carma_type), target            :: carma
   type(carma_type), pointer           :: carma_ptr
@@ -99,11 +103,18 @@ subroutine test_sulfate_diagnostic()
   real(kind=f)          :: log_r, log_mu_cm, log_sigma, norm, r_cm
 
   if (command_argument_count() < 2) then
-    write(0, '(A)') 'usage: <scenario_file> <output_dir>'
+    write(0, '(A)') 'usage: <scenario_file> <output_dir> [nstep_max]'
     call exit(2)
   end if
   call get_command_argument(1, scenario_path)
   call get_command_argument(2, output_dir)
+  nstep_max = nstep
+  if (command_argument_count() >= 3) then
+    call get_command_argument(3, nstep_max_str)
+    read(nstep_max_str, *, iostat=ios) nstep_max
+    if (ios /= 0 .or. nstep_max < 1) nstep_max = nstep
+  end if
+  nstep_run = min(nstep, nstep_max)
 
   open(newunit=unit_in, file=trim(scenario_path), action='read', &
        status='old', iostat=ios)
@@ -210,7 +221,7 @@ subroutine test_sulfate_diagnostic()
     mmr(1,1,:) = mmr(1,1,:) * (1.e-18_f / norm)
   end if
 
-  do istep = 1, nstep
+  do istep = 1, nstep_run
     time = (istep - 1) * dtime
     call CARMASTATE_Create(cstate, carma_ptr, time, dtime, NZ, &
         I_CART, lat, lon, zc(:), zl(:), p(:), pl(:), t(:), rc, &

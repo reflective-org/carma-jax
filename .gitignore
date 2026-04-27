@@ -12,3 +12,6 @@ scripts/fortran_runner/test_*
 scripts/fortran_runner/*.nml
 scripts/fortran_runner/*_out.txt
 docs/papers/
+
+# Phase 0 differential validation dumps (regenerable from Fortran binary)
+data/diff/

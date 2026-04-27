@@ -33,6 +33,8 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
 - [x] `src/carma/_diag/fortran_reader.py` — Python loader for Fortran unformatted-stream dumps
 - [x] `tests/diff/test_kernel_diff.py` — diff harness with `assert_kernel_match` helper + `make_kernel_plot` helper
 - [x] **Phase 0 exit gate:** `vaporp_h2o_murphy2005` bench passes against scen 24 dump (max rel err = 0.0)
+- [x] **Phase 0.5:** `scripts/run_diagnostic_ensemble.py` — orchestrator dumps all 1000 scenarios at substep 1 in ~5 s
+- [x] **Phase 0.5:** parameterized tests across all dumped scenarios + per-kernel summary CDF/histogram in `plots/diff/summary/`
 
 ---
 
@@ -44,7 +46,7 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
 - [ ] `sulfate_surf_tens`
 
 ### `src/carma/vapor_pressure.py`  ↔  `vaporp_*.F90`
-- [x] `vaporp_h2o_murphy2005` (Phase 0 exit gate, scen 24 step 1, max rel err 0.0)
+- [x] `vaporp_h2o_murphy2005` (1000/1000 scenarios pass at rtol 1e-10; ~750 at machine ε, ~250 at ~1e-16)
 - [ ] `vaporp_h2so4_ayers1980`
 - [ ] `vaporp_h2o_buck1981`
 - [ ] `vaporp_h2o_goff1946`
@@ -220,7 +222,9 @@ Per-kernel override: maintain a small map in `tests/diff/test_kernel_diff.py` fo
 
 ## Bench scenarios
 
-Start with **scenario 24** (low H₂SO₄, currently fails peak position in the ensemble). When it passes for a function, move to the next failing scenario discovered by the ensemble. Tracker rows note which scenario(s) the bench was confirmed on.
+Phase 0 dumps span **all 1000 scenarios** at substep 1 (~5 s wall, ~109 MB). Each kernel test parameterizes over all of them and asserts every scenario meets the rtol. Per-kernel summary plots in `plots/diff/summary/` show the histogram + CDF of max relative error across scenarios.
+
+If we need deeper substep coverage on a specific kernel, regenerate dumps for that scenario with `--nstep-max N` (or all scenarios with N substeps).
 
 ## Dump location
 

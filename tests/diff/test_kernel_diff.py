@@ -33,8 +33,26 @@ from carma._diag import read_substep, SubstepDump
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_DIFF_DIR_SCEN_24 = _REPO_ROOT / "data" / "diff" / "scen_024"
-_PLOT_DIR_SCEN_24 = _REPO_ROOT / "plots" / "diff" / "scen_024"
+_DIFF_BASE = _REPO_ROOT / "data" / "diff"
+_PLOT_BASE = _REPO_ROOT / "plots" / "diff"
+
+
+def _available_scenarios() -> list[int]:
+    """All scenario IDs that have a Phase 0 dump on disk."""
+    if not _DIFF_BASE.exists():
+        return []
+    out = []
+    for p in sorted(_DIFF_BASE.glob("scen_*")):
+        try:
+            i = int(p.name.split("_")[1])
+            if (p / "substep_0001_pc.bin").exists():
+                out.append(i)
+        except (ValueError, IndexError):
+            continue
+    return out
+
+
+_ALL_SCEN_IDS = _available_scenarios()
 
 
 # Per-kernel tolerance overrides. Default is 1e-10. Add an entry here
@@ -47,6 +65,69 @@ _PER_KERNEL_TOL = {
 
 def _tol_for(kernel_name: str) -> float:
     return _PER_KERNEL_TOL.get(kernel_name, 1e-10)
+
+
+def compute_rel_err(jax_arr, fortran_arr) -> tuple[np.ndarray, float]:
+    """Per-element relative error and the max thereof. Used by both the
+    per-scenario plotter and the across-scenario summary."""
+    j = np.asarray(jax_arr)
+    f = np.asarray(fortran_arr)
+    diff = np.abs(j - f)
+    scale = np.maximum(np.abs(j), np.abs(f))
+    rel = np.where(scale > 0, diff / scale, 0.0)
+    max_rel = float(rel.max()) if rel.size else 0.0
+    return rel, max_rel
+
+
+def make_summary_plot(
+    kernel_name: str,
+    scenario_max_rel: dict,
+    out_dir: Path,
+    rtol: float = 1e-10,
+):
+    """One plot per kernel: histogram + CDF of max-relative-error
+    across scenarios. ``scenario_max_rel`` maps scen_id → max_rel_err.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{kernel_name.replace(':', '_')}_summary.png"
+
+    n = len(scenario_max_rel)
+    if n == 0:
+        return None
+    errs = np.asarray([v for _, v in sorted(scenario_max_rel.items())])
+    safe = np.maximum(errs, 1e-30)
+    n_pass = int((errs <= rtol).sum())
+
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+    ax_hist, ax_cdf = axes
+
+    bins = np.logspace(-30, max(2, np.log10(safe.max() + 1e-30)), 50)
+    ax_hist.hist(safe, bins=bins, color="C0", edgecolor="k", alpha=0.7)
+    ax_hist.axvline(rtol, color="gray", ls="--", lw=1, label=f"rtol={rtol:.0e}")
+    ax_hist.set_xscale("log")
+    ax_hist.set_xlabel("max relative error per scenario")
+    ax_hist.set_ylabel("scenario count")
+    ax_hist.legend()
+    ax_hist.grid(True, alpha=0.3)
+    ax_hist.set_title(f"distribution across {n} scenarios")
+
+    sorted_errs = np.sort(safe)
+    cdf_y = np.arange(1, n + 1) / n
+    ax_cdf.plot(sorted_errs, cdf_y, "C0-", lw=1.5)
+    ax_cdf.axvline(rtol, color="gray", ls="--", lw=1, label=f"rtol={rtol:.0e}")
+    ax_cdf.set_xscale("log")
+    ax_cdf.set_xlabel("max relative error per scenario")
+    ax_cdf.set_ylabel("CDF")
+    ax_cdf.legend()
+    ax_cdf.grid(True, alpha=0.3)
+    ax_cdf.set_title(f"CDF: {n_pass}/{n} pass at rtol")
+
+    fig.suptitle(f"{kernel_name}: across-scenario summary", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
 
 
 def make_kernel_plot(
@@ -188,55 +269,66 @@ def assert_kernel_match(
 
 
 # ---------------------------------------------------------------------------
-# Phase 0 exit gate: trivial test confirming the harness wiring works
-# end-to-end on a kernel that's known to be correctly ported.
+# Phase 0 exit gate: bench across all available scenarios at substep 1.
+# Skips automatically if no scenarios have been dumped yet.
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(scope="module")
-def scen24_step1() -> SubstepDump:
-    """Load substep 1 of scenario 24 from the diagnostic dump.
-
-    Skips the tests if the dump hasn't been produced yet (see
-    ``scripts/fortran_patch/apply_diagnostic_patch.sh`` to build and
-    run the diagnostic binary).
-    """
-    if not _DIFF_DIR_SCEN_24.exists():
-        pytest.skip(
-            f"Diagnostic dump missing: {_DIFF_DIR_SCEN_24}. "
-            "Run apply_diagnostic_patch.sh + test_sulfate_diagnostic first."
-        )
-    return read_substep(_DIFF_DIR_SCEN_24, step=1)
+if not _ALL_SCEN_IDS:
+    pytest.skip(
+        f"No diagnostic dumps found under {_DIFF_BASE}. "
+        "Run scripts/run_diagnostic_ensemble.py first.",
+        allow_module_level=True,
+    )
 
 
-def test_vaporp_h2o_murphy2005_matches_fortran(scen24_step1):
+def _summary_plot_dir() -> Path:
+    return _PLOT_BASE / "summary"
+
+
+def test_vaporp_h2o_murphy2005_matches_fortran():
     """Phase 0 exit gate: JAX vaporp_h2o_murphy2005 matches Fortran's
-    f_pvapl[:, igas_h2o] and f_pvapi[:, igas_h2o] for scen 24 substep 1.
+    f_pvapl[:, igas_h2o] and f_pvapi[:, igas_h2o] across every dumped
+    scenario at substep 1.
     """
     from carma.vapor_pressure import vaporp_h2o_murphy2005
 
-    # In the diagnostic binary's CARMA setup, igas_h2o = 1 (1-based) → 0 (0-based).
     igas_h2o = 0
-    t = scen24_step1.t                       # (NZ,)
-    pvapl_jax, pvapi_jax = vaporp_h2o_murphy2005(t)
-    pvapl_fortran = scen24_step1.pvapl[:, igas_h2o]
-    pvapi_fortran = scen24_step1.pvapi[:, igas_h2o]
+    pvapl_max_rel = {}
+    pvapi_max_rel = {}
+    failures = []
 
-    make_kernel_plot(
-        "vaporp_h2o_murphy2005_pvapl",
-        np.asarray(pvapl_jax), pvapl_fortran,
-        _PLOT_DIR_SCEN_24,
-        x_label="z-level", y_label="pvapl over liquid water [dyne/cm²]",
-        title_extra=f"T={float(t[0]):.2f}K, scen 24 step 1",
-    )
-    make_kernel_plot(
-        "vaporp_h2o_murphy2005_pvapi",
-        np.asarray(pvapi_jax), pvapi_fortran,
-        _PLOT_DIR_SCEN_24,
-        x_label="z-level", y_label="pvapi over ice [dyne/cm²]",
-        title_extra=f"T={float(t[0]):.2f}K, scen 24 step 1",
-    )
+    for scen_id in _ALL_SCEN_IDS:
+        scen_dir = _DIFF_BASE / f"scen_{scen_id:03d}"
+        d = read_substep(scen_dir, step=1)
+        pvapl_jax, pvapi_jax = vaporp_h2o_murphy2005(d.t)
+        pvapl_f = d.pvapl[:, igas_h2o]
+        pvapi_f = d.pvapi[:, igas_h2o]
 
-    assert_kernel_match("vaporp_h2o_murphy2005:pvapl",
-                         pvapl_jax, pvapl_fortran)
-    assert_kernel_match("vaporp_h2o_murphy2005:pvapi",
-                         pvapi_jax, pvapi_fortran)
+        _, m_pvapl = compute_rel_err(np.asarray(pvapl_jax), pvapl_f)
+        _, m_pvapi = compute_rel_err(np.asarray(pvapi_jax), pvapi_f)
+        pvapl_max_rel[scen_id] = m_pvapl
+        pvapi_max_rel[scen_id] = m_pvapi
+
+        if m_pvapl > _tol_for("vaporp_h2o_murphy2005:pvapl"):
+            failures.append(("pvapl", scen_id, m_pvapl))
+        if m_pvapi > _tol_for("vaporp_h2o_murphy2005:pvapi"):
+            failures.append(("pvapi", scen_id, m_pvapi))
+
+    # Save summary plots regardless of pass/fail.
+    summary_dir = _summary_plot_dir()
+    make_summary_plot("vaporp_h2o_murphy2005_pvapl",
+                      pvapl_max_rel, summary_dir)
+    make_summary_plot("vaporp_h2o_murphy2005_pvapi",
+                      pvapi_max_rel, summary_dir)
+
+    if failures:
+        msg_lines = [
+            f"vaporp_h2o_murphy2005 mismatched on {len(failures)} scenarios:",
+        ]
+        for which, scen_id, err in failures[:10]:
+            msg_lines.append(
+                f"  scen {scen_id} ({which}): max rel err {err:.3e}"
+            )
+        if len(failures) > 10:
+            msg_lines.append(f"  ... and {len(failures) - 10} more")
+        raise AssertionError("\n".join(msg_lines))
