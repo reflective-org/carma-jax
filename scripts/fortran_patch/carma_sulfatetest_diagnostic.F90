@@ -17,6 +17,10 @@
 !!   substep_<NNNN>_t.bin            shape (NZ,)
 !!   substep_<NNNN>_p.bin            shape (NZ,)
 !!   substep_<NNNN>_rhoa.bin         shape (NZ,)
+!!   substep_<NNNN>_zmet.bin         shape (NZ,)
+!!   substep_<NNNN>_wtpct.bin        shape (NZ,)  -- sulfate wt% from Tabazadeh
+!!   substep_<NNNN>_sulfdens.bin     shape (NZ,)  -- sulfate_density(wtpct, t)
+!!   substep_<NNNN>_sulfsurf.bin     shape (NZ,)  -- sulfate_surf_tens(wtpct, t)
 !!   substep_<NNNN>_pvapl.bin        shape (NZ, NGAS)
 !!   substep_<NNNN>_pvapi.bin        shape (NZ, NGAS)
 !!   substep_<NNNN>_supsatl.bin      shape (NZ, NGAS)
@@ -60,6 +64,7 @@ subroutine test_sulfate_diagnostic()
   use carmastate_mod
   use carma_mod
   use atmosphere_mod
+  use sulfate_utils, only: sulfate_density, sulfate_surf_tens
 
   implicit none
 
@@ -280,6 +285,12 @@ contains
     call dump_1d(prefix, 't', cs%f_t)
     call dump_1d(prefix, 'p', cs%f_p)
     call dump_1d(prefix, 'rhoa', cs%f_rhoa)
+    call dump_1d(prefix, 'zmet', cs%f_zmet)
+    call dump_1d(prefix, 'wtpct', cs%f_wtpct)
+    ! Probes: scalar sulfate_density / sulfate_surf_tens at the
+    ! (wtpct, t) of this substep. JAX side feeds the same (wtpct, t)
+    ! and compares against these.
+    call dump_sulfate_probes(prefix, cs)
 
     ! Vapor / saturation
     call dump_2d(prefix, 'pvapl', cs%f_pvapl)
@@ -316,6 +327,45 @@ contains
       call dump_5d(prefix, 'ckernel', cs%f_ckernel)
     end if
   end subroutine dump_substep
+
+
+  !! Per-substep probes: call sulfate_density and sulfate_surf_tens at
+  !! the current (wtpct, t) and dump the scalar results. This gives a
+  !! direct bench point for the JAX sulfate_density / sulfate_surf_tens
+  !! kernels with the exact same inputs Fortran is using.
+  subroutine dump_sulfate_probes(prefix, cs)
+    character(len=*), intent(in)            :: prefix
+    type(carmastate_type), intent(in)       :: cs
+    integer                                 :: rc_loc, kk
+    real(kind=f), allocatable               :: sulfdens(:), sulfsurf(:)
+    integer                                 :: nz_loc
+
+    if (.not. allocated(cs%f_t) .or. .not. allocated(cs%f_wtpct)) return
+    nz_loc = size(cs%f_t)
+    allocate(sulfdens(nz_loc), sulfsurf(nz_loc))
+    rc_loc = 0
+    do kk = 1, nz_loc
+      sulfdens(kk) = sulfate_density(carma, cs%f_wtpct(kk), cs%f_t(kk), rc_loc)
+      sulfsurf(kk) = sulfate_surf_tens(carma, cs%f_wtpct(kk), cs%f_t(kk), rc_loc)
+    end do
+    call dump_alloc_1d(prefix, 'sulfdens', sulfdens)
+    call dump_alloc_1d(prefix, 'sulfsurf', sulfsurf)
+    deallocate(sulfdens, sulfsurf)
+  end subroutine dump_sulfate_probes
+
+
+  subroutine dump_alloc_1d(prefix, name, arr)
+    character(len=*), intent(in)            :: prefix, name
+    real(kind=f), intent(in)                :: arr(:)
+    character(len=512)                      :: path
+    integer                                 :: u, ios
+    path = trim(prefix) // trim(name) // '.bin'
+    open(newunit=u, file=trim(path), access='stream', &
+         status='replace', iostat=ios)
+    if (ios /= 0) return
+    write(u) arr
+    close(u)
+  end subroutine dump_alloc_1d
 
 
   subroutine dump_3d(prefix, name, arr)

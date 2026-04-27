@@ -332,3 +332,122 @@ def test_vaporp_h2o_murphy2005_matches_fortran():
         if len(failures) > 10:
             msg_lines.append(f"  ... and {len(failures) - 10} more")
         raise AssertionError("\n".join(msg_lines))
+
+
+def test_wtpct_tabaz_matches_fortran():
+    """Phase 7.1: JAX wtpct_tabaz matches Fortran's f_wtpct[iz] across
+    every dumped scenario at substep 1.
+
+    Fortran inputs (per vaporp_h2so4_ayers1980.F90 line 60):
+      temp = max(t(iz), 140)
+      h2o_mass = gc(iz, igash2o) / zmet(iz)
+      h2o_vp = pvapl(iz, igash2o)
+    """
+    from carma.sulfate_utils import wtpct_tabaz
+    import jax.numpy as jnp
+
+    igas_h2o = 0
+    max_rel = {}
+    failures = []
+
+    for scen_id in _ALL_SCEN_IDS:
+        scen_dir = _DIFF_BASE / f"scen_{scen_id:03d}"
+        d = read_substep(scen_dir, step=1)
+
+        # Reproduce Fortran's input prep verbatim.
+        temp = float(np.maximum(d.t[0], 140.0))
+        h2o_mass = float(d.gc[0, igas_h2o] / d.zmet[0])
+        h2o_vp = float(d.pvapl[0, igas_h2o])
+
+        wtp_jax = float(wtpct_tabaz(
+            jnp.asarray(temp), jnp.asarray(h2o_mass), jnp.asarray(h2o_vp),
+        ))
+        wtp_f = float(d.wtpct[0])
+
+        _, m = compute_rel_err(wtp_jax, wtp_f)
+        max_rel[scen_id] = m
+        if m > _tol_for("wtpct_tabaz"):
+            failures.append((scen_id, m, temp, h2o_mass, h2o_vp,
+                             wtp_jax, wtp_f))
+
+    make_summary_plot("wtpct_tabaz", max_rel, _summary_plot_dir())
+
+    if failures:
+        msg_lines = [f"wtpct_tabaz mismatched on {len(failures)} scenarios:"]
+        for scen_id, err, T, hm, hv, wj, wf in failures[:10]:
+            msg_lines.append(
+                f"  scen {scen_id}: rel err {err:.3e}  T={T:.2f}  "
+                f"h2o_mass={hm:.3e}  h2o_vp={hv:.3e}  JAX={wj:.4f}  F={wf:.4f}"
+            )
+        if len(failures) > 10:
+            msg_lines.append(f"  ... and {len(failures) - 10} more")
+        raise AssertionError("\n".join(msg_lines))
+
+
+def test_sulfate_density_matches_fortran():
+    """Phase 7.2: JAX sulfate_density(wtp, t) matches the Fortran probe
+    `sulfdens` (which calls Fortran sulfate_density at the substep's
+    wtpct and t) across all 1000 scenarios at substep 1.
+    """
+    from carma.sulfate_utils import sulfate_density
+    import jax.numpy as jnp
+
+    max_rel = {}
+    failures = []
+    for scen_id in _ALL_SCEN_IDS:
+        d = read_substep(_DIFF_BASE / f"scen_{scen_id:03d}", step=1)
+        wtp = float(d.wtpct[0])
+        t = float(d.t[0])
+        rho_jax = float(sulfate_density(jnp.asarray(wtp), jnp.asarray(t)))
+        rho_f = float(d.sulfdens[0])
+        _, m = compute_rel_err(rho_jax, rho_f)
+        max_rel[scen_id] = m
+        if m > _tol_for("sulfate_density"):
+            failures.append((scen_id, m, wtp, t, rho_jax, rho_f))
+
+    make_summary_plot("sulfate_density", max_rel, _summary_plot_dir())
+
+    if failures:
+        msg_lines = [f"sulfate_density mismatched on {len(failures)} scenarios:"]
+        for scen_id, err, w, t, rj, rf in failures[:10]:
+            msg_lines.append(
+                f"  scen {scen_id}: rel err {err:.3e}  wtp={w:.3f}  T={t:.2f}  "
+                f"JAX={rj:.6f}  F={rf:.6f}"
+            )
+        if len(failures) > 10:
+            msg_lines.append(f"  ... and {len(failures) - 10} more")
+        raise AssertionError("\n".join(msg_lines))
+
+
+def test_sulfate_surf_tens_matches_fortran():
+    """Phase 7.3: JAX sulfate_surf_tens(wtp, t) matches the Fortran probe
+    `sulfsurf` across all 1000 scenarios at substep 1.
+    """
+    from carma.sulfate_utils import sulfate_surf_tens
+    import jax.numpy as jnp
+
+    max_rel = {}
+    failures = []
+    for scen_id in _ALL_SCEN_IDS:
+        d = read_substep(_DIFF_BASE / f"scen_{scen_id:03d}", step=1)
+        wtp = float(d.wtpct[0])
+        t = float(d.t[0])
+        s_jax = float(sulfate_surf_tens(jnp.asarray(wtp), jnp.asarray(t)))
+        s_f = float(d.sulfsurf[0])
+        _, m = compute_rel_err(s_jax, s_f)
+        max_rel[scen_id] = m
+        if m > _tol_for("sulfate_surf_tens"):
+            failures.append((scen_id, m, wtp, t, s_jax, s_f))
+
+    make_summary_plot("sulfate_surf_tens", max_rel, _summary_plot_dir())
+
+    if failures:
+        msg_lines = [f"sulfate_surf_tens mismatched on {len(failures)} scenarios:"]
+        for scen_id, err, w, t, sj, sf in failures[:10]:
+            msg_lines.append(
+                f"  scen {scen_id}: rel err {err:.3e}  wtp={w:.3f}  T={t:.2f}  "
+                f"JAX={sj:.6f}  F={sf:.6f}"
+            )
+        if len(failures) > 10:
+            msg_lines.append(f"  ... and {len(failures) - 10} more")
+        raise AssertionError("\n".join(msg_lines))
