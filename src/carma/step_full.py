@@ -144,20 +144,16 @@ def make_step_full(
     ):
         """Advance single-column state by ``dtime``.
 
-        Faithful microfast pipeline: supersat → sulfnuc (fills rhompe/
-        rnuclg) → growevapl → growp/upgxfer/psolve per (ielem, ibin)
-        with all rates time-implicit-coupled → evapp/downgxfer/
-        downgevapply → gsolve → tsolve → convergence check.
+        Pipeline: growth (if enabled) → sulfate nucleation + gas
+        exchange (if enabled). Growth uses adaptive retry substepping
+        internally; sulfate runs once at full dtime.
 
-        This mirrors Fortran's microfast.F90 — sulfnuc rates are inside
-        the same time-implicit psolve update as growth, not a separate
-        post-step. The earlier 2-step (microfast then sulfate_step)
-        composition broke Fortran parity at fine dt.
-
-        Diagnostics: growth_substeps and rlheat.
+        Diagnostics: dict with growth substeps used and sulfate
+        rhompe / rnuclg / gasprod.
         """
         diag = {}
 
+        # --- Growth (adaptive retry, JIT-clean) ---
         if do_grow:
             pc, gc, t, rlheat, nts_used = newstate_calc_growth_jit(
                 pc, gc, t, iz, dtime,
@@ -173,22 +169,34 @@ def make_step_full(
                 ds_threshold_arr=ds_threshold_arr,
                 scale_threshold=DTYPE(scale_threshold),
                 ivaprtn_arr=ivaprtn_arr, igas_h2o=igas_h2o,
-                do_sulfnuc=do_sulfate,
-                igroup_sulfate=igroup_sulfate, igas_h2so4=igas_h2so4,
-                sulf_r_bins=r_bins,
-                sulf_rmassup=rmassup,
-                sulf_rmrat=rmrat_val,
-                nuc_method=method,
-                do_homogeneous_nuc=do_homogeneous_nuc,
-                do_heterogeneous_nuc=do_heterogeneous_nuc,
             )
             diag["growth_substeps"] = nts_used
             diag["rlheat"] = rlheat
-            if do_sulfate:
-                # Diag-only key so callers that branch on "sulfate"
-                # in diag don't break. Actual rates are now inside
-                # microfast_growth's psolve update.
-                diag["sulfate"] = {"integrated": jnp.asarray(True)}
+
+        # --- Sulfate nucleation + gas exchange ---
+        # Fortran's carma_sulfatetest_ensemble.F90 enables only
+        # homogeneous (I_HOMNUC). Default do_heterogeneous_nuc=False
+        # mirrors that. Earlier hard-coded do_heterogeneous=True
+        # default was a parity bug — it gave every existing bin a
+        # sulfate-onto-self transfer (bin i → i+1) that compounded
+        # over many timesteps and drove mass to the top bin at finer
+        # dt. Set do_heterogeneous_nuc=True if upstream config wires
+        # het in (e.g. dust-seed nucleation tests).
+        if do_sulfate:
+            pc_sulf = pc[iz, :, int(config.groups[igroup_sulfate].ienconc)]
+            gc_h2so4 = gc[iz, igas_h2so4]
+            gc_h2o = gc[iz, igas_h2o]
+            pc_sulf_new, gc_h2so4_new, sulf_diag = sulfate_step_one_level(
+                pc_sulf, gc_h2so4, gc_h2o, t[iz], pvapl, zmet[iz], dtime,
+                r_bins, rmass, rmassup, diffmass_sulf, inuc2bin,
+                rmrat_val, method=method,
+                do_homogeneous=do_homogeneous_nuc,
+                do_heterogeneous=do_heterogeneous_nuc,
+            )
+            pc = pc.at[iz, :,
+                int(config.groups[igroup_sulfate].ienconc)].set(pc_sulf_new)
+            gc = gc.at[iz, igas_h2so4].set(gc_h2so4_new)
+            diag["sulfate"] = sulf_diag
 
         return pc, gc, t, diag
 
