@@ -21,6 +21,8 @@ Array shapes (in numpy, after Fortran→C order conversion):
     rhoa        (NZ,)
     zmet        (NZ,)
     wtpct       (NZ,)        — sulfate wt% from wtpct_tabaz
+    sulfdens    (NZ,)        — sulfate_density(wtpct, t) Fortran probe
+    sulfsurf    (NZ,)        — sulfate_surf_tens(wtpct, t) Fortran probe
     pvapl       (NZ, NGAS)
     pvapi       (NZ, NGAS)
     supsatl     (NZ, NGAS)
@@ -73,6 +75,8 @@ def _shape_map(dims):
         "rhoa":       (NZ,),
         "zmet":       (NZ,),
         "wtpct":      (NZ,),
+        "sulfdens":   (NZ,),
+        "sulfsurf":   (NZ,),
         "pvapl":      (NZ, NGAS),
         "pvapi":      (NZ, NGAS),
         "supsatl":    (NZ, NGAS),
@@ -113,6 +117,8 @@ class SubstepDump:
     rhoa:      np.ndarray
     zmet:      np.ndarray
     wtpct:     np.ndarray
+    sulfdens:  np.ndarray
+    sulfsurf:  np.ndarray
     pvapl:     np.ndarray
     pvapi:     np.ndarray
     supsatl:   np.ndarray
@@ -184,6 +190,8 @@ def read_substep(out_dir, step: int, dims=None) -> SubstepDump:
         rhoa=_load_one(_path("rhoa"), shapes["rhoa"]),
         zmet=_load_one(_path("zmet"), shapes["zmet"]),
         wtpct=_load_one(_path("wtpct"), shapes["wtpct"]),
+        sulfdens=_load_one(_path("sulfdens"), shapes["sulfdens"]),
+        sulfsurf=_load_one(_path("sulfsurf"), shapes["sulfsurf"]),
         pvapl=_load_one(_path("pvapl"), shapes["pvapl"]),
         pvapi=_load_one(_path("pvapi"), shapes["pvapi"]),
         supsatl=_load_one(_path("supsatl"), shapes["supsatl"]),
