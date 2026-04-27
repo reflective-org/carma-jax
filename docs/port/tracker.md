@@ -41,7 +41,7 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
 ## Phase 7 — H₂SO₄ sulfate physics
 
 ### `src/carma/sulfate_utils.py`  ↔  `sulfate_utils.F90`
-- [ ] `wtpct_tabaz`
+- [x] `wtpct_tabaz` (1000/1000 scenarios pass at rtol 1e-10; ~750 at machine ε, ~250 at ~1e-16)
 - [ ] `sulfate_density`
 - [ ] `sulfate_surf_tens`
 

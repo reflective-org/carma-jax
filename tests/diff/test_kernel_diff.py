@@ -332,3 +332,53 @@ def test_vaporp_h2o_murphy2005_matches_fortran():
         if len(failures) > 10:
             msg_lines.append(f"  ... and {len(failures) - 10} more")
         raise AssertionError("\n".join(msg_lines))
+
+
+def test_wtpct_tabaz_matches_fortran():
+    """Phase 7.1: JAX wtpct_tabaz matches Fortran's f_wtpct[iz] across
+    every dumped scenario at substep 1.
+
+    Fortran inputs (per vaporp_h2so4_ayers1980.F90 line 60):
+      temp = max(t(iz), 140)
+      h2o_mass = gc(iz, igash2o) / zmet(iz)
+      h2o_vp = pvapl(iz, igash2o)
+    """
+    from carma.sulfate_utils import wtpct_tabaz
+    import jax.numpy as jnp
+
+    igas_h2o = 0
+    max_rel = {}
+    failures = []
+
+    for scen_id in _ALL_SCEN_IDS:
+        scen_dir = _DIFF_BASE / f"scen_{scen_id:03d}"
+        d = read_substep(scen_dir, step=1)
+
+        # Reproduce Fortran's input prep verbatim.
+        temp = float(np.maximum(d.t[0], 140.0))
+        h2o_mass = float(d.gc[0, igas_h2o] / d.zmet[0])
+        h2o_vp = float(d.pvapl[0, igas_h2o])
+
+        wtp_jax = float(wtpct_tabaz(
+            jnp.asarray(temp), jnp.asarray(h2o_mass), jnp.asarray(h2o_vp),
+        ))
+        wtp_f = float(d.wtpct[0])
+
+        _, m = compute_rel_err(wtp_jax, wtp_f)
+        max_rel[scen_id] = m
+        if m > _tol_for("wtpct_tabaz"):
+            failures.append((scen_id, m, temp, h2o_mass, h2o_vp,
+                             wtp_jax, wtp_f))
+
+    make_summary_plot("wtpct_tabaz", max_rel, _summary_plot_dir())
+
+    if failures:
+        msg_lines = [f"wtpct_tabaz mismatched on {len(failures)} scenarios:"]
+        for scen_id, err, T, hm, hv, wj, wf in failures[:10]:
+            msg_lines.append(
+                f"  scen {scen_id}: rel err {err:.3e}  T={T:.2f}  "
+                f"h2o_mass={hm:.3e}  h2o_vp={hv:.3e}  JAX={wj:.4f}  F={wf:.4f}"
+            )
+        if len(failures) > 10:
+            msg_lines.append(f"  ... and {len(failures) - 10} more")
+        raise AssertionError("\n".join(msg_lines))

@@ -17,6 +17,8 @@
 !!   substep_<NNNN>_t.bin            shape (NZ,)
 !!   substep_<NNNN>_p.bin            shape (NZ,)
 !!   substep_<NNNN>_rhoa.bin         shape (NZ,)
+!!   substep_<NNNN>_zmet.bin         shape (NZ,)
+!!   substep_<NNNN>_wtpct.bin        shape (NZ,)  -- sulfate wt% from Tabazadeh
 !!   substep_<NNNN>_pvapl.bin        shape (NZ, NGAS)
 !!   substep_<NNNN>_pvapi.bin        shape (NZ, NGAS)
 !!   substep_<NNNN>_supsatl.bin      shape (NZ, NGAS)
@@ -280,6 +282,8 @@ contains
     call dump_1d(prefix, 't', cs%f_t)
     call dump_1d(prefix, 'p', cs%f_p)
     call dump_1d(prefix, 'rhoa', cs%f_rhoa)
+    call dump_1d(prefix, 'zmet', cs%f_zmet)
+    call dump_1d(prefix, 'wtpct', cs%f_wtpct)
 
     ! Vapor / saturation
     call dump_2d(prefix, 'pvapl', cs%f_pvapl)

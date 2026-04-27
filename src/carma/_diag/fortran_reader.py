@@ -19,6 +19,8 @@ Array shapes (in numpy, after Fortran→C order conversion):
     t           (NZ,)
     p           (NZ,)
     rhoa        (NZ,)
+    zmet        (NZ,)
+    wtpct       (NZ,)        — sulfate wt% from wtpct_tabaz
     pvapl       (NZ, NGAS)
     pvapi       (NZ, NGAS)
     supsatl     (NZ, NGAS)
@@ -69,6 +71,8 @@ def _shape_map(dims):
         "t":          (NZ,),
         "p":          (NZ,),
         "rhoa":       (NZ,),
+        "zmet":       (NZ,),
+        "wtpct":      (NZ,),
         "pvapl":      (NZ, NGAS),
         "pvapi":      (NZ, NGAS),
         "supsatl":    (NZ, NGAS),
@@ -107,6 +111,8 @@ class SubstepDump:
     t:         np.ndarray
     p:         np.ndarray
     rhoa:      np.ndarray
+    zmet:      np.ndarray
+    wtpct:     np.ndarray
     pvapl:     np.ndarray
     pvapi:     np.ndarray
     supsatl:   np.ndarray
@@ -176,6 +182,8 @@ def read_substep(out_dir, step: int, dims=None) -> SubstepDump:
         t=_load_one(_path("t"), shapes["t"]),
         p=_load_one(_path("p"), shapes["p"]),
         rhoa=_load_one(_path("rhoa"), shapes["rhoa"]),
+        zmet=_load_one(_path("zmet"), shapes["zmet"]),
+        wtpct=_load_one(_path("wtpct"), shapes["wtpct"]),
         pvapl=_load_one(_path("pvapl"), shapes["pvapl"]),
         pvapi=_load_one(_path("pvapi"), shapes["pvapi"]),
         supsatl=_load_one(_path("supsatl"), shapes["supsatl"]),
