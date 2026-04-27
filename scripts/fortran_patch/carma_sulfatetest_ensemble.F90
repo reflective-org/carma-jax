@@ -48,7 +48,11 @@ subroutine test_sulfate_ensemble()
   integer, parameter        :: NWAVE        = 0
   integer, parameter        :: LUNOPRT      = 6
 
-  real(kind=f), parameter   :: dtime  = 1800._f
+  ! Outer timestep + total simulation time. Original sulfatetest used
+  ! 1800 s × 100 = 50 hr; the bin-shape parity work (Phase 10.4i)
+  ! showed 1800 s is too coarse for stratospheric H2SO4 dynamics —
+  ! finer dt (60 s) is needed for accurate condensation/coag balance.
+  real(kind=f), parameter   :: dtime  = 60._f
   real(kind=f), parameter   :: deltaz = 10000._f
   real(kind=f), parameter   :: zmin   = 17000._f
   integer, parameter        :: nstep  = 180000 / int(dtime)
