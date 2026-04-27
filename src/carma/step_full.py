@@ -49,6 +49,8 @@ def make_step_full(
     igas_h2o=0,
     do_grow=True,
     do_sulfate=True,
+    do_homogeneous_nuc=True,
+    do_heterogeneous_nuc=False,
     method="ZhaoTurco",
     minsubsteps=1,
     maxsubsteps=128,
@@ -64,6 +66,10 @@ def make_step_full(
         do_sulfate: Run sulfate nucleation + gas exchange.
         method: Sulfate nucleation method (``"ZhaoTurco"`` default).
         minsubsteps, maxsubsteps, maxretries: Growth substep bounds.
+        do_homogeneous_nuc, do_heterogeneous_nuc: Defaults match the
+            Fortran sulfatetest (homogeneous only). Heterogeneous
+            on at finer dt drives mass to the top bin — see
+            Phase 10.4j for the dt-sensitivity diagnostic.
 
     Returns:
         ``step(pc, gc, t, dtime, **env)`` closure that returns
@@ -139,8 +145,8 @@ def make_step_full(
         """Advance single-column state by ``dtime``.
 
         Pipeline: growth (if enabled) → sulfate nucleation + gas
-        exchange (if enabled). All state updates are explicit Euler
-        after the relevant pure-function kernel computes rates.
+        exchange (if enabled). Growth uses adaptive retry substepping
+        internally; sulfate runs once at full dtime.
 
         Diagnostics: dict with growth substeps used and sulfate
         rhompe / rnuclg / gasprod.
@@ -168,8 +174,15 @@ def make_step_full(
             diag["rlheat"] = rlheat
 
         # --- Sulfate nucleation + gas exchange ---
+        # Fortran's carma_sulfatetest_ensemble.F90 enables only
+        # homogeneous (I_HOMNUC). Default do_heterogeneous_nuc=False
+        # mirrors that. Earlier hard-coded do_heterogeneous=True
+        # default was a parity bug — it gave every existing bin a
+        # sulfate-onto-self transfer (bin i → i+1) that compounded
+        # over many timesteps and drove mass to the top bin at finer
+        # dt. Set do_heterogeneous_nuc=True if upstream config wires
+        # het in (e.g. dust-seed nucleation tests).
         if do_sulfate:
-            # Pull sulfate group's pc, h2so4 gas
             pc_sulf = pc[iz, :, int(config.groups[igroup_sulfate].ienconc)]
             gc_h2so4 = gc[iz, igas_h2so4]
             gc_h2o = gc[iz, igas_h2o]
@@ -177,8 +190,9 @@ def make_step_full(
                 pc_sulf, gc_h2so4, gc_h2o, t[iz], pvapl, zmet[iz], dtime,
                 r_bins, rmass, rmassup, diffmass_sulf, inuc2bin,
                 rmrat_val, method=method,
+                do_homogeneous=do_homogeneous_nuc,
+                do_heterogeneous=do_heterogeneous_nuc,
             )
-            # Scatter back
             pc = pc.at[iz, :,
                 int(config.groups[igroup_sulfate].ienconc)].set(pc_sulf_new)
             gc = gc.at[iz, igas_h2so4].set(gc_h2so4_new)
