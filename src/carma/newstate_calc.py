@@ -8,7 +8,7 @@ Ported from: newstate_calc.F90
 import jax
 import jax.numpy as jnp
 
-from carma.constants import SMALL_PC, FEW_PC, CP, RGAS, WTMOL_H2O
+from carma.constants import SMALL_PC, FEW_PC, CP, RGAS, AVG, BK, WTMOL_H2O
 from carma.enums import RC_OK, RC_WARNING_RETRY
 from carma.precision import DTYPE
 from carma.vapor_pressure import vaporp_h2o_murphy2005, vaporp_h2so4_ayers1980
@@ -16,10 +16,12 @@ from carma.supersaturation import supersat
 from carma.growth.growevapl import growevapl
 from carma.growth.growp import growp
 from carma.growth.evapp import evapp, downgevapply
+from carma.nucleation.sulfnuc import sulfnuc
 from carma.solvers.psolve import psolve
 from carma.solvers.gsolve import gsolve
 from carma.solvers.tsolve import tsolve
 from carma.solvers.totalcondensate import totalcondensate
+from carma.sulfate_utils import wtpct_tabaz
 
 
 # Vapor pressure dispatch: build per-gas (NZ, NGAS) arrays based on the
@@ -76,6 +78,92 @@ def _build_supsat(t, gc, pvapl, pvapi, gwtmol_arr, zmet, ngas):
     return supsatl, supsati
 
 
+_GWTMOL_H2SO4 = DTYPE(98.0)
+_GWTMOL_H2O = DTYPE(18.0)
+
+
+def _compute_sulfnuc_rates(
+    pc, gc, t, zmet, pvapl,
+    sulf_r_bins, sulf_rmassup, sulf_rmrat,
+    igroup_sulfate, igas_h2so4, igas_h2o,
+    iz, nbin, ngroup, nelem,
+    nuc_method="ZhaoTurco",
+    do_homogeneous=True, do_heterogeneous=False,
+):
+    """Compute sulfate nucleation production rates.
+
+    Mirrors Fortran's ``sulfnuc.F90`` placement INSIDE microfast: this
+    fills the (nbin, nelem) ``rhompe`` and (nbin, ngroup, ngroup)
+    ``rnuclg`` arrays that are then passed to ``psolve``. The previous
+    JAX architecture computed nucleation in a separate ``sulfate_step``
+    *after* microfast finished, breaking the time-implicit coupling
+    between nucleation and growth that Fortran preserves through
+    ``psolve``.
+
+    Args:
+        pc: (NZ, NBIN, NELEM) particle concentrations.
+        gc: (NZ, NGAS) gas concentrations [g/cm³/z].
+        t: (NZ,) temperature [K].
+        zmet: (NZ,) vertical metric.
+        pvapl: (NZ, NGAS) saturation vapor pressure (liquid).
+        sulf_r_bins: (NBIN,) wet radius for sulfate group [cm].
+        sulf_rmassup: (NBIN,) upper bin-boundary mass [g].
+        sulf_rmrat: bin mass ratio (scalar).
+        igroup_sulfate, igas_h2so4, igas_h2o: indices.
+        iz: vertical level.
+        nuc_method: "ZhaoTurco" or "Vehkamaki".
+        do_homogeneous, do_heterogeneous: enable/disable branches.
+
+    Returns:
+        rhompe: (NBIN, NELEM) homogeneous production.
+        rnuclg: (NBIN, NGROUP, NGROUP) heterogeneous loss rates.
+    """
+    rhompe = jnp.zeros((nbin, nelem), dtype=DTYPE)
+    rnuclg = jnp.zeros((nbin, ngroup, ngroup), dtype=DTYPE)
+    if igas_h2so4 < 0:
+        return rhompe, rnuclg
+
+    # Convert gas to molar densities at this level
+    gc_h2so4 = gc[iz, igas_h2so4]
+    gc_h2o = gc[iz, igas_h2o]
+    zmet_iz = zmet[iz]
+    h2so4_cgs = gc_h2so4 / zmet_iz
+    h2o_cgs = gc_h2o / zmet_iz
+    h2so4_num = h2so4_cgs * AVG / _GWTMOL_H2SO4
+    h2o_num = h2o_cgs * AVG / _GWTMOL_H2O
+
+    # Relative humidity and Tabazadeh wt% (Fortran's water activity input
+    # to sulfnucrate uses gc_h2o expressed via Boltzmann form, not via
+    # gc/pvapl ratio — we mirror sulfate_step._compute_state to get the
+    # same numbers).
+    rvap = RGAS / _GWTMOL_H2O
+    pvapl_h2o = pvapl[iz, igas_h2o]
+    rh = (h2o_cgs * rvap * t[iz]) / pvapl_h2o
+    h2o_mass_wtp = rh * pvapl_h2o * _GWTMOL_H2O / (BK * t[iz] * AVG)
+    wtp = wtpct_tabaz(t[iz], h2o_mass_wtp, pvapl_h2o)
+
+    # Call sulfnuc to get per-bin rates
+    rhompe_1d, rnuclg_1d = sulfnuc(
+        temp=t[iz], weight_percent=wtp, rh=rh,
+        h2so4=h2so4_num, h2so4_cgs=h2so4_cgs,
+        h2o=h2o_num, h2o_cgs=h2o_cgs,
+        r_bins=sulf_r_bins, rmassup=sulf_rmassup,
+        rmrat_val=sulf_rmrat, zmet=zmet_iz,
+        method=nuc_method,
+        do_homogeneous=do_homogeneous,
+        do_heterogeneous=do_heterogeneous,
+    )
+
+    # Place rates into the full (nbin, nelem) and (nbin, ngroup, ngroup)
+    # arrays. For sulfate: ielem = ienconc(igroup_sulfate); rnuclg
+    # source-target both = igroup_sulfate (sulfate-onto-self het).
+    # NOTE: sulfate group's number-concentration element index. For our
+    # sulfate test ielem == igroup_sulfate (single element).
+    rhompe = rhompe.at[:, igroup_sulfate].set(rhompe_1d)
+    rnuclg = rnuclg.at[:, igroup_sulfate, igroup_sulfate].set(rnuclg_1d)
+    return rhompe, rnuclg
+
+
 def _convergence_gas(igrowgas_arr, ngas):
     """Pick the gas index used for the substep convergence check.
 
@@ -99,7 +187,14 @@ def microfast_growth(pc, gc, t, iz, dtime,
                      nbin, ngroup, ngas, nelem,
                      dt_threshold, ds_threshold_arr, scale_threshold,
                      itype_arr=None,
-                     ivaprtn_arr=None, igas_h2o=0):
+                     ivaprtn_arr=None, igas_h2o=0,
+                     do_sulfnuc=False,
+                     igroup_sulfate=0, igas_h2so4=-1,
+                     sulf_r_bins=None, sulf_rmassup=None,
+                     sulf_rmrat=2.0,
+                     nuc_method="ZhaoTurco",
+                     do_homogeneous_nuc=True,
+                     do_heterogeneous_nuc=False):
     """Execute one microfast growth step at one level.
 
     Computes: vapor pressure → supersaturation → condensate →
@@ -132,6 +227,22 @@ def microfast_growth(pc, gc, t, iz, dtime,
         nbin, ngroup, ngas, iz,
     )
 
+    # Sulfate nucleation rates (Fortran microfast.F90 calls sulfnuc HERE,
+    # right after supersat and BEFORE growevapl, so the rhompe/rnuclg
+    # rates are then time-implicit-coupled with growth via psolve below).
+    rhompe = jnp.zeros((nbin, nelem), dtype=DTYPE)
+    rnuclg = jnp.zeros((nbin, ngroup, ngroup), dtype=DTYPE)
+    if do_sulfnuc and sulf_r_bins is not None:
+        rhompe, rnuclg = _compute_sulfnuc_rates(
+            pc, gc, t, zmet, pvapl,
+            sulf_r_bins, sulf_rmassup, sulf_rmrat,
+            igroup_sulfate, igas_h2so4, igas_h2o,
+            iz, nbin, ngroup, nelem,
+            nuc_method=nuc_method,
+            do_homogeneous=do_homogeneous_nuc,
+            do_heterogeneous=do_heterogeneous_nuc,
+        )
+
     # Growth/evaporation loss rates
     growlg = jnp.zeros((nbin, ngroup), dtype=DTYPE)
     evaplg = jnp.zeros((nbin, ngroup), dtype=DTYPE)
@@ -147,12 +258,11 @@ def microfast_growth(pc, gc, t, iz, dtime,
         dtime, iz, nbin, ngroup,
     )
 
-    # Growth production and solve per bin (step 1: growth only via psolve)
+    # Growth production and solve per bin (now psolve sees nucleation
+    # rates too — rhompe and rnuclg from sulfnuc above).
     growpe = jnp.zeros((nbin, nelem), dtype=DTYPE)
     evappe_psolve = jnp.zeros((nbin, nelem), dtype=DTYPE)  # zero for psolve (evap applied separately)
     rnucpe = jnp.zeros((nbin, nelem), dtype=DTYPE)
-    rhompe = jnp.zeros((nbin, nelem), dtype=DTYPE)
-    rnuclg = jnp.zeros((nbin, ngroup, ngroup), dtype=DTYPE)
     pc_nucl = jnp.zeros_like(pc)
 
     for ibin in range(nbin):
@@ -212,22 +322,50 @@ def microfast_growth(pc, gc, t, iz, dtime,
         t, gc, pvapl_new, pvapi_new, gwtmol_arr, zmet, ngas,
     )
     new_supsati = supsati_new[iz, iconv]
+    new_supsatl = supsatl_new[iz, iconv]
+    prev_supsatl = supsatl[iz, iconv]
+    # Track the saturation that matches the temperature regime (Fortran
+    # uses supsatl above T0, supsati below).
+    use_liquid = t[iz] >= DTYPE(273.16)
+    old_ssat = jnp.where(use_liquid, prev_supsatl, prev_supsati)
+    new_ssat = jnp.where(use_liquid, new_supsatl, new_supsati)
 
     # Retry triggers (any one of these flips rc to RC_WARNING_RETRY):
-    #   1. Supersaturation changes sign AND new |ssi| > 1% (sign-flip
-    #      heuristic from the original kernel).
-    #   2. gsolve flagged dgc_threshold violation on any gas (relative
-    #      gas-concentration change exceeds the per-gas threshold).
-    #   3. tsolve flagged dt_threshold violation (temperature change
-    #      exceeds the threshold from latent heat release).
-    # The previous version discarded rc_gas / rc_t entirely — that's why
-    # the H2SO4 sulfate runs blew through 100 timesteps without ever
-    # substepping, even with dgc_threshold=0.1.
+    #   1. Sign change AND |new| > 1% (sign-flip heuristic).
+    #   2. RELATIVE supsat change > ds_threshold AND |old - new| > 0.1.
+    #      Mirrors microfast.F90 lines 187-225 — this is what makes
+    #      Fortran sub-step finely when nucleation is fast (H2SO4
+    #      saturation drops 10%/substep). Without this, JAX never
+    #      sub-steps for the sulfate test (sign never flips, gas only
+    #      changes 0.2%/outer-step) so psolve damps all nucleation.
+    #   3. gsolve flagged dgc_threshold violation.
+    #   4. tsolve flagged dt_threshold violation.
     sign_change = (prev_supsati * new_supsati) < DTYPE(0.0)
     large_change = jnp.abs(new_supsati) > DTYPE(0.01)
-    rc_supsat = jnp.where(sign_change & large_change, RC_WARNING_RETRY, RC_OK)
+    rc_signflip = jnp.where(sign_change & large_change, RC_WARNING_RETRY, RC_OK)
+
+    # Relative-change retry, per Fortran microfast.F90:
+    ds_thresh = ds_threshold_arr[iconv] / scale_threshold
+    abs_old = jnp.abs(old_ssat)
+    abs_new = jnp.abs(new_ssat)
+    srat1 = jnp.where(abs_old >= DTYPE(1e-4),
+                       jnp.abs(new_ssat / jnp.where(abs_old > 0, old_ssat, DTYPE(1.0)) - DTYPE(1.0)),
+                       DTYPE(0.0))
+    srat2 = jnp.where(abs_new >= DTYPE(1e-4),
+                       jnp.abs(old_ssat / jnp.where(abs_new > 0, new_ssat, DTYPE(1.0)) - DTYPE(1.0)),
+                       DTYPE(0.0))
+    srat = jnp.maximum(srat1, srat2)
+    abs_change = jnp.abs(old_ssat - new_ssat)
+    rc_relchange = jnp.where(
+        (ds_thresh > DTYPE(0.0))
+        & (srat >= ds_thresh)
+        & (abs_change > DTYPE(0.1)),
+        RC_WARNING_RETRY, RC_OK,
+    )
+
     rc = jnp.where(
-        (rc_supsat == RC_WARNING_RETRY)
+        (rc_signflip == RC_WARNING_RETRY)
+        | (rc_relchange == RC_WARNING_RETRY)
         | (rc_gas == RC_WARNING_RETRY)
         | (rc_t == RC_WARNING_RETRY),
         RC_WARNING_RETRY,
