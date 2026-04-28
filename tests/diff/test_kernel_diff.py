@@ -499,3 +499,73 @@ def test_vaporp_h2so4_ayers1980_matches_fortran():
         if len(failures) > 10:
             msg_lines.append(f"  ... and {len(failures) - 10} more")
         raise AssertionError("\n".join(msg_lines))
+
+
+def test_supersat_matches_fortran():
+    """Phase 7.5: JAX supersat(t, gc, pvapl, pvapi, gwtmol, zmet) matches
+    Fortran's supsatl[:, igas] / supsati[:, igas] for both gases (H2O,
+    H2SO4) across all scenarios at substep 1.
+
+    Fortran reference (supersat.F90 lines 36-41):
+        rvap = RGAS / gwtmol(igas)
+        gc_cgs = gc(iz, igas) / zmet(iz)
+        supsatl(iz, igas) = (gc_cgs * rvap * t(iz) - pvapl(iz, igas)) / pvapl(iz, igas)
+        supsati(iz, igas) = (gc_cgs * rvap * t(iz) - pvapi(iz, igas)) / pvapi(iz, igas)
+
+    Sulfate test is clearsky (do_incloud=False), so the cloud-scaling
+    branch is not exercised here.
+    """
+    from carma.supersaturation import supersat
+    import jax.numpy as jnp
+
+    # Gas registration in carma_sulfatetest.F90:
+    #   igas=1 (Fortran 1-based) "Water Vapor"   gwtmol = 18.016     -> Python igas_h2o=0
+    #   igas=2 (Fortran 1-based) "Sulpheric Acid" gwtmol = 98.078479 -> Python igas_h2so4=1
+    GAS_NAMES = ["h2o", "h2so4"]
+    GWTMOL = [18.016, 98.078479]
+
+    max_rel = {0: {}, 1: {}}
+    max_rel_i = {0: {}, 1: {}}
+    failures = []
+
+    for scen_id in _ALL_SCEN_IDS:
+        d = read_substep(_DIFF_BASE / f"scen_{scen_id:03d}", step=1)
+        for igas in (0, 1):
+            ssl_jax, ssi_jax = supersat(
+                jnp.asarray(d.t),
+                jnp.asarray(d.gc[:, igas]),
+                jnp.asarray(d.pvapl[:, igas]),
+                jnp.asarray(d.pvapi[:, igas]),
+                GWTMOL[igas],
+                jnp.asarray(d.zmet),
+            )
+            ssl_f = d.supsatl[:, igas]
+            ssi_f = d.supsati[:, igas]
+            _, ml = compute_rel_err(np.asarray(ssl_jax), ssl_f)
+            _, mi = compute_rel_err(np.asarray(ssi_jax), ssi_f)
+            max_rel[igas][scen_id] = ml
+            max_rel_i[igas][scen_id] = mi
+            tol = _tol_for("supersat")
+            if ml > tol:
+                failures.append(("supsatl", GAS_NAMES[igas], scen_id, ml,
+                                 float(ssl_jax[0]), float(ssl_f[0])))
+            if mi > tol:
+                failures.append(("supsati", GAS_NAMES[igas], scen_id, mi,
+                                 float(ssi_jax[0]), float(ssi_f[0])))
+
+    sd = _summary_plot_dir()
+    make_summary_plot("supersat_supsatl_h2o",   max_rel[0],   sd)
+    make_summary_plot("supersat_supsatl_h2so4", max_rel[1],   sd)
+    make_summary_plot("supersat_supsati_h2o",   max_rel_i[0], sd)
+    make_summary_plot("supersat_supsati_h2so4", max_rel_i[1], sd)
+
+    if failures:
+        msg_lines = [f"supersat mismatched on {len(failures)} (output, gas, scen) tuples:"]
+        for which, gas, scen_id, err, j, f in failures[:10]:
+            msg_lines.append(
+                f"  {which} [{gas}] scen {scen_id}: rel err {err:.3e}  "
+                f"JAX={j:.3e}  F={f:.3e}"
+            )
+        if len(failures) > 10:
+            msg_lines.append(f"  ... and {len(failures) - 10} more")
+        raise AssertionError("\n".join(msg_lines))
