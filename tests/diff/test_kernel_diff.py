@@ -451,3 +451,51 @@ def test_sulfate_surf_tens_matches_fortran():
         if len(failures) > 10:
             msg_lines.append(f"  ... and {len(failures) - 10} more")
         raise AssertionError("\n".join(msg_lines))
+
+
+def test_vaporp_h2so4_ayers1980_matches_fortran():
+    """Phase 7.4: JAX vaporp_h2so4_ayers1980(t, gc_h2o, pvapl_h2o, zmet)
+    matches Fortran's f_pvapl[:, igas_h2so4] across all scenarios at
+    substep 1.
+
+    Fortran writes pvapl[iz, igash2o] in vaporp_h2so4_ayers1980.F90;
+    that's what we dump and bench against.
+    """
+    from carma.vapor_pressure import vaporp_h2so4_ayers1980
+    import jax.numpy as jnp
+
+    igas_h2o = 0
+    igas_h2so4 = 1
+    max_rel = {}
+    failures = []
+
+    for scen_id in _ALL_SCEN_IDS:
+        d = read_substep(_DIFF_BASE / f"scen_{scen_id:03d}", step=1)
+        pv_jax, _ = vaporp_h2so4_ayers1980(
+            jnp.asarray(d.t),
+            jnp.asarray(d.gc[:, igas_h2o]),
+            jnp.asarray(d.pvapl[:, igas_h2o]),
+            jnp.asarray(d.zmet),
+        )
+        pv_f = d.pvapl[:, igas_h2so4]
+        _, m = compute_rel_err(np.asarray(pv_jax), pv_f)
+        max_rel[scen_id] = m
+        if m > _tol_for("vaporp_h2so4_ayers1980"):
+            failures.append((scen_id, m,
+                             float(d.t[0]), float(d.gc[0, igas_h2o]),
+                             float(d.pvapl[0, igas_h2o]),
+                             float(np.asarray(pv_jax)[0]), float(pv_f[0])))
+
+    make_summary_plot("vaporp_h2so4_ayers1980", max_rel, _summary_plot_dir())
+
+    if failures:
+        msg_lines = [f"vaporp_h2so4_ayers1980 mismatched on {len(failures)} scenarios:"]
+        for scen_id, err, T, gh2o, pv_h2o, pj, pf in failures[:10]:
+            msg_lines.append(
+                f"  scen {scen_id}: rel err {err:.3e}  T={T:.2f}  "
+                f"gc_h2o={gh2o:.3e}  pvapl_h2o={pv_h2o:.3e}  "
+                f"JAX={pj:.3e}  F={pf:.3e}"
+            )
+        if len(failures) > 10:
+            msg_lines.append(f"  ... and {len(failures) - 10} more")
+        raise AssertionError("\n".join(msg_lines))
