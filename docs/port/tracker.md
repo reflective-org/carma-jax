@@ -47,9 +47,9 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
 
 ### `src/carma/vapor_pressure.py`  ↔  `vaporp_*.F90`
 - [x] `vaporp_h2o_murphy2005` (1000/1000 scenarios pass at rtol 1e-10; ~750 at machine ε, ~250 at ~1e-16)
-- [ ] `vaporp_h2so4_ayers1980`
-- [ ] `vaporp_h2o_buck1981`
-- [ ] `vaporp_h2o_goff1946`
+- [x] `vaporp_h2so4_ayers1980` (1000/1000 scenarios pass at rtol 1e-10; ~720 at machine ε, max 2.1e-14). Fix: call `wtpct_tabaz` instead of the crude `100*(1-rh)*0.98` approximation.
+- [-] `vaporp_h2o_buck1981` (sulfate test uses Murphy 2005 only; not exercised by current bench)
+- [-] `vaporp_h2o_goff1946` (sulfate test uses Murphy 2005 only; not exercised by current bench)
 
 ### `src/carma/supersaturation.py`  ↔  `supersat.F90`
 - [ ] `supersat`

@@ -14,6 +14,7 @@ Ported from: vaporp_h2o_buck1981.F90, vaporp_h2o_murphy2005.F90,
 import jax.numpy as jnp
 
 from carma.precision import DTYPE
+from carma.sulfate_utils import wtpct_tabaz
 
 
 def vaporp_h2o_buck1981(t):
@@ -154,16 +155,8 @@ def vaporp_h2so4_ayers1980(t, gc_h2o, pvapl_h2o, zmet):
 
     temp = jnp.maximum(t, DTYPE(140.0))
 
-    # H2SO4 weight percent from water activity (simplified Tabazadeh lookup)
-    # For pure H2SO4 vapor pressure, use a simplified approach
-    # The full wtpct_tabaz function requires iterative lookup — use direct formula
     gc_cgs = gc_h2o / zmet
-    # Water activity ~ RH = gc*Rv*T / pvapl
-    rvap_h2o = DTYPE(8.31430e7) / DTYPE(18.016)
-    rh = jnp.clip(gc_cgs * rvap_h2o * temp / jnp.maximum(pvapl_h2o, DTYPE(1e-30)), DTYPE(0.0), DTYPE(1.0))
-    # Approximate weight percent from RH (simplified)
-    wtpct = DTYPE(100.0) * (DTYPE(1.0) - rh) * DTYPE(0.98)  # crude approximation
-    wtpct = jnp.clip(wtpct, DTYPE(0.0), DTYPE(100.0))
+    wtpct = wtpct_tabaz(temp, gc_cgs, pvapl_h2o)
 
     # Energy term
     en = DTYPE(4.184) * (
