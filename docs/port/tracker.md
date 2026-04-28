@@ -52,7 +52,7 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
 - [-] `vaporp_h2o_goff1946` (sulfate test uses Murphy 2005 only; not exercised by current bench)
 
 ### `src/carma/supersaturation.py`  ↔  `supersat.F90`
-- [ ] `supersat`
+- [x] `supersat` (4 × 1000/1000 pass at rtol 1e-10 across {supsatl, supsati} × {h2o, h2so4}; ~960 at machine ε for most paths, supsati[h2o] max 5.8e-13). Sulfate test is clearsky; `supersat_with_cloud` not exercised.
 
 ### `src/carma/wetr.py`  ↔  `wetr.F90`
 - [ ] `_wetr_petters`
