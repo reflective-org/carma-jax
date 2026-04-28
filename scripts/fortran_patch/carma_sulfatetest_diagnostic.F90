@@ -322,11 +322,58 @@ contains
     call dump_3d(prefix, 'coaglg', cs%f_coaglg)
     call dump_3d(prefix, 'coagpe', cs%f_coagpe)
 
-    ! ckernel is static — only dump at step 1 to save space.
+    ! Wet radius / density (rhopart + getwetr outputs)
+    call dump_1d(prefix, 'relhum', cs%f_relhum)
+    call dump_3d(prefix, 'rhop', cs%f_rhop)
+    call dump_3d(prefix, 'r_wet', cs%f_r_wet)
+    call dump_3d(prefix, 'rhop_wet', cs%f_rhop_wet)
+
+    ! Static carma bin grid (r, rmass per group). Dumped at step 1
+    ! only — these don't change across substeps.
     if (istep_d == 1) then
+      call dump_carma_bins(prefix)
       call dump_5d(prefix, 'ckernel', cs%f_ckernel)
     end if
   end subroutine dump_substep
+
+
+  !! Dump the per-bin, per-group dry radius (r) and dry mass (rmass)
+  !! from the carma object as 2D arrays of shape (NBIN, NGROUP). These
+  !! are static across substeps, so this is called only at step 1.
+  !! (rho is per-element, not per-group, so it's not dumped here —
+  !! per-cell dry density is in cstate%f_rhop.)
+  subroutine dump_carma_bins(prefix)
+    character(len=*), intent(in)         :: prefix
+    real(kind=f), allocatable            :: r2d(:,:), rmass2d(:,:)
+    integer                              :: ig, ib, nb, ng
+
+    nb = carma%f_NBIN
+    ng = carma%f_NGROUP
+    allocate(r2d(nb, ng), rmass2d(nb, ng))
+    do ig = 1, ng
+      do ib = 1, nb
+        r2d(ib, ig)     = carma%f_group(ig)%f_r(ib)
+        rmass2d(ib, ig) = carma%f_group(ig)%f_rmass(ib)
+      end do
+    end do
+    call dump_alloc_2d(prefix, 'r_bin',     r2d)
+    call dump_alloc_2d(prefix, 'rmass_bin', rmass2d)
+    deallocate(r2d, rmass2d)
+  end subroutine dump_carma_bins
+
+
+  subroutine dump_alloc_2d(prefix, name, arr)
+    character(len=*), intent(in)         :: prefix, name
+    real(kind=f), intent(in)             :: arr(:,:)
+    character(len=512)                   :: path
+    integer                              :: u, ios
+    path = trim(prefix) // trim(name) // '.bin'
+    open(newunit=u, file=trim(path), access='stream', &
+         status='replace', iostat=ios)
+    if (ios /= 0) return
+    write(u) arr
+    close(u)
+  end subroutine dump_alloc_2d
 
 
   !! Per-substep probes: call sulfate_density and sulfate_surf_tens at

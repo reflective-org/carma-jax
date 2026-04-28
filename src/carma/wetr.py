@@ -103,7 +103,7 @@ def _wetr_wtpct(rdry, rhopdry, temp, h2o_mass, h2o_vp, gwtmol_h2so4):
     dsigma_dwt = (sig2 - sig1) / (DTYPE(85.9195) - DTYPE(79.432))
     sigkelv = sig1 + dsigma_dwt * (DTYPE(80.0) - DTYPE(79.432))
 
-    rwet0 = rdry * (DTYPE(100.0) * rhopdry / wtpkelv0 / den2) ** (DTYPE(1.0) / DTYPE(3.0))
+    rwet0 = rdry * jnp.cbrt(DTYPE(100.0) * rhopdry / wtpkelv0 / den2)
     rkelv_b = (DTYPE(1.0)
                + wtpkelv0 * drho_dwt / den2
                - DTYPE(3.0) * wtpkelv0 * dsigma_dwt / (DTYPE(2.0) * sigkelv))
@@ -114,7 +114,7 @@ def _wetr_wtpct(rdry, rhopdry, temp, h2o_mass, h2o_vp, gwtmol_h2so4):
     h2o_kelv = h2o_mass / rkelvinH2O
     wtpkelv = wtpct_tabaz(temp, h2o_kelv, h2o_vp)
     rhopwet = sulfate_density(wtpkelv, temp)
-    rwet = rdry * (DTYPE(100.0) * rhopdry / wtpkelv / rhopwet) ** (DTYPE(1.0) / DTYPE(3.0))
+    rwet = rdry * jnp.cbrt(DTYPE(100.0) * rhopdry / wtpkelv / rhopwet)
     return rwet, rhopwet
 
 

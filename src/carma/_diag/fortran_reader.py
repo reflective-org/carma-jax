@@ -43,7 +43,13 @@ Array shapes (in numpy, after Fortran→C order conversion):
     pconmax     (NZ, NGROUP)
     coaglg      (NZ, NBIN, NGROUP)
     coagpe      (NZ, NBIN, NELEM)
-    ckernel     (NZ, NBIN, NBIN, NGROUP, NGROUP)  — only present at step 1
+    relhum      (NZ,)                                 — RH for swelling
+    rhop        (NZ, NBIN, NGROUP)                    — dry particle density
+    r_wet       (NZ, NBIN, NGROUP)                    — wet radius (getwetr)
+    rhop_wet    (NZ, NBIN, NGROUP)                    — wet density (getwetr)
+    ckernel     (NZ, NBIN, NBIN, NGROUP, NGROUP)      — only present at step 1
+    r_bin       (NBIN, NGROUP)                        — only present at step 1 (static)
+    rmass_bin   (NBIN, NGROUP)                        — only present at step 1 (static)
 """
 
 from __future__ import annotations
@@ -97,7 +103,13 @@ def _shape_map(dims):
         "pconmax":    (NZ, NGROUP),
         "coaglg":     (NZ, NBIN, NGROUP),
         "coagpe":     (NZ, NBIN, NELEM),
+        "relhum":     (NZ,),
+        "rhop":       (NZ, NBIN, NGROUP),
+        "r_wet":      (NZ, NBIN, NGROUP),
+        "rhop_wet":   (NZ, NBIN, NGROUP),
         "ckernel":    (NZ, NBIN, NBIN, NGROUP, NGROUP),
+        "r_bin":      (NBIN, NGROUP),
+        "rmass_bin":  (NBIN, NGROUP),
     }
 
 
@@ -139,7 +151,13 @@ class SubstepDump:
     pconmax:   np.ndarray
     coaglg:    np.ndarray
     coagpe:    np.ndarray
+    relhum:    np.ndarray
+    rhop:      np.ndarray
+    r_wet:     np.ndarray
+    rhop_wet:  np.ndarray
     ckernel:   Optional[np.ndarray] = None
+    r_bin:     Optional[np.ndarray] = None
+    rmass_bin: Optional[np.ndarray] = None
 
 
 def _load_one(path: Path, expected_shape: tuple) -> np.ndarray:
@@ -212,7 +230,13 @@ def read_substep(out_dir, step: int, dims=None) -> SubstepDump:
         pconmax=_load_one(_path("pconmax"), shapes["pconmax"]),
         coaglg=_load_one(_path("coaglg"), shapes["coaglg"]),
         coagpe=_load_one(_path("coagpe"), shapes["coagpe"]),
+        relhum=_load_one(_path("relhum"), shapes["relhum"]),
+        rhop=_load_one(_path("rhop"), shapes["rhop"]),
+        r_wet=_load_one(_path("r_wet"), shapes["r_wet"]),
+        rhop_wet=_load_one(_path("rhop_wet"), shapes["rhop_wet"]),
         ckernel=_opt("ckernel"),
+        r_bin=_opt("r_bin"),
+        rmass_bin=_opt("rmass_bin"),
     )
 
 
