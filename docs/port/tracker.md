@@ -66,8 +66,8 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
 - [x] `rhopart` (1000/1000 pass at rtol 1e-10, bit-exact). Sulfate test exercises only the no-core path (`ncore=0` → `rhop = rhoelem = 1.923`). Multi-element / core-mass-truncation branches will be re-benched when other elements appear in later phases.
 
 ### `src/carma/nucleation/sulfnucrate.py`  ↔  `sulfnucrate.F90`
-- [ ] `binary_nuc_zhao1995`
-- [ ] `binary_nuc_vehk2002`
+- [x] `binary_nuc_zhao1995` (1000/1000 pass at rtol 1e-10 across {nucrate_cgs, mass_cluster_dry, rstar, ftry}; max ~2e-13, median ~1e-14, near machine ε). Bench compares against a new `dump_zhao1995_probe` in the diagnostic that calls Fortran's `binary_nuc_zhao1995` at end-of-step state — bypasses the multi-substep gsolve evolution that decouples dumped `rhompe` from dumped `gc`/`t`. Diagnostic also dumps `rmassup_bin` and `rmrat_group`.
+- [-] `binary_nuc_vehk2002` (sulfate test runs `sulfnucl_method='ZhaoTurco'`; Vehkamaki branch never invoked — defer to a test that selects it)
 
 ### `src/carma/nucleation/sulfhetnucrate.py`  ↔  `sulfhetnucrate.F90`
 - [ ] `sulfhetnucrate`
