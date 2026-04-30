@@ -55,9 +55,9 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
 - [x] `supersat` (4 × 1000/1000 pass at rtol 1e-10 across {supsatl, supsati} × {h2o, h2so4}; ~960 at machine ε for most paths, supsati[h2o] max 5.8e-13). Sulfate test is clearsky; `supersat_with_cloud` not exercised.
 
 ### `src/carma/wetr.py`  ↔  `wetr.F90`
-- [ ] `_wetr_petters`
-- [ ] `_wetr_wtpct`
-- [ ] `get_wetr` (dispatch)
+- [-] `_wetr_petters` (sulfate test uses `I_WTPCT_H2SO4`; Petters branch not exercised — defer to ice/cloud phase)
+- [x] `_wetr_wtpct` (1000/1000 pass at rtol 1e-8; median 3.6e-11, p99 1.2e-9, max 2.3e-9). Cube roots use `jnp.cbrt`. Per-kernel tol relaxed to 1e-8 because the Kelvin-iteration chain (`cbrt → exp → wtpct_tabaz → sulfate_density → cbrt`) accumulates sub-ULP reordering past 1e-10; cbrt vs `**(1/3)` made no measurable difference. Phase 0 diagnostic extended to dump `relhum`, `rhop`, `r_wet`, `rhop_wet`, `r_bin`, `rmass_bin`.
+- [x] `get_wetr` (dispatch — for `I_WTPCT_H2SO4` it forwards directly to `_wetr_wtpct`; bench-validated above)
 
 ### `src/carma/hygroscopicity.py`  ↔  `hygroscopicity.F90`
 - [ ] `hygroscopicity`

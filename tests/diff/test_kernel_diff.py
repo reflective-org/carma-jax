@@ -59,7 +59,11 @@ _ALL_SCEN_IDS = _available_scenarios()
 # when a kernel has known floating-point reordering differences with
 # Fortran (e.g. summation order in a vectorized JAX op).
 _PER_KERNEL_TOL = {
-    # "growevapl": 1e-6,  # example
+    # _wetr_wtpct chains two cube roots, an exp, and two table lookups
+    # (wtpct_tabaz + sulfate_density). The Kelvin-iteration accumulates
+    # sub-ULP rounding past 1e-10. All 1000 scenarios still pass at 1e-8;
+    # median rel err is 3.6e-11.
+    "wetr_wtpct": 1e-8,
 }
 
 
@@ -496,6 +500,79 @@ def test_vaporp_h2so4_ayers1980_matches_fortran():
                 f"gc_h2o={gh2o:.3e}  pvapl_h2o={pv_h2o:.3e}  "
                 f"JAX={pj:.3e}  F={pf:.3e}"
             )
+        if len(failures) > 10:
+            msg_lines.append(f"  ... and {len(failures) - 10} more")
+        raise AssertionError("\n".join(msg_lines))
+
+
+def test_wetr_wtpct_matches_fortran():
+    """Phase 7.6: JAX `_wetr_wtpct` (the I_WTPCT_H2SO4 branch of get_wetr)
+    matches Fortran's per-bin r_wet[iz,ibin,igroup] and rhop_wet[iz,ibin,igroup]
+    across all scenarios at substep 1.
+
+    Fortran call site (rhopart.F90 lines 148-150):
+        getwetr(carma, igroup, ibin, relhum(iz), r(ibin,igroup), r_wet(iz,ibin,igroup),
+                rhop(iz,ibin,igroup), rhop_wet(iz,ibin,igroup), ...,
+                h2o_mass=gc(iz,igash2o)/zmet(iz), h2o_vp=pvapl(iz,igash2o), temp=t(iz))
+
+    For sulfate (single element, no core), rhop equals the element density
+    so wetr.F90's rdry_init→rdry transform is a no-op and we can pass
+    r(ibin,igroup) directly as rdry.
+    """
+    from carma.wetr import _wetr_wtpct
+    import jax.numpy as jnp
+
+    igas_h2o = 0
+    GWTMOL_H2SO4 = 98.078479
+    igroup = 0  # sulfate test has NGROUP=1
+    iz = 0
+
+    rwet_max_rel = {}
+    rhopwet_max_rel = {}
+    failures = []
+
+    for scen_id in _ALL_SCEN_IDS:
+        d = read_substep(_DIFF_BASE / f"scen_{scen_id:03d}", step=1)
+        if d.r_bin is None:
+            pytest.skip("r_bin not in dump — re-run scripts/run_diagnostic_ensemble.py")
+        NBIN = d.r_bin.shape[0]
+        T = float(d.t[iz])
+        h2o_mass = float(d.gc[iz, igas_h2o] / d.zmet[iz])
+        h2o_vp = float(d.pvapl[iz, igas_h2o])
+
+        rwet_jax = np.empty(NBIN, dtype=np.float64)
+        rhopwet_jax = np.empty(NBIN, dtype=np.float64)
+        for ib in range(NBIN):
+            rdry = float(d.r_bin[ib, igroup])
+            rhopdry = float(d.rhop[iz, ib, igroup])
+            rw, rhw = _wetr_wtpct(
+                jnp.float64(rdry), jnp.float64(rhopdry),
+                jnp.float64(T), jnp.float64(h2o_mass),
+                jnp.float64(h2o_vp), jnp.float64(GWTMOL_H2SO4),
+            )
+            rwet_jax[ib] = float(rw)
+            rhopwet_jax[ib] = float(rhw)
+
+        rwet_f = d.r_wet[iz, :, igroup]
+        rhopwet_f = d.rhop_wet[iz, :, igroup]
+        _, m_r = compute_rel_err(rwet_jax, rwet_f)
+        _, m_rho = compute_rel_err(rhopwet_jax, rhopwet_f)
+        rwet_max_rel[scen_id] = m_r
+        rhopwet_max_rel[scen_id] = m_rho
+        tol = _tol_for("wetr_wtpct")
+        if m_r > tol:
+            failures.append(("r_wet", scen_id, m_r))
+        if m_rho > tol:
+            failures.append(("rhop_wet", scen_id, m_rho))
+
+    sd = _summary_plot_dir()
+    make_summary_plot("wetr_wtpct_r_wet",    rwet_max_rel,    sd)
+    make_summary_plot("wetr_wtpct_rhop_wet", rhopwet_max_rel, sd)
+
+    if failures:
+        msg_lines = [f"_wetr_wtpct mismatched on {len(failures)} (output, scen) tuples:"]
+        for which, scen_id, err in failures[:10]:
+            msg_lines.append(f"  {which} scen {scen_id}: rel err {err:.3e}")
         if len(failures) > 10:
             msg_lines.append(f"  ... and {len(failures) - 10} more")
         raise AssertionError("\n".join(msg_lines))
