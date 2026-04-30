@@ -50,6 +50,8 @@ Array shapes (in numpy, after Fortran→C order conversion):
     ckernel     (NZ, NBIN, NBIN, NGROUP, NGROUP)      — only present at step 1
     r_bin       (NBIN, NGROUP)                        — only present at step 1 (static)
     rmass_bin   (NBIN, NGROUP)                        — only present at step 1 (static)
+    rmassup_bin (NBIN, NGROUP)                        — only present at step 1 (static)
+    rmrat_group (NGROUP,)                             — only present at step 1 (static)
 """
 
 from __future__ import annotations
@@ -108,8 +110,10 @@ def _shape_map(dims):
         "r_wet":      (NZ, NBIN, NGROUP),
         "rhop_wet":   (NZ, NBIN, NGROUP),
         "ckernel":    (NZ, NBIN, NBIN, NGROUP, NGROUP),
-        "r_bin":      (NBIN, NGROUP),
-        "rmass_bin":  (NBIN, NGROUP),
+        "r_bin":       (NBIN, NGROUP),
+        "rmass_bin":   (NBIN, NGROUP),
+        "rmassup_bin": (NBIN, NGROUP),
+        "rmrat_group": (NGROUP,),
     }
 
 
@@ -156,8 +160,10 @@ class SubstepDump:
     r_wet:     np.ndarray
     rhop_wet:  np.ndarray
     ckernel:   Optional[np.ndarray] = None
-    r_bin:     Optional[np.ndarray] = None
-    rmass_bin: Optional[np.ndarray] = None
+    r_bin:       Optional[np.ndarray] = None
+    rmass_bin:   Optional[np.ndarray] = None
+    rmassup_bin: Optional[np.ndarray] = None
+    rmrat_group: Optional[np.ndarray] = None
 
 
 def _load_one(path: Path, expected_shape: tuple) -> np.ndarray:
@@ -237,6 +243,8 @@ def read_substep(out_dir, step: int, dims=None) -> SubstepDump:
         ckernel=_opt("ckernel"),
         r_bin=_opt("r_bin"),
         rmass_bin=_opt("rmass_bin"),
+        rmassup_bin=_opt("rmassup_bin"),
+        rmrat_group=_opt("rmrat_group"),
     )
 
 

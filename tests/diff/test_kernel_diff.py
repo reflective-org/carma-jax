@@ -505,6 +505,106 @@ def test_vaporp_h2so4_ayers1980_matches_fortran():
         raise AssertionError("\n".join(msg_lines))
 
 
+def test_binary_nuc_zhao1995_matches_fortran():
+    """Phase 7.9: JAX binary_nuc_zhao1995 matches Fortran's
+    binary_nuc_zhao1995 invoked via the diagnostic probe at the
+    end-of-step state.
+
+    Sulfate test runs ``sulfnucl_method='ZhaoTurco'`` (carma_sulfatetest.F90:171),
+    so this is the exercised kernel; binary_nuc_vehk2002 is not exercised here.
+
+    The probe (`dump_zhao1995_probe` in `carma_sulfatetest_diagnostic.F90`)
+    invokes Fortran's `binary_nuc_zhao1995` with the same inputs we feed
+    JAX. This avoids the issue that the dumped `rhompe` is computed during
+    a microfast substep with an evolved gc/t state that's not fully
+    captured in cstate at end-of-step.
+
+    Probe outputs: 4 scalars per scenario [nucrate_cgs, mass_cluster_dry,
+    radius_cluster, ftry].
+    """
+    from carma.nucleation.sulfnucrate import binary_nuc_zhao1995
+    from carma.constants import AVG, RGAS, PI as PI_carma
+    import jax.numpy as jnp
+
+    AVG_J = float(AVG)
+    RGAS_J = float(RGAS)
+    PI_J = float(PI_carma)
+    GWTMOL_H2SO4 = 98.078479
+    GWTMOL_H2O = 18.016
+    igas_h2o = 0
+    igas_h2so4 = 1
+    iz = 0
+
+    nuc_max_rel = {}
+    mass_max_rel = {}
+    rstar_max_rel = {}
+    ftry_max_rel = {}
+    failures = []
+
+    for scen_id in _ALL_SCEN_IDS:
+        scen_dir = _DIFF_BASE / f"scen_{scen_id:03d}"
+        d = read_substep(scen_dir, step=1)
+        probe_path = scen_dir / "substep_0001_zhao1995_probe.bin"
+        if not probe_path.exists():
+            pytest.skip("zhao1995_probe.bin not in dump — re-run scripts/run_diagnostic_ensemble.py")
+        F_nuc, F_mass, F_rstar, F_ftry = np.fromfile(probe_path, dtype=np.float64)
+
+        T = float(d.t[iz])
+        zmet = float(d.zmet[iz])
+        wtpct_iz = float(d.wtpct[iz])
+        h2so4_cgs = float(d.gc[iz, igas_h2so4] / zmet)
+        h2o_cgs = float(d.gc[iz, igas_h2o] / zmet)
+        h2so4 = h2so4_cgs * AVG_J / GWTMOL_H2SO4
+        h2o_n = h2o_cgs * AVG_J / GWTMOL_H2O
+        rh = float(d.supsatl[iz, igas_h2o]) + 1.0
+        beta1 = float(np.sqrt(RGAS_J * T / (2.0 * PI_J) / GWTMOL_H2SO4))
+
+        nuc, mass, rstar, ftry = binary_nuc_zhao1995(
+            jnp.float64(T), jnp.float64(wtpct_iz), jnp.float64(rh),
+            jnp.float64(h2so4), jnp.float64(h2so4_cgs),
+            jnp.float64(h2o_n), jnp.float64(h2o_cgs),
+            jnp.float64(beta1),
+            jnp.float64(GWTMOL_H2SO4), jnp.float64(GWTMOL_H2O),
+        )
+        def _re(j, f):
+            return abs(j - f) / max(abs(f), 1e-300) if f != 0.0 else (0.0 if j == 0.0 else 1.0)
+
+        m_nuc   = _re(float(nuc),   F_nuc)
+        m_mass  = _re(float(mass),  F_mass)
+        m_rstar = _re(float(rstar), F_rstar)
+        m_ftry  = _re(float(ftry),  F_ftry)
+        nuc_max_rel[scen_id]   = m_nuc
+        mass_max_rel[scen_id]  = m_mass
+        rstar_max_rel[scen_id] = m_rstar
+        ftry_max_rel[scen_id]  = m_ftry
+
+        tol = _tol_for("binary_nuc_zhao1995")
+        for which, m, j, f in (
+            ("nucrate_cgs", m_nuc,   float(nuc),   F_nuc),
+            ("mass_dry",    m_mass,  float(mass),  F_mass),
+            ("rstar",       m_rstar, float(rstar), F_rstar),
+            ("ftry",        m_ftry,  float(ftry),  F_ftry),
+        ):
+            if m > tol:
+                failures.append((which, scen_id, m, j, f))
+
+    sd = _summary_plot_dir()
+    make_summary_plot("binary_nuc_zhao1995_nucrate", nuc_max_rel,   sd)
+    make_summary_plot("binary_nuc_zhao1995_mass",    mass_max_rel,  sd)
+    make_summary_plot("binary_nuc_zhao1995_rstar",   rstar_max_rel, sd)
+    make_summary_plot("binary_nuc_zhao1995_ftry",    ftry_max_rel,  sd)
+
+    if failures:
+        msg_lines = [f"binary_nuc_zhao1995 mismatched on {len(failures)} (output, scen) tuples:"]
+        for which, scen_id, err, j, f in failures[:10]:
+            msg_lines.append(
+                f"  {which} scen {scen_id}: rel err {err:.3e}  JAX={j:.3e}  F={f:.3e}"
+            )
+        if len(failures) > 10:
+            msg_lines.append(f"  ... and {len(failures) - 10} more")
+        raise AssertionError("\n".join(msg_lines))
+
+
 def test_rhopart_matches_fortran():
     """Phase 7.8: JAX rhopart matches Fortran's f_rhop[:, :, igroup] across
     all scenarios at substep 1.

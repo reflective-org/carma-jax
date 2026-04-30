@@ -273,7 +273,7 @@ contains
   !! binary stream files. Layout: <output_dir>/substep_<NNNN>_<name>.bin.
   subroutine dump_substep(istep_d, cs, outdir)
     integer, intent(in)                  :: istep_d
-    type(carmastate_type), intent(in)    :: cs
+    type(carmastate_type), intent(inout) :: cs
     character(len=*), intent(in)         :: outdir
     character(len=512)                   :: prefix
 
@@ -328,6 +328,11 @@ contains
     call dump_3d(prefix, 'r_wet', cs%f_r_wet)
     call dump_3d(prefix, 'rhop_wet', cs%f_rhop_wet)
 
+    ! Per-substep probe: invoke binary_nuc_zhao1995 directly with the
+    ! end-of-step cstate so the JAX bench has matching inputs/outputs
+    ! that bypass the multi-substep gsolve/tsolve evolution complication.
+    call dump_zhao1995_probe(prefix, cs)
+
     ! Static carma bin grid (r, rmass per group). Dumped at step 1
     ! only — these don't change across substeps.
     if (istep_d == 1) then
@@ -337,6 +342,72 @@ contains
   end subroutine dump_substep
 
 
+  !! Probe: call binary_nuc_zhao1995 with end-of-step cstate inputs
+  !! and dump the four scalar outputs (nucrate_cgs, mass_cluster_dry,
+  !! radius_cluster, ftry). JAX bench then feeds the same inputs and
+  !! compares output bit-for-bit. Sulfate test is single-cell (NZ=1)
+  !! so we probe iz=1 only.
+  subroutine dump_zhao1995_probe(prefix, cs)
+    character(len=*), intent(in)            :: prefix
+    type(carmastate_type), intent(inout)    :: cs
+    real(kind=f) :: probe(4)            ! [nucrate_cgs, mass_cluster_dry, rstar, ftry]
+    real(kind=f) :: temp, rh, beta1, beta2, rb
+    real(kind=f) :: h2o_cgs, h2so4_cgs, h2o_n, h2so4_n
+    real(kind=f) :: nucrate_cgs, mass_cluster_dry, radius_cluster, ftry
+    integer      :: rc_loc, igash2o, igash2so4
+    integer, parameter :: iz = 1
+    interface
+      subroutine binary_nuc_zhao1995(carma, cstate, temp, weight_percent, rh, &
+                                     h2so4, h2so4_cgs, h2o, h2o_cgs, beta1, &
+                                     nucrate_cgs, mass_cluster_dry, radius_cluster, &
+                                     ftry, rc)
+        use carma_precision_mod
+        use carma_types_mod
+        type(carma_type), intent(in)         :: carma
+        type(carmastate_type), intent(inout) :: cstate
+        real(kind=f), intent(in)             :: temp, weight_percent, rh
+        real(kind=f), intent(in)             :: h2so4, h2so4_cgs, h2o, h2o_cgs, beta1
+        real(kind=f), intent(out)            :: nucrate_cgs, radius_cluster, mass_cluster_dry, ftry
+        integer, intent(inout)               :: rc
+      end subroutine binary_nuc_zhao1995
+    end interface
+
+    if (.not. allocated(cs%f_t) .or. .not. allocated(cs%f_gc) .or. &
+        .not. allocated(cs%f_supsatl) .or. .not. allocated(cs%f_wtpct)) return
+
+    ! Gas indices: 1=H2O, 2=H2SO4 in carma_sulfatetest.F90
+    igash2o   = 1
+    igash2so4 = 2
+
+    temp = cs%f_t(iz)
+    rb   = RGAS * temp / 2._f / PI
+    beta1 = sqrt(rb / carma%f_gas(igash2so4)%f_wtmol)
+    beta2 = sqrt(rb / carma%f_gas(igash2o)%f_wtmol)
+
+    h2so4_cgs = cs%f_gc(iz, igash2so4) / cs%f_zmet(iz)
+    h2o_cgs   = cs%f_gc(iz, igash2o)   / cs%f_zmet(iz)
+    h2so4_n   = h2so4_cgs * AVG / carma%f_gas(igash2so4)%f_wtmol
+    h2o_n     = h2o_cgs   * AVG / carma%f_gas(igash2o)%f_wtmol
+    rh        = cs%f_supsatl(iz, igash2o) + 1._f
+
+    nucrate_cgs = 0._f
+    mass_cluster_dry = 0._f
+    radius_cluster = 0._f
+    ftry = 0._f
+    rc_loc = 0
+    call binary_nuc_zhao1995(carma, cs, temp, cs%f_wtpct(iz), rh, &
+                              h2so4_n, h2so4_cgs, h2o_n, h2o_cgs, beta1, &
+                              nucrate_cgs, mass_cluster_dry, radius_cluster, &
+                              ftry, rc_loc)
+
+    probe(1) = nucrate_cgs
+    probe(2) = mass_cluster_dry
+    probe(3) = radius_cluster
+    probe(4) = ftry
+    call dump_alloc_1d(prefix, 'zhao1995_probe', probe)
+  end subroutine dump_zhao1995_probe
+
+
   !! Dump the per-bin, per-group dry radius (r) and dry mass (rmass)
   !! from the carma object as 2D arrays of shape (NBIN, NGROUP). These
   !! are static across substeps, so this is called only at step 1.
@@ -344,21 +415,26 @@ contains
   !! per-cell dry density is in cstate%f_rhop.)
   subroutine dump_carma_bins(prefix)
     character(len=*), intent(in)         :: prefix
-    real(kind=f), allocatable            :: r2d(:,:), rmass2d(:,:)
+    real(kind=f), allocatable            :: r2d(:,:), rmass2d(:,:), rmassup2d(:,:)
+    real(kind=f), allocatable            :: rmrat1d(:)
     integer                              :: ig, ib, nb, ng
 
     nb = carma%f_NBIN
     ng = carma%f_NGROUP
-    allocate(r2d(nb, ng), rmass2d(nb, ng))
+    allocate(r2d(nb, ng), rmass2d(nb, ng), rmassup2d(nb, ng), rmrat1d(ng))
     do ig = 1, ng
       do ib = 1, nb
-        r2d(ib, ig)     = carma%f_group(ig)%f_r(ib)
-        rmass2d(ib, ig) = carma%f_group(ig)%f_rmass(ib)
+        r2d(ib, ig)       = carma%f_group(ig)%f_r(ib)
+        rmass2d(ib, ig)   = carma%f_group(ig)%f_rmass(ib)
+        rmassup2d(ib, ig) = carma%f_group(ig)%f_rmassup(ib)
       end do
+      rmrat1d(ig) = carma%f_group(ig)%f_rmrat
     end do
-    call dump_alloc_2d(prefix, 'r_bin',     r2d)
-    call dump_alloc_2d(prefix, 'rmass_bin', rmass2d)
-    deallocate(r2d, rmass2d)
+    call dump_alloc_2d(prefix, 'r_bin',       r2d)
+    call dump_alloc_2d(prefix, 'rmass_bin',   rmass2d)
+    call dump_alloc_2d(prefix, 'rmassup_bin', rmassup2d)
+    call dump_alloc_1d(prefix, 'rmrat_group', rmrat1d)
+    deallocate(r2d, rmass2d, rmassup2d, rmrat1d)
   end subroutine dump_carma_bins
 
 
