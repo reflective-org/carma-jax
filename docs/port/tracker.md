@@ -60,10 +60,10 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
 - [x] `get_wetr` (dispatch — for `I_WTPCT_H2SO4` it forwards directly to `_wetr_wtpct`; bench-validated above)
 
 ### `src/carma/hygroscopicity.py`  ↔  `hygroscopicity.F90`
-- [ ] `hygroscopicity`
+- [-] `hygroscopicity` — gated on `irhswell == I_PETTERS` (hygroscopicity.F90:42); sulfate test uses I_WTPCT_H2SO4, so the kernel never runs in this bench scope. Defer to ice/cloud phase together with `_wetr_petters`.
 
 ### `src/carma/rhopart.py`  ↔  `rhopart.F90`
-- [ ] `rhopart`
+- [x] `rhopart` (1000/1000 pass at rtol 1e-10, bit-exact). Sulfate test exercises only the no-core path (`ncore=0` → `rhop = rhoelem = 1.923`). Multi-element / core-mass-truncation branches will be re-benched when other elements appear in later phases.
 
 ### `src/carma/nucleation/sulfnucrate.py`  ↔  `sulfnucrate.F90`
 - [ ] `binary_nuc_zhao1995`

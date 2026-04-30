@@ -505,6 +505,59 @@ def test_vaporp_h2so4_ayers1980_matches_fortran():
         raise AssertionError("\n".join(msg_lines))
 
 
+def test_rhopart_matches_fortran():
+    """Phase 7.8: JAX rhopart matches Fortran's f_rhop[:, :, igroup] across
+    all scenarios at substep 1.
+
+    Sulfate test has NELEM=1, NGROUP=1, ncore=0, so the Fortran code
+    short-circuits to ``rhop(iz,:,igroup) = rhoelem(:,iepart)`` (=1.923
+    g/cm³ at every bin). This bench therefore confirms the no-core path
+    of the JAX rhopart against Fortran's stored output.
+    """
+    from carma.rhopart import rhopart
+    import jax.numpy as jnp
+
+    igroup = 0
+    iepart = 0
+    RHO_SULFATE = 1.923  # carma_sulfatetest.F90:137 — RHO_SULFATE
+
+    rhop_max_rel = {}
+    failures = []
+
+    for scen_id in _ALL_SCEN_IDS:
+        d = read_substep(_DIFF_BASE / f"scen_{scen_id:03d}", step=1)
+        if d.rmass_bin is None:
+            pytest.skip("rmass_bin not in dump — re-run scripts/run_diagnostic_ensemble.py")
+        NBIN = d.rmass_bin.shape[0]
+        NELEM = d.pc.shape[2]
+
+        rhoelem = jnp.full((NBIN, NELEM), RHO_SULFATE)
+        ienconc_arr = jnp.asarray([iepart])
+        igelem_arr = jnp.asarray([igroup])
+        # No cores: MAX_NCORE=1 padded with -1 so the inner loop is a no-op.
+        icorelem = jnp.asarray([[-1]])
+        ncore = jnp.asarray([0])
+
+        rhop_jax, _ = rhopart(
+            jnp.asarray(d.pc), jnp.asarray(d.rmass_bin), rhoelem,
+            ienconc_arr, igelem_arr, icorelem, ncore,
+        )
+        rhop_f = d.rhop[:, :, igroup]
+        _, m = compute_rel_err(np.asarray(rhop_jax[:, :, igroup]), rhop_f)
+        rhop_max_rel[scen_id] = m
+        if m > _tol_for("rhopart"):
+            failures.append((scen_id, m))
+
+    make_summary_plot("rhopart_rhop", rhop_max_rel, _summary_plot_dir())
+    if failures:
+        msg_lines = [f"rhopart mismatched on {len(failures)} scenarios:"]
+        for scen_id, err in failures[:10]:
+            msg_lines.append(f"  scen {scen_id}: rel err {err:.3e}")
+        if len(failures) > 10:
+            msg_lines.append(f"  ... and {len(failures) - 10} more")
+        raise AssertionError("\n".join(msg_lines))
+
+
 def test_wetr_wtpct_matches_fortran():
     """Phase 7.6: JAX `_wetr_wtpct` (the I_WTPCT_H2SO4 branch of get_wetr)
     matches Fortran's per-bin r_wet[iz,ibin,igroup] and rhop_wet[iz,ibin,igroup]
