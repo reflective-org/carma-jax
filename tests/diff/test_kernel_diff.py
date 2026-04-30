@@ -605,6 +605,203 @@ def test_binary_nuc_zhao1995_matches_fortran():
         raise AssertionError("\n".join(msg_lines))
 
 
+def test_homogeneous_nucleation_matches_fortran():
+    """Phase 7.11: JAX homogeneous_nucleation matches Fortran's
+    sulfnuc homogeneous output (nucrate placed at nucbin in rhompe).
+
+    The bench compares against a Fortran-side reconstruction:
+    ``expected_rhompe[k] = (probe_nucrate · zmet) at nucbin_F, else 0``,
+    where ``nucbin_F`` is computed from the probe-dumped ``mass_cluster_dry``
+    using Fortran's bin-locate formula:
+        nucbin_F = 0 if mass < rmassup[0]
+                   else 1 + floor(log(mass/rmassup[0]) / log(rmrat))
+    """
+    from carma.nucleation.sulfnuc import homogeneous_nucleation
+    from carma.constants import AVG, RGAS, PI as PI_carma
+    import jax.numpy as jnp
+
+    AVG_J = float(AVG)
+    RGAS_J = float(RGAS)
+    PI_J = float(PI_carma)
+    GWTMOL_H2SO4 = 98.078479
+    GWTMOL_H2O = 18.016
+    igas_h2o = 0
+    igas_h2so4 = 1
+    iz = 0
+    igroup = 0
+
+    rhompe_max_rel = {}
+    failures = []
+
+    for scen_id in _ALL_SCEN_IDS:
+        scen_dir = _DIFF_BASE / f"scen_{scen_id:03d}"
+        d = read_substep(scen_dir, step=1)
+        probe_path = scen_dir / "substep_0001_zhao1995_probe.bin"
+        if not probe_path.exists() or d.rmassup_bin is None or d.rmrat_group is None:
+            pytest.skip("probe / rmassup_bin / rmrat_group not in dump — re-run scripts/run_diagnostic_ensemble.py")
+        F_nuc, F_mass, _, _ = np.fromfile(probe_path, dtype=np.float64)
+
+        T = float(d.t[iz])
+        zmet = float(d.zmet[iz])
+        wtpct_iz = float(d.wtpct[iz])
+        h2so4_cgs = float(d.gc[iz, igas_h2so4] / zmet)
+        h2o_cgs = float(d.gc[iz, igas_h2o] / zmet)
+        h2so4 = h2so4_cgs * AVG_J / GWTMOL_H2SO4
+        h2o_n = h2o_cgs * AVG_J / GWTMOL_H2O
+        rh = float(d.supsatl[iz, igas_h2o]) + 1.0
+        rmassup = jnp.asarray(d.rmassup_bin[:, igroup])
+        rmrat = float(d.rmrat_group[igroup])
+        NBIN = rmassup.shape[0]
+
+        # JAX homogeneous_nucleation
+        nucrate_z, nucbin, _, _ = homogeneous_nucleation(
+            jnp.float64(T), jnp.float64(wtpct_iz), jnp.float64(rh),
+            jnp.float64(h2so4), jnp.float64(h2so4_cgs),
+            jnp.float64(h2o_n), jnp.float64(h2o_cgs),
+            rmassup, jnp.float64(rmrat), jnp.float64(zmet),
+            method="ZhaoTurco",
+            gwtmol_h2so4=jnp.float64(GWTMOL_H2SO4),
+            gwtmol_h2o=jnp.float64(GWTMOL_H2O),
+        )
+        rhompe_jax = np.zeros(NBIN, dtype=np.float64)
+        nb_jax = int(nucbin)
+        if 0 <= nb_jax < NBIN:
+            rhompe_jax[nb_jax] = float(nucrate_z)
+
+        # Fortran-side expected from probe
+        rmassup0 = float(d.rmassup_bin[0, igroup])
+        if F_mass < rmassup0:
+            nb_F = 0
+        else:
+            nb_F = 1 + int(np.floor(np.log(F_mass / rmassup0) / np.log(rmrat)))
+        rhompe_F = np.zeros(NBIN, dtype=np.float64)
+        if 0 <= nb_F < NBIN:
+            rhompe_F[nb_F] = F_nuc * zmet
+
+        _, m = compute_rel_err(rhompe_jax, rhompe_F)
+        rhompe_max_rel[scen_id] = m
+        if m > _tol_for("homogeneous_nucleation") or nb_jax != nb_F:
+            failures.append((scen_id, m, nb_jax, nb_F,
+                             float(rhompe_jax[nb_jax] if 0 <= nb_jax < NBIN else 0),
+                             float(rhompe_F[nb_F] if 0 <= nb_F < NBIN else 0)))
+
+    make_summary_plot("homogeneous_nucleation_rhompe", rhompe_max_rel,
+                      _summary_plot_dir())
+
+    if failures:
+        msg_lines = [f"homogeneous_nucleation mismatched on {len(failures)} scenarios:"]
+        for scen_id, err, nb_j, nb_f, jv, fv in failures[:10]:
+            msg_lines.append(
+                f"  scen {scen_id}: rel err {err:.3e}  nucbin J={nb_j} F={nb_f}  "
+                f"JAX={jv:.3e}  F={fv:.3e}"
+            )
+        if len(failures) > 10:
+            msg_lines.append(f"  ... and {len(failures) - 10} more")
+        raise AssertionError("\n".join(msg_lines))
+
+
+def test_sulfnuc_driver_matches_fortran():
+    """Phase 7.11: JAX sulfnuc driver matches Fortran (rhompe, rnuclg).
+
+    Sulfate test: heterogeneous nucleation gated out (no I_HETNUCSULF
+    mapping — see Phase 7.10 row), so rnuclg is identically 0 from
+    Fortran. The driver bench therefore checks that JAX `sulfnuc`:
+      - rhompe matches the probe-derived expected (via homogeneous_nucleation)
+      - rnuclg is identically 0
+    """
+    from carma.nucleation.sulfnuc import sulfnuc
+    from carma.constants import AVG, RGAS, PI as PI_carma
+    import jax.numpy as jnp
+
+    AVG_J = float(AVG)
+    RGAS_J = float(RGAS)
+    PI_J = float(PI_carma)
+    GWTMOL_H2SO4 = 98.078479
+    GWTMOL_H2O = 18.016
+    igas_h2o = 0
+    igas_h2so4 = 1
+    iz = 0
+    igroup = 0
+
+    rhompe_max_rel = {}
+    rnuclg_max_abs = {}
+    failures = []
+
+    for scen_id in _ALL_SCEN_IDS:
+        scen_dir = _DIFF_BASE / f"scen_{scen_id:03d}"
+        d = read_substep(scen_dir, step=1)
+        probe_path = scen_dir / "substep_0001_zhao1995_probe.bin"
+        if not probe_path.exists() or d.rmassup_bin is None or d.rmrat_group is None or d.r_bin is None:
+            pytest.skip("required dump fields missing — re-run scripts/run_diagnostic_ensemble.py")
+        F_nuc, F_mass, _, _ = np.fromfile(probe_path, dtype=np.float64)
+
+        T = float(d.t[iz])
+        zmet = float(d.zmet[iz])
+        wtpct_iz = float(d.wtpct[iz])
+        h2so4_cgs = float(d.gc[iz, igas_h2so4] / zmet)
+        h2o_cgs = float(d.gc[iz, igas_h2o] / zmet)
+        h2so4 = h2so4_cgs * AVG_J / GWTMOL_H2SO4
+        h2o_n = h2o_cgs * AVG_J / GWTMOL_H2O
+        rh = float(d.supsatl[iz, igas_h2o]) + 1.0
+        rmassup = jnp.asarray(d.rmassup_bin[:, igroup])
+        rmrat = float(d.rmrat_group[igroup])
+        # Sulfate test has no het seeding; r_bins is dry radius (unused
+        # because heterogeneous gate fails on the Fortran side).
+        r_bins = jnp.asarray(d.r_bin[:, igroup])
+        NBIN = rmassup.shape[0]
+
+        # JAX sulfnuc driver — heterogeneous DISABLED to match Fortran's
+        # gate (sulfate test never adds an I_HETNUCSULF mapping, so the
+        # Fortran sulfhetnucrate is never invoked).
+        rhompe_jax_arr, rnuclg_jax_arr = sulfnuc(
+            jnp.float64(T), jnp.float64(wtpct_iz), jnp.float64(rh),
+            jnp.float64(h2so4), jnp.float64(h2so4_cgs),
+            jnp.float64(h2o_n), jnp.float64(h2o_cgs),
+            r_bins, rmassup, jnp.float64(rmrat), jnp.float64(zmet),
+            method="ZhaoTurco",
+            do_homogeneous=True,
+            do_heterogeneous=False,
+            gwtmol_h2so4=jnp.float64(GWTMOL_H2SO4),
+            gwtmol_h2o=jnp.float64(GWTMOL_H2O),
+        )
+        rhompe_jax = np.asarray(rhompe_jax_arr)
+        rnuclg_jax = np.asarray(rnuclg_jax_arr)
+
+        rmassup0 = float(d.rmassup_bin[0, igroup])
+        if F_mass < rmassup0:
+            nb_F = 0
+        else:
+            nb_F = 1 + int(np.floor(np.log(F_mass / rmassup0) / np.log(rmrat)))
+        rhompe_F = np.zeros(NBIN, dtype=np.float64)
+        if 0 <= nb_F < NBIN:
+            rhompe_F[nb_F] = F_nuc * zmet
+        rnuclg_F = d.rnuclg[:, igroup, igroup]   # (NBIN,) for sulfate test
+
+        _, m_h = compute_rel_err(rhompe_jax, rhompe_F)
+        m_g = float(np.max(np.abs(rnuclg_jax - rnuclg_F)))
+        rhompe_max_rel[scen_id] = m_h
+        rnuclg_max_abs[scen_id] = m_g
+
+        tol = _tol_for("sulfnuc")
+        if m_h > tol:
+            failures.append(("rhompe", scen_id, m_h, ""))
+        if m_g > 0.0:
+            failures.append(("rnuclg", scen_id, m_g, "expected all zeros"))
+
+    sd = _summary_plot_dir()
+    make_summary_plot("sulfnuc_rhompe", rhompe_max_rel, sd)
+    # rnuclg is exactly 0 across the bench scope, so a CDF plot adds
+    # little — skip.
+
+    if failures:
+        msg_lines = [f"sulfnuc driver mismatched on {len(failures)} (output, scen) tuples:"]
+        for which, scen_id, err, note in failures[:10]:
+            msg_lines.append(f"  {which} scen {scen_id}: err {err:.3e}  {note}")
+        if len(failures) > 10:
+            msg_lines.append(f"  ... and {len(failures) - 10} more")
+        raise AssertionError("\n".join(msg_lines))
+
+
 def test_rhopart_matches_fortran():
     """Phase 7.8: JAX rhopart matches Fortran's f_rhop[:, :, igroup] across
     all scenarios at substep 1.

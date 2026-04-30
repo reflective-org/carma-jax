@@ -70,12 +70,12 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
 - [-] `binary_nuc_vehk2002` (sulfate test runs `sulfnucl_method='ZhaoTurco'`; Vehkamaki branch never invoked — defer to a test that selects it)
 
 ### `src/carma/nucleation/sulfhetnucrate.py`  ↔  `sulfhetnucrate.F90`
-- [ ] `sulfhetnucrate`
+- [-] `sulfhetnucrate` — gated in `sulfnuc.F90:106` on `inucproc(iepart, ienucto) == I_HETNUCSULF`. Sulfate test calls `CARMA_AddNucleation(carma, 1, 1, I_HOMNUC, ...)` only (carma_sulfatetest.F90:163), never adds an `I_HETNUCSULF` mapping → kernel never invoked. Verified empirically: `rnuclg` is identically zero across all 1000 dumped scenarios. Defer to a future test that adds `I_HETNUCSULF`.
 
 ### `src/carma/nucleation/sulfnuc.py`  ↔  `sulfnuc.F90`
-- [ ] `homogeneous_nucleation`
-- [ ] `heterogeneous_nucleation`
-- [ ] `sulfnuc` (driver)
+- [x] `homogeneous_nucleation` (1000/1000 pass at rtol 1e-10; max 2e-13, median 1e-14, near ε; nucbin matches Fortran 1000/1000). Bench reconstructs `expected_rhompe` from the Phase 7.9 zhao1995 probe + dumped `rmassup_bin`/`rmrat_group`.
+- [-] `heterogeneous_nucleation` (calls `sulfhetnucrate`, gated out for sulfate test as per Phase 7.10 row — never invoked).
+- [x] `sulfnuc` (driver) — 1000/1000 pass; rhompe matches near ε, rnuclg is identically 0 (matches Fortran since heterogeneous path is disabled in the sulfate scope). Tested with `do_heterogeneous=False` to mirror the Fortran I_HETNUCSULF gate.
 
 ### `src/carma/gasexchange.py`  ↔  `gasexchange.F90`
 - [ ] `gasexchange`
