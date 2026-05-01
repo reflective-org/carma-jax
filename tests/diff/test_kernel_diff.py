@@ -605,6 +605,111 @@ def test_binary_nuc_zhao1995_matches_fortran():
         raise AssertionError("\n".join(msg_lines))
 
 
+def test_gasexchange_matches_fortran():
+    """Phase 7.12: JAX gasexchange matches Fortran's gasexchange invoked
+    via the diagnostic probe at end-of-step state.
+
+    Fortran's gasexchange is dead code in modern CARMA (microfast.F90:152
+    has the call commented out — gsolve overwrites gasprod via total-
+    condensate). The bench therefore uses a diagnostic probe that calls
+    Fortran's gasexchange directly with end-of-step cstate; JAX is fed
+    the same end-of-step inputs and we compare the resulting gasprod
+    vector.
+
+    Sulfate test scope: cmf == 0 and totevap == False everywhere
+    (verified empirically across 1000 scenarios). Heterogeneous nucleation
+    is gated out (Phase 7.10: rnuclg == 0). Diffmass for adjacent
+    same-group bins is rmass[i+1] - rmass[i] for the mass-ratio-2 grid.
+    """
+    from carma.gasexchange import gasexchange
+    import jax.numpy as jnp
+
+    igroup = 0
+    iz = 0
+    ielem_num = 0          # ienconc[0] = 0 (single element)
+    igas_h2o = 0
+    igas_h2so4 = 1
+    NGROUP = 1
+    NELEM = 1
+    NGAS = 2
+
+    # Static CARMA tables for the sulfate test:
+    ienconc = jnp.asarray([ielem_num])
+    igelem = jnp.asarray([igroup])
+    inucgas = jnp.asarray([igas_h2so4])     # group 0's condensing gas = H2SO4
+    nnuc2elem = jnp.asarray([1])             # AddNucleation(1,1,...) sets nnuc2elem[0]=1
+    igrowgas = jnp.asarray([igas_h2so4])    # AddGrowth(1, 2, ...) → igrowgas[0]=1
+    if_nuc = jnp.asarray([[True]])           # nucleation maps elem 0 → elem 0
+
+    gasprod_max_rel = {}
+    failures = []
+
+    for scen_id in _ALL_SCEN_IDS:
+        scen_dir = _DIFF_BASE / f"scen_{scen_id:03d}"
+        d = read_substep(scen_dir, step=1)
+        probe_path = scen_dir / "substep_0001_gasexchange_probe.bin"
+        if not probe_path.exists() or d.rmass_bin is None or d.cmf is None or d.totevap is None:
+            pytest.skip("required dump fields missing — re-run scripts/run_diagnostic_ensemble.py")
+        gasprod_F = np.fromfile(probe_path, dtype=np.float64)  # (NGAS,)
+
+        NBIN = d.rmass_bin.shape[0]
+        rmass_2d = jnp.asarray(d.rmass_bin)                 # (NBIN, NGROUP)
+        # Build a sparse diffmass[(i2, ig2, i, ig)] = rmass[i2, ig2] - rmass[i, ig]
+        rmass_arr = np.asarray(d.rmass_bin)
+        diffmass_np = (
+            rmass_arr[:, :, None, None] - rmass_arr[None, None, :, :]
+        )  # (NBIN, NGROUP, NBIN, NGROUP)
+        diffmass = jnp.asarray(diffmass_np)
+
+        # inuc2bin: for sulfate test rnuclg=0 so this is irrelevant, but
+        # supply -1 to indicate "no target" (matches Fortran 0 → 0-based -1).
+        inuc2bin = -jnp.ones((NBIN, NGROUP, NGROUP), dtype=jnp.int32)
+
+        gasprod_jax = gasexchange(
+            pc_iz=jnp.asarray(d.pc[iz]),
+            rhompe=jnp.asarray(d.rhompe),
+            rnuclg=jnp.asarray(d.rnuclg),
+            growlg=jnp.asarray(d.growlg),
+            evaplg=jnp.asarray(d.evaplg),
+            rmass=rmass_2d,
+            diffmass=diffmass,
+            cmf=jnp.asarray(d.cmf),
+            totevap=jnp.asarray(d.totevap > 0.5),
+            inuc2bin=inuc2bin,
+            if_nuc=if_nuc,
+            ienconc=ienconc,
+            igelem=igelem,
+            inucgas=inucgas,
+            nnuc2elem=nnuc2elem,
+            igrowgas=igrowgas,
+            ngas=NGAS, ngroup=NGROUP, nelem=NELEM, nbin=NBIN,
+        )
+        gasprod_jax = np.asarray(gasprod_jax)
+
+        _, m = compute_rel_err(gasprod_jax, gasprod_F)
+        gasprod_max_rel[scen_id] = m
+        if m > _tol_for("gasexchange"):
+            failures.append(
+                (scen_id, m,
+                 float(gasprod_jax[0]), float(gasprod_F[0]),
+                 float(gasprod_jax[1]), float(gasprod_F[1]))
+            )
+
+    make_summary_plot("gasexchange_gasprod", gasprod_max_rel, _summary_plot_dir())
+
+    if failures:
+        msg_lines = [f"gasexchange mismatched on {len(failures)} scenarios:"]
+        for scen_id, err, jh2o, fh2o, jh2so4, fh2so4 in failures[:10]:
+            msg_lines.append(
+                f"  scen {scen_id}: rel err {err:.3e}  "
+                f"h2o J={jh2o:.3e} F={fh2o:.3e}  "
+                f"h2so4 J={jh2so4:.3e} F={fh2so4:.3e}"
+            )
+        if len(failures) > 10:
+            msg_lines.append(f"  ... and {len(failures) - 10} more")
+        raise AssertionError("\n".join(msg_lines))
+
+
 def test_homogeneous_nucleation_matches_fortran():
     """Phase 7.11: JAX homogeneous_nucleation matches Fortran's
     sulfnuc homogeneous output (nucrate placed at nucbin in rhompe).
