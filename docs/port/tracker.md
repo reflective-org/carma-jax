@@ -89,13 +89,13 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
 - [x] `maxconc` (1000/1000 bit-exact). Probe needed: the regular `f_pconmax` dump is pre-microfast (newstate_calc.F90:175) while the dumped `pc` is post-microfast — not a matched pair. `dump_maxconc_probe` calls Fortran's maxconc at end-of-step state and dumps the result.
 
 ### `src/carma/utils/fixcorecol.py`  ↔  `fixcorecol.F90`
-- [ ] `fixcorecol`
+- [-] `fixcorecol` — gated on `ncore(igroup) > 0` (fixcorecol.F90:55); sulfate test has a single volatile element with no cores → entire routine is skipped. Verified: no negative `pc` values across all 1000 scenarios. Defer to a future multi-element test.
 
 ### `src/carma/utils/coremasscheck.py`  ↔  `coremasscheck.F90`
-- [ ] `coremasscheck`
+- [-] `coremasscheck` — gated on `ncore(igroup) > 0` (coremasscheck.F90:48); same reason as fixcorecol. Defer.
 
 ### `src/carma/growth/pheat.py`  ↔  `pheat.F90`
-- [ ] `pheat`
+- [x] `pheat` (37×1000 = 37 000 (scen,bin) pairs pass at rtol 1e-10; median bit-exact, max 9.9e-14). Sulfate test: `do_pheat=False`, `NWAVE=0` → no-radiation branch only (`akas = exp(akelvin/rup_wet)` + standard Köhler dmdt). Probe calls Fortran's `pheat` for `ibin=1..NBIN-1` (matching growevapl's loop). Diagnostic now also dumps `rup_wet` (NZ,NBIN,NGROUP) used by the Kelvin factor.
 
 ### `src/carma/growth/growevapl.py`  ↔  `growevapl.F90`
 - [ ] `growevapl`

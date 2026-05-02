@@ -605,6 +605,71 @@ def test_binary_nuc_zhao1995_matches_fortran():
         raise AssertionError("\n".join(msg_lines))
 
 
+def test_pheat_matches_fortran():
+    """Phase 8.4: JAX pheat matches Fortran's pheat for bins 0..NBIN-2
+    across all scenarios at substep 1.
+
+    Sulfate test: do_pheat=False, NWAVE=0, so the no-radiation branch runs:
+        akas = exp(akelvin[iz, igas] / rup_wet[iz, ibin, igroup])
+        dmdt = pvap * (S + 1 - akas) * g0 / (1 + g0*g1*pvap)
+
+    growevapl calls pheat for ibin=1..NBIN-1 (Fortran 1-based) = bins
+    0..NBIN-2 (0-based). The probe matches that range; dmdt[NBIN-1]=0
+    (unused slot).
+
+    Probe dumps `pheat_probe.bin` — a flat (NBIN,) array where the last
+    entry is 0.
+    """
+    from carma.growth.pheat import pheat as jax_pheat
+    import jax.numpy as jnp
+
+    iz = 0
+    igroup = 0
+    igas = 1       # H2SO4 is gas index 1 (0-based) in sulfate test
+    NBIN = 38
+
+    dmdt_max_rel = {}
+    failures = []
+
+    for scen_id in _ALL_SCEN_IDS:
+        scen_dir = _DIFF_BASE / f"scen_{scen_id:03d}"
+        d = read_substep(scen_dir, step=1)
+        probe_path = scen_dir / "substep_0001_pheat_probe.bin"
+        if not probe_path.exists() or d.rup_wet is None:
+            pytest.skip("pheat_probe.bin or rup_wet not in dump — re-run scripts/run_diagnostic_ensemble.py")
+        F_dmdt = np.fromfile(probe_path, dtype=np.float64)  # (NBIN,)
+
+        per_scen_errs = []
+        for ib in range(NBIN - 1):
+            dmdt_j = float(jax_pheat(
+                jnp.asarray(d.pc), jnp.asarray(d.supsatl), jnp.asarray(d.supsati),
+                jnp.asarray(d.pvapl), jnp.asarray(d.pvapi),
+                jnp.asarray(d.akelvin), jnp.asarray(d.akelvini),
+                jnp.asarray(d.gro), jnp.asarray(d.gro1),
+                jnp.asarray(d.rup_wet), None,
+                is_ice=False, iz=iz, igroup=igroup, ibin=ib, igas=igas,
+            ))
+            f = float(F_dmdt[ib])
+            e = abs(dmdt_j - f) / max(abs(f), 1e-300)
+            per_scen_errs.append(e)
+            tol = _tol_for("pheat")
+            if e > tol:
+                failures.append((scen_id, ib, e, dmdt_j, f))
+
+        dmdt_max_rel[scen_id] = max(per_scen_errs) if per_scen_errs else 0.0
+
+    make_summary_plot("pheat_dmdt", dmdt_max_rel, _summary_plot_dir())
+    if failures:
+        msg_lines = [f"pheat mismatched on {len(failures)} (scen, bin) pairs:"]
+        for scen_id, ib, err, j, f in failures[:10]:
+            msg_lines.append(
+                f"  scen {scen_id} bin {ib}: rel err {err:.3e}  JAX={j:.3e}  F={f:.3e}"
+            )
+        if len(failures) > 10:
+            msg_lines.append(f"  ... and {len(failures) - 10} more")
+        raise AssertionError("\n".join(msg_lines))
+
+
 def test_maxconc_matches_fortran():
     """Phase 8.1a: JAX maxconc matches Fortran's maxconc(end-of-step cstate).
 

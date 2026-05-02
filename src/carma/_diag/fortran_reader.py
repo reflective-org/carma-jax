@@ -49,6 +49,7 @@ Array shapes (in numpy, after Fortran→C order conversion):
     rhop_wet    (NZ, NBIN, NGROUP)                    — wet density (getwetr)
     cmf         (NBIN, NGROUP)                        — core mass fraction
     totevap     (NBIN, NGROUP)                        — total-evap flag (0/1 float)
+    rup_wet     (NZ, NBIN, NGROUP)                    — wet upper-boundary radius
     ckernel     (NZ, NBIN, NBIN, NGROUP, NGROUP)      — only present at step 1
     r_bin       (NBIN, NGROUP)                        — only present at step 1 (static)
     rmass_bin   (NBIN, NGROUP)                        — only present at step 1 (static)
@@ -113,6 +114,7 @@ def _shape_map(dims):
         "rhop_wet":   (NZ, NBIN, NGROUP),
         "cmf":        (NBIN, NGROUP),
         "totevap":    (NBIN, NGROUP),
+        "rup_wet":    (NZ, NBIN, NGROUP),
         "ckernel":    (NZ, NBIN, NBIN, NGROUP, NGROUP),
         "r_bin":       (NBIN, NGROUP),
         "rmass_bin":   (NBIN, NGROUP),
@@ -165,6 +167,7 @@ class SubstepDump:
     rhop_wet:  np.ndarray
     cmf:       np.ndarray
     totevap:   np.ndarray
+    rup_wet:   np.ndarray
     ckernel:   Optional[np.ndarray] = None
     r_bin:       Optional[np.ndarray] = None
     rmass_bin:   Optional[np.ndarray] = None
@@ -248,6 +251,7 @@ def read_substep(out_dir, step: int, dims=None) -> SubstepDump:
         rhop_wet=_load_one(_path("rhop_wet"), shapes["rhop_wet"]),
         cmf=_load_one(_path("cmf"), shapes["cmf"]),
         totevap=_load_one(_path("totevap"), shapes["totevap"]),
+        rup_wet=_load_one(_path("rup_wet"), shapes["rup_wet"]),
         ckernel=_opt("ckernel"),
         r_bin=_opt("r_bin"),
         rmass_bin=_opt("rmass_bin"),
