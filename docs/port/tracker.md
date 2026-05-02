@@ -85,8 +85,8 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
 ## Phase 8 — Correctness primitives
 
 ### `src/carma/utils/smallconc.py`  ↔  `smallconc.F90` + `maxconc.F90`
-- [ ] `smallconc`
-- [ ] `maxconc`
+- [x] `smallconc` (1000/1000 bit-exact). Sulfate test has NELEM=1, itype=I_VOLATILE (number element only — no core-mass/second-moment elements), so only the `max(pc, SMALL_PC)` branch runs. All dumped pc values exceed SMALL_PC, so smallconc is a no-op; bench verifies idempotency.
+- [x] `maxconc` (1000/1000 bit-exact). Probe needed: the regular `f_pconmax` dump is pre-microfast (newstate_calc.F90:175) while the dumped `pc` is post-microfast — not a matched pair. `dump_maxconc_probe` calls Fortran's maxconc at end-of-step state and dumps the result.
 
 ### `src/carma/utils/fixcorecol.py`  ↔  `fixcorecol.F90`
 - [ ] `fixcorecol`
