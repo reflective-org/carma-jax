@@ -2,11 +2,21 @@
 
 Composes Phase 7.1-7.6a primitives into one advance of a column:
 
-    wtpct → sulfnuc → gasexchange → explicit Euler apply → (pc, gc)
+    wtpct → sulfnuc → explicit Euler apply (gas balance via Δgc) → (pc, gc)
 
 The step is a pure function; the ``make_step_sulfate`` factory binds
 a ``CarmaConfig`` + bin tables to it and returns a JIT-compiled
 substepping closure.
+
+.. note::
+    Earlier versions called ``gasexchange()`` to produce ``gasprod``, but
+    Fortran's ``gasexchange`` is dead code (``microfast.F90:152``
+    commented out — gsolve overwrites gasprod via total-condensate, see
+    ``gsolve.F90:52-58``). This integration now derives ``gasprod`` from
+    the actual gas-mass change ``-Δgc / dtime``, consistent with what
+    gsolve does. ``gasexchange.py`` is retained as a bench-validated
+    kernel but **must not** be called from any integration path; see
+    the warning in its module docstring.
 
 Scope
 -----
@@ -54,21 +64,9 @@ import jax.numpy as jnp
 import numpy as np
 
 from carma.constants import AVG, BK, RGAS, WTMOL_H2O
-from carma.gasexchange import gasexchange
 from carma.nucleation.sulfnuc import sulfnuc
 from carma.precision import DTYPE
 from carma.sulfate_utils import wtpct_tabaz
-
-
-# Static (Python-level) config arrays for the minimal single-group
-# sulfate problem. Kept outside jit'd code so gasexchange sees
-# Python ints when it reads ``if_nuc[0, 0]`` etc.
-_IF_NUC_SULF = np.asarray([[True]])
-_IENCONC_SULF = np.asarray([0])
-_IGELEM_SULF = np.asarray([0])
-_INUCGAS_SULF = np.asarray([0])
-_NNUC2ELEM_SULF = np.asarray([1])
-_IGROWGAS_DISABLED = np.asarray([-1])
 
 
 _GWTMOL_H2SO4 = DTYPE(98.0)
@@ -147,35 +145,6 @@ def sulfate_step_one_level(
         do_heterogeneous=do_heterogeneous,
     )
 
-    # Reshape into gasexchange's expected layout (nbin, nelem=1),
-    # (nbin, ngroup=1, ngroup=1), etc.
-    rhompe = rhompe_1d[:, None]
-    rnuclg = rnuclg_1d[:, None, None]
-    pc_iz = pc[:, None]
-    rmass_2d = rmass[:, None]
-
-    # Gas exchange — single group, single gas, grow branch off (no growth
-    # in the minimal sulfate step; it's handled by the growth kernel in
-    # the full model but omitted here to keep the Phase-7 kernel scoped
-    # to the pure nucleation flux).
-    gasprod = gasexchange(
-        pc_iz=pc_iz, rhompe=rhompe, rnuclg=rnuclg,
-        growlg=jnp.zeros((nbin, 1), dtype=DTYPE),
-        evaplg=jnp.zeros((nbin, 1), dtype=DTYPE),
-        rmass=rmass_2d, diffmass=diffmass,
-        cmf=jnp.zeros((nbin, 1), dtype=DTYPE),
-        totevap=jnp.zeros((nbin, 1), dtype=bool),
-        inuc2bin=inuc2bin,
-        if_nuc=_IF_NUC_SULF,
-        ienconc=_IENCONC_SULF,
-        igelem=_IGELEM_SULF,
-        inucgas=_INUCGAS_SULF,
-        nnuc2elem=_NNUC2ELEM_SULF,
-        igrowgas=_IGROWGAS_DISABLED,
-        ngas=1, ngroup=1, nelem=1, nbin=nbin,
-    )
-    gasprod_h2so4 = gasprod[0]
-
     # --- Apply rates (semi-implicit + mass-conserving gate) ---
     #
     # Nucleation rates can be fast compared to the 60-s outer timestep
@@ -223,6 +192,11 @@ def sulfate_step_one_level(
 
     gc_h2so4_new = gc_h2so4 - scale * total_mass_demand
     gc_h2so4_new = jnp.maximum(gc_h2so4_new, DTYPE(0.0))
+
+    # gasprod = -Δgc / dtime, the gsolve total-condensate convention
+    # (gsolve.F90:52-58). Sign matches Fortran's gasprod: positive when
+    # gas is being produced, negative when consumed.
+    gasprod_h2so4 = (gc_h2so4_new - gc_h2so4) / dtime
 
     diag = {
         "rhompe": rhompe_1d,

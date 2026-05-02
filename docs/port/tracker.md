@@ -78,7 +78,7 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
 - [x] `sulfnuc` (driver) — 1000/1000 pass; rhompe matches near ε, rnuclg is identically 0 (matches Fortran since heterogeneous path is disabled in the sulfate scope). Tested with `do_heterogeneous=False` to mirror the Fortran I_HETNUCSULF gate.
 
 ### `src/carma/gasexchange.py`  ↔  `gasexchange.F90`
-- [ ] `gasexchange`
+- [x] `gasexchange` (1000/1000 pass at rtol 1e-10; max 2.2e-11, median bit-exact). **Do not use in integration path.** Fortran's `gasexchange` is dead code (`microfast.F90:152` commented out — gsolve overwrites `gasprod` via total-condensate, see `gsolve.F90:52-58`). Bench validates the kernel via a new `dump_gasexchange_probe` that calls Fortran's gasexchange directly with end-of-step cstate. `sulfate_step.py` now derives `gasprod_h2so4 = -Δgc/dtime` (gsolve convention) instead of calling `gasexchange()`. Diagnostic also dumps `cmf` and `totevap` (both identically zero/false in the sulfate scope).
 
 ---
 

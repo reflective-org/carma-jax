@@ -328,10 +328,20 @@ contains
     call dump_3d(prefix, 'r_wet', cs%f_r_wet)
     call dump_3d(prefix, 'rhop_wet', cs%f_rhop_wet)
 
+    ! Auxiliary state used by gasexchange (cmf, totevap as float for binary I/O).
+    call dump_2d(prefix, 'cmf', cs%f_cmf)
+    call dump_totevap(prefix, cs)
+
     ! Per-substep probe: invoke binary_nuc_zhao1995 directly with the
     ! end-of-step cstate so the JAX bench has matching inputs/outputs
     ! that bypass the multi-substep gsolve/tsolve evolution complication.
     call dump_zhao1995_probe(prefix, cs)
+
+    ! Per-substep probe: invoke Fortran's gasexchange directly with the
+    ! end-of-step cstate. gasexchange is commented out in modern microfast
+    ! (gsolve uses total-condensate instead) — this probe is purely for
+    ! kernel-level validation of the JAX gasexchange port.
+    call dump_gasexchange_probe(prefix, cs)
 
     ! Static carma bin grid (r, rmass per group). Dumped at step 1
     ! only — these don't change across substeps.
@@ -408,6 +418,42 @@ contains
   end subroutine dump_zhao1995_probe
 
 
+  !! Probe: invoke Fortran's gasexchange directly with end-of-step cstate
+  !! and dump the resulting cstate%f_gasprod (NGAS,). gasexchange is
+  !! commented out in modern microfast.F90:152 (gsolve overwrites
+  !! gasprod via total-condensate), so this probe is the only way to
+  !! bench the JAX gasexchange port against Fortran. We zero gasprod
+  !! before the call so the output reflects ONLY gasexchange's
+  !! contribution (gasexchange uses += internally).
+  !!
+  !! Side effect: cstate%f_gasprod is overwritten with gasexchange's
+  !! output. Since this is end-of-step and the test driver doesn't read
+  !! gasprod afterwards, this is harmless.
+  subroutine dump_gasexchange_probe(prefix, cs)
+    character(len=*), intent(in)            :: prefix
+    type(carmastate_type), intent(inout)    :: cs
+    integer                                 :: rc_loc
+    integer, parameter                      :: iz = 1
+    interface
+      subroutine gasexchange(carma, cstate, iz, rc)
+        use carma_precision_mod
+        use carma_types_mod
+        type(carma_type), intent(in)         :: carma
+        type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in)                  :: iz
+        integer, intent(inout)               :: rc
+      end subroutine gasexchange
+    end interface
+
+    if (.not. allocated(cs%f_gasprod)) return
+
+    cs%f_gasprod(:) = 0._f
+    rc_loc = 0
+    call gasexchange(carma, cs, iz, rc_loc)
+    call dump_alloc_1d(prefix, 'gasexchange_probe', cs%f_gasprod)
+  end subroutine dump_gasexchange_probe
+
+
   !! Dump the per-bin, per-group dry radius (r) and dry mass (rmass)
   !! from the carma object as 2D arrays of shape (NBIN, NGROUP). These
   !! are static across substeps, so this is called only at step 1.
@@ -436,6 +482,28 @@ contains
     call dump_alloc_1d(prefix, 'rmrat_group', rmrat1d)
     deallocate(r2d, rmass2d, rmassup2d, rmrat1d)
   end subroutine dump_carma_bins
+
+
+  subroutine dump_totevap(prefix, cs)
+    character(len=*), intent(in)            :: prefix
+    type(carmastate_type), intent(in)       :: cs
+    real(kind=f), allocatable               :: as_float(:,:)
+    integer                                 :: nb, ng, ib, ig
+    if (.not. allocated(cs%f_totevap)) return
+    nb = size(cs%f_totevap, 1); ng = size(cs%f_totevap, 2)
+    allocate(as_float(nb, ng))
+    do ig = 1, ng
+      do ib = 1, nb
+        if (cs%f_totevap(ib, ig)) then
+          as_float(ib, ig) = 1._f
+        else
+          as_float(ib, ig) = 0._f
+        end if
+      end do
+    end do
+    call dump_alloc_2d(prefix, 'totevap', as_float)
+    deallocate(as_float)
+  end subroutine dump_totevap
 
 
   subroutine dump_alloc_2d(prefix, name, arr)

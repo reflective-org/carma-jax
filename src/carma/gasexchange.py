@@ -1,5 +1,24 @@
 """Gas-phase production rates from nucleation + growth/evaporation.
 
+.. warning::
+    **DO NOT USE THIS KERNEL IN THE INTEGRATION PATH.**
+
+    Modern CARMA does not invoke ``gasexchange`` — the call site in
+    ``microfast.F90:152`` is commented out with the note "Not needed
+    because changes in gas concentrations and latent heats are now
+    calculated later in gsolve using total condensate." See
+    ``gsolve.F90:52-58``, where ``gasprod`` is overwritten by:
+
+        gasprod(igas) = ((previous_ice - total_ice)
+                       + (previous_liquid - total_liquid)) / dtime
+
+    The kernel is preserved here, and bench-validated against Fortran's
+    ``gasexchange`` output via the diagnostic probe (Phase 7.12), purely
+    for completeness — it implements the legacy accumulation correctly.
+    But any orchestrator (``sulfate_step``, ``newstate``, ``step_full``)
+    must compute ``gasprod`` the gsolve way (total condensate change),
+    not by calling this function.
+
 Ported from ``gasexchange.F90``. Returns the gas-production vector
 ``gasprod[igas] = Σ_group (gprod_nuc + gprod_grow)`` at a single
 vertical level.
