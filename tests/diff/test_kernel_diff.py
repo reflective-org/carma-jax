@@ -605,6 +605,112 @@ def test_binary_nuc_zhao1995_matches_fortran():
         raise AssertionError("\n".join(msg_lines))
 
 
+def test_maxconc_matches_fortran():
+    """Phase 8.1a: JAX maxconc matches Fortran's maxconc(end-of-step cstate).
+
+    Fortran (maxconc.F90:38-41):
+        pconmax(iz, igrp) = maxval(pc(iz, :, iep)) / zmet(iz)
+
+    The regular dump's f_pconmax is stale — it was computed pre-microfast
+    (newstate_calc.F90:175), while the dumped pc is post-microfast. A
+    `dump_maxconc_probe` in the diagnostic calls Fortran's maxconc at
+    end-of-step and dumps the result as `maxconc_probe.bin`.
+
+    Sulfate test: NZ=1, NGROUP=1, ienconc[0]=0.
+    """
+    from carma.utils.smallconc import maxconc
+    import jax.numpy as jnp
+
+    ienconc_arr = jnp.asarray([0])
+
+    pconmax_max_rel = {}
+    failures = []
+
+    for scen_id in _ALL_SCEN_IDS:
+        scen_dir = _DIFF_BASE / f"scen_{scen_id:03d}"
+        d = read_substep(scen_dir, step=1)
+        probe_path = scen_dir / "substep_0001_maxconc_probe.bin"
+        if not probe_path.exists():
+            pytest.skip("maxconc_probe.bin not in dump — re-run scripts/run_diagnostic_ensemble.py")
+        # probe is shape (NBIN, NGROUP) from cstate%f_pconmax but only NZ=1
+        pconmax_F = np.fromfile(probe_path, dtype=np.float64).reshape(
+            d.pconmax.shape, order="F"
+        )
+        pconmax_jax = maxconc(
+            jnp.asarray(d.pc), ienconc_arr, jnp.asarray(d.zmet)
+        )
+        _, m = compute_rel_err(np.asarray(pconmax_jax), pconmax_F)
+        pconmax_max_rel[scen_id] = m
+        if m > _tol_for("maxconc"):
+            failures.append((scen_id, m,
+                             float(pconmax_jax[0, 0]), float(pconmax_F[0, 0])))
+
+    make_summary_plot("maxconc_pconmax", pconmax_max_rel, _summary_plot_dir())
+    if failures:
+        msg_lines = [f"maxconc mismatched on {len(failures)} scenarios:"]
+        for scen_id, err, jv, fv in failures[:10]:
+            msg_lines.append(
+                f"  scen {scen_id}: rel err {err:.3e}  JAX={jv:.3e}  F={fv:.3e}"
+            )
+        if len(failures) > 10:
+            msg_lines.append(f"  ... and {len(failures) - 10} more")
+        raise AssertionError("\n".join(msg_lines))
+
+
+def test_smallconc_matches_fortran():
+    """Phase 8.1b: JAX smallconc matches Fortran after psolve application.
+
+    Fortran (smallconc.F90:42-43) for number-element (ielem == ip):
+        pc(iz, ibin, ielem) = max(pc(iz, ibin, ielem), SMALL_PC)
+
+    Sulfate test has NELEM=1, itype=I_VOLATILE (number element only —
+    no core-mass or second-moment elements). So smallconc reduces to
+    a per-bin max(pc, SMALL_PC). Since the dumped pc already reflects
+    the post-psolve/post-smallconc state, feeding that pc back through
+    smallconc must be a no-op (all values ≥ SMALL_PC). The bench
+    therefore verifies:
+      1. JAX smallconc is idempotent on the dumped pc.
+      2. The output matches the input exactly (bit-for-bit).
+    """
+    from carma.utils.smallconc import smallconc
+    from carma.enums import ElementType
+    import jax.numpy as jnp
+
+    # Sulfate test: NELEM=1, NGROUP=1, element type is I_VOLATILE
+    # (carma_sulfatetest.F90:145 — CARMAELEMENT_Create with I_VOLATILE).
+    # I_VOLATILE is the particle number-density type.
+    itype_arr = jnp.asarray([int(ElementType.I_VOLATILE)])
+    ienconc_arr = jnp.asarray([0])
+    igelem_arr = jnp.asarray([0])
+
+    pc_max_rel = {}
+    failures = []
+
+    for scen_id in _ALL_SCEN_IDS:
+        d = read_substep(_DIFF_BASE / f"scen_{scen_id:03d}", step=1)
+        if d.rmass_bin is None:
+            pytest.skip("rmass_bin not in dump — re-run scripts/run_diagnostic_ensemble.py")
+
+        pc_jax = smallconc(
+            jnp.asarray(d.pc), itype_arr, ienconc_arr, igelem_arr,
+            jnp.asarray(d.rmass_bin),
+        )
+        # Expected: idempotent on already-floored pc (input == output)
+        _, m = compute_rel_err(np.asarray(pc_jax), d.pc)
+        pc_max_rel[scen_id] = m
+        if m > _tol_for("smallconc"):
+            failures.append((scen_id, m))
+
+    make_summary_plot("smallconc_pc", pc_max_rel, _summary_plot_dir())
+    if failures:
+        msg_lines = [f"smallconc mismatched on {len(failures)} scenarios:"]
+        for scen_id, err in failures[:10]:
+            msg_lines.append(f"  scen {scen_id}: rel err {err:.3e}")
+        if len(failures) > 10:
+            msg_lines.append(f"  ... and {len(failures) - 10} more")
+        raise AssertionError("\n".join(msg_lines))
+
+
 def test_gasexchange_matches_fortran():
     """Phase 7.12: JAX gasexchange matches Fortran's gasexchange invoked
     via the diagnostic probe at end-of-step state.

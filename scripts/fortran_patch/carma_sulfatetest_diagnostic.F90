@@ -337,6 +337,12 @@ contains
     ! that bypass the multi-substep gsolve/tsolve evolution complication.
     call dump_zhao1995_probe(prefix, cs)
 
+    ! Per-substep probe: invoke maxconc at end-of-step state and dump the
+    ! result. pconmax is computed pre-microfast inside newstate_calc.F90:175
+    ! so the existing cstate%f_pconmax doesn't correspond to the end-of-step
+    ! pc dump. This probe gives a correctly matched (pc, pconmax) pair.
+    call dump_maxconc_probe(prefix, cs)
+
     ! Per-substep probe: invoke Fortran's gasexchange directly with the
     ! end-of-step cstate. gasexchange is commented out in modern microfast
     ! (gsolve uses total-condensate instead) — this probe is purely for
@@ -429,6 +435,34 @@ contains
   !! Side effect: cstate%f_gasprod is overwritten with gasexchange's
   !! output. Since this is end-of-step and the test driver doesn't read
   !! gasprod afterwards, this is harmless.
+  !! Probe: call maxconc with end-of-step pc/zmet and dump the result.
+  !! pconmax in the regular dump reflects the pre-microfast call inside
+  !! newstate_calc.F90:175, which is computed on pre-microfast pc. This
+  !! probe gives end-of-step (pc, zmet) → pconmax so the JAX bench
+  !! has a matched pair.
+  subroutine dump_maxconc_probe(prefix, cs)
+    character(len=*), intent(in)            :: prefix
+    type(carmastate_type), intent(inout)    :: cs
+    integer                                 :: rc_loc
+    integer, parameter                      :: iz = 1
+    interface
+      subroutine maxconc(carma, cstate, iz, rc)
+        use carma_precision_mod
+        use carma_types_mod
+        type(carma_type), intent(in)         :: carma
+        type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in)                  :: iz
+        integer, intent(inout)               :: rc
+      end subroutine maxconc
+    end interface
+
+    if (.not. allocated(cs%f_pconmax)) return
+    rc_loc = 0
+    call maxconc(carma, cs, iz, rc_loc)
+    call dump_alloc_2d(prefix, 'maxconc_probe', cs%f_pconmax)
+  end subroutine dump_maxconc_probe
+
+
   subroutine dump_gasexchange_probe(prefix, cs)
     character(len=*), intent(in)            :: prefix
     type(carmastate_type), intent(inout)    :: cs
