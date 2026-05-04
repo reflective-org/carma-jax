@@ -605,6 +605,112 @@ def test_binary_nuc_zhao1995_matches_fortran():
         raise AssertionError("\n".join(msg_lines))
 
 
+def test_psolve_matches_fortran():
+    """Phase 8.11: JAX psolve (interleaved with growp) matches Fortran.
+
+    Fortran microfast.F90 runs psolve in a per-(ielem, ibin) loop:
+        do ielem = 1, NELEM
+          do ibin = 1, NBIN
+            growp(...)         ! reads pc[ibin-1] (already-updated by previous psolve)
+            upgxfer(...)
+            psolve(...)        ! mutates pc[ibin]
+          enddo
+        enddo
+    There's a sequential dependency: growp at bin i reads pc[i-1] AFTER
+    psolve at i-1 has updated it. The bench must mirror this loop —
+    not pre-compute growpe in advance.
+
+    Probe `dump_psolve_probe`:
+      pc_prepsolve_probe (NBIN,NELEM): pc[iz,:,:] after sulfnuc+growevapl
+                                       (i.e., what psolve sees at start of loop)
+      rhompe_probe (NBIN,NELEM): rhompe from sulfnuc
+      pc_postpsolve_probe (NBIN,NELEM): pc[iz,:,:] after the full loop
+    """
+    from carma.solvers.psolve import psolve
+    from carma.growth.growp import growp
+    from carma.growth.growevapl import growevapl
+    from carma.utils.smallconc import maxconc
+    import jax.numpy as jnp
+
+    NBIN, NGROUP, NELEM = 38, 1, 1
+    d0 = read_substep(_DIFF_BASE / "scen_000", step=1)
+    if d0.dm_bin is None:
+        pytest.skip("PPM tables not in dump — re-run scripts/run_diagnostic_ensemble.py")
+    dm_j = jnp.asarray(d0.dm_bin); pratt_j = jnp.asarray(d0.pratt)
+    prat_j = jnp.asarray(d0.prat); pden1_j = jnp.asarray(d0.pden1)
+    palr_j = jnp.asarray(d0.palr)
+    igrowgas_arr = jnp.asarray([int(d0.igrowgas[0]) - 1])
+    igas_num = int(d0.igrowgas[0]) - 1
+    ienconc_arr = jnp.asarray([0]); is_ice_arr = jnp.asarray([False])
+
+    pc_max_rel = {}
+    failures = []
+
+    for scen_id in _ALL_SCEN_IDS:
+        scen_dir = _DIFF_BASE / f"scen_{scen_id:03d}"
+        d = read_substep(scen_dir, step=1)
+        pre_path = scen_dir / "substep_0001_pc_prepsolve_probe.bin"
+        post_path = scen_dir / "substep_0001_pc_postpsolve_probe.bin"
+        rhompe_path = scen_dir / "substep_0001_rhompe_probe.bin"
+        if not (pre_path.exists() and post_path.exists() and rhompe_path.exists()):
+            pytest.skip("psolve probe files not in dump — re-run scripts/run_diagnostic_ensemble.py")
+
+        pc_pre = np.fromfile(pre_path, dtype=np.float64).reshape(NBIN, NELEM, order="F")
+        pc_post_F = np.fromfile(post_path, dtype=np.float64).reshape(NBIN, NELEM, order="F")
+        rhompe_F = np.fromfile(rhompe_path, dtype=np.float64).reshape(NBIN, NELEM, order="F")
+
+        # Build pc with iz=0 from the pre-snapshot
+        pc_jax = jnp.zeros((1, NBIN, NELEM)).at[0, :, :].set(jnp.asarray(pc_pre))
+
+        # Compute growlg/evaplg from same pre-snapshot
+        pconmax_j = maxconc(pc_jax, ienconc_arr, jnp.asarray(d.zmet))
+        gl_j, el_j = growevapl(
+            pc_jax,
+            jnp.zeros((NBIN, NGROUP)), jnp.zeros((NBIN, NGROUP)),
+            jnp.asarray(d.supsatl), jnp.asarray(d.supsati),
+            jnp.asarray(d.pvapl), jnp.asarray(d.pvapi),
+            jnp.asarray(d.akelvin), jnp.asarray(d.akelvini),
+            jnp.asarray(d.gro), jnp.asarray(d.gro1), jnp.asarray(d.rup_wet),
+            jnp.asarray(d.rmass_bin), dm_j, pconmax_j,
+            pratt_j, prat_j, pden1_j, palr_j,
+            is_ice_arr, igrowgas_arr, ienconc_arr, 1800.0, 0, NBIN, NGROUP,
+        )
+
+        pc_nucl_j = jnp.zeros((1, NBIN, NELEM))
+        rhompe_j = jnp.asarray(rhompe_F)
+        rnucpe_j = jnp.zeros((NBIN, NELEM))
+        evappe_j = jnp.zeros((NBIN, NELEM))
+        rnuclg_j = jnp.zeros((NBIN, NGROUP, NGROUP))
+        growpe_j = jnp.zeros((NBIN, NELEM))
+
+        # Mirror Fortran sequential loop: per (ielem, ibin): growp → psolve
+        for ie in range(NELEM):
+            for ib in range(NBIN):
+                growpe_j = growp(
+                    pc_jax, growpe_j, gl_j, pconmax_j,
+                    0, ib, ie, 0, igas_num,
+                )
+                pc_jax, pc_nucl_j = psolve(
+                    pc_jax, pc_nucl_j, growpe_j, evappe_j, rnucpe_j, rhompe_j,
+                    gl_j, el_j, rnuclg_j, 1800.0, 0, ib, ie, 0, NGROUP,
+                )
+
+        pc_post_j = np.asarray(pc_jax[0])
+        _, m = compute_rel_err(pc_post_j, pc_post_F)
+        pc_max_rel[scen_id] = m
+        if m > _tol_for("psolve"):
+            failures.append((scen_id, m))
+
+    make_summary_plot("psolve_pc", pc_max_rel, _summary_plot_dir())
+    if failures:
+        msg_lines = [f"psolve mismatched on {len(failures)} scenarios:"]
+        for scen_id, err in failures[:10]:
+            msg_lines.append(f"  scen {scen_id}: rel err {err:.3e}")
+        if len(failures) > 10:
+            msg_lines.append(f"  ... and {len(failures) - 10} more")
+        raise AssertionError("\n".join(msg_lines))
+
+
 def test_evapp_matches_fortran():
     """Phase 8.8a: JAX evapp matches Fortran's evapp(evappe).
 
