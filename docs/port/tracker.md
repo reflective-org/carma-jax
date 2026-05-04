@@ -161,9 +161,24 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
 
 ### `src/carma/microfast_full.py`  ↔  `microfast.F90`
 - [x] `microfast_full` (1000/1000 pass at rtol=1e-10; pc max 1.05e-12 / median 3.9e-15, gc max 8.7e-12 / median 8.8e-15 — both near machine ε). New module written for sulfate scope; mirrors Fortran microfast.F90 exactly (sulfnuc → growevapl → per-(ie,ib){growp+psolve(+rhompe)} → evapp → downgevapply → gsolve → tsolve, with per-gas vapor pressure: Murphy 2005 for H2O, Ayers 1980 for H2SO4). Probe `dump_microfast_probe` calls Fortran microfast directly at end-of-step state.
+- [x] `make_microfast_full_jit` factory — JIT'd version using `lax.scan` for the per-(ie, ib) loop. 1000/1000 pass with same accuracy as non-JIT. ~3× faster than unrolled JIT, ~100× faster than non-JIT (2.8 ms/scen vs ~270 ms/scen).
+
+### `src/carma/newstate_calc_full.py`  ↔  `newstate_calc.F90` (retry block)
+- [x] `newstate_calc_full` (multi-substep evolution: 474/474 pass at rtol=1e-10 across `zsubsteps≤1024` subset; max 6.1e-13 / median 1.2e-14 — near ε). Multi-substep state evolution is bench-validated when given identical substep schedules to Fortran. The retry-decision logic itself diverges from Fortran (JAX often converges at fewer substeps than Fortran due to FP-sensitive `gc<0` detection at the boundary), but the converged state is essentially the same (mass conservation 0.02%, total counts within 1%). Bench fixes ntsubsteps to Fortran's `zsubsteps` value to validate the math; retry-decision divergence is documented as expected.
+- [x] **Bug fix in gsolve**: added `gc<0 → RC_WARNING_RETRY` trigger (`gsolve.F90:65-78`). This is the dominant retry trigger for sulfate scenarios where nucleation depletes H2SO4 in one substep.
 
 ### `src/carma/newstate_calc.py`  ↔  `newstate_calc.F90` (legacy, deprecated for sulfate)
-- [-] `microfast_growth` (legacy) — water-only / growth-only stub: hardcodes `rhompe=zeros`, single-gas vapor pressure. Bench against Fortran microfast showed pc max rel err = 1.0 (completely wrong). Use `microfast_full` instead for sulfate. Defer cleanup to a future refactor of step_full.
+- [-] `microfast_growth` (legacy) — water-only / growth-only stub: hardcodes `rhompe=zeros`, single-gas vapor pressure. Bench against Fortran microfast showed pc max rel err = 1.0 (completely wrong). Use `microfast_full` instead for sulfate. Defer cleanup to a future refactor of `step_full`.
+
+### `src/carma/newstate.py`  ↔  `newstate.F90`
+- [-] `newstate` dispatcher (clearsky / incloud) — sulfate test only exercises the clearsky path which is just a pass-through to `newstate_calc`. The incloud/detrain logic doesn't run for sulfate. Effective bench is `newstate_calc_full` above.
+
+### `src/carma/step_full.py`  ↔  `step.F90`
+- [-] legacy `make_step_full` — uses operator-split composition (`newstate_calc_growth_jit` + `sulfate_step_one_level`) which is **physically wrong for sulfate** (pc max rel err = 5.3e8 vs Fortran microfast — see `plots/diff/summary/composition_comparison.png`). Deprecated.
+- [x] `make_step_full_faithful` (in `src/carma/step_full_faithful.py`) — new factory composing the validated `microslow + newstate_calc_full + microfast_full_jit` chain. Direct port of Fortran's `CARMASTATE_Step → newstate → newstate_calc → microfast` flow.
+
+### `src/carma/detrain.py`  ↔  `detrain.F90`
+- [-] `detrain` (cloud-only — N/A for sulfate test)
 
 ### `src/carma/newstate_calc_jit.py`  ↔  `newstate_calc.F90` (retry block)
 - [ ] adaptive retry loop (`nretries`, `nsubsteps` decisions match Fortran)

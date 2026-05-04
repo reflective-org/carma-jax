@@ -52,6 +52,8 @@ Array shapes (in numpy, after Fortran→C order conversion):
     told        (NZ,)                                 — prestep t snapshot
     d_gc        (NZ, NGAS)                            — substep d_gc bookkeeping
     d_t         (NZ,)                                 — substep d_t bookkeeping
+    zsubsteps   (NZ,)                                 — substeps used per layer
+    nretries    (1,)                                  — retries used (scalar→1-arr)
     relhum      (NZ,)                                 — RH for swelling
     rhop        (NZ, NBIN, NGROUP)                    — dry particle density
     r_wet       (NZ, NBIN, NGROUP)                    — wet radius (getwetr)
@@ -144,6 +146,8 @@ def _shape_map(dims):
         "told":       (NZ,),
         "d_gc":       (NZ, NGAS),
         "d_t":        (NZ,),
+        "zsubsteps":  (NZ,),
+        "nretries":   (1,),
         "relhum":     (NZ,),
         "rhop":       (NZ, NBIN, NGROUP),
         "r_wet":      (NZ, NBIN, NGROUP),
@@ -227,6 +231,8 @@ class SubstepDump:
     told:      np.ndarray
     d_gc:      np.ndarray
     d_t:       np.ndarray
+    zsubsteps: np.ndarray
+    nretries:  np.ndarray
     relhum:    np.ndarray
     rhop:      np.ndarray
     r_wet:     np.ndarray
@@ -341,6 +347,8 @@ def read_substep(out_dir, step: int, dims=None) -> SubstepDump:
         told=_load_one(_path("told"), shapes["told"]),
         d_gc=_load_one(_path("d_gc"), shapes["d_gc"]),
         d_t=_load_one(_path("d_t"), shapes["d_t"]),
+        zsubsteps=_load_one(_path("zsubsteps"), shapes["zsubsteps"]),
+        nretries=_load_one(_path("nretries"), shapes["nretries"]),
         relhum=_load_one(_path("relhum"), shapes["relhum"]),
         rhop=_load_one(_path("rhop"), shapes["rhop"]),
         r_wet=_load_one(_path("r_wet"), shapes["r_wet"]),
