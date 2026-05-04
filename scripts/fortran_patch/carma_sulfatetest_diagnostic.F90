@@ -329,6 +329,12 @@ contains
     call dump_2d(prefix, 'd_gc', cs%f_d_gc)
     call dump_1d(prefix, 'd_t', cs%f_d_t)
 
+    ! Aerosol kinematics (for setup_ckern bench)
+    call dump_1d(prefix, 'rmu', cs%f_rmu)
+    call dump_3d(prefix, 'bpm', cs%f_bpm)
+    call dump_3d(prefix, 're',  cs%f_re)
+    call dump_3d(prefix, 'vf',  cs%f_vf)
+
     ! Wet radius / density (rhopart + getwetr outputs)
     call dump_1d(prefix, 'relhum', cs%f_relhum)
     call dump_3d(prefix, 'rhop', cs%f_rhop)
@@ -362,6 +368,11 @@ contains
     ! Per-substep probe: nsubsteps at end-of-step state. Dumps the
     ! suggested ntsubsteps integer (cast to f8).
     call dump_nsubsteps_probe(prefix, cs)
+
+    ! Per-substep probe: full microslow chain (coagl → per-bin
+    ! coagp/csolve) at end-of-step state. Dumps coaglg/coagpe/pc
+    ! before & after, lets JAX bench each piece.
+    call dump_microslow_probe(prefix, cs)
 
     ! Per-substep probe: full microfast prefix at end-of-step state up
     ! through psolve. Mirrors microfast.F90: sulfnuc → growevapl →
@@ -690,6 +701,110 @@ contains
 
     deallocate(prev_ice, prev_liq, tot_ice, tot_liq, gc_pre, gc_post)
   end subroutine dump_gsolve_probe
+
+
+  !! Probe: full microslow chain at end-of-step state. Saves/restores
+  !! cstate. Sequence: zero coag accumulators, call coagl, then per
+  !! (ielem, ibin) call coagp + csolve. Dumps:
+  !!   pc_premicroslow_probe (NBIN, NELEM at iz)
+  !!   coaglg_probe (NBIN, NGROUP) — output of coagl alone
+  !!   coagpe_probe (NBIN, NELEM)  — accumulated by coagp before csolve
+  !!   pc_postmicroslow_probe (NBIN, NELEM at iz)
+  subroutine dump_microslow_probe(prefix, cs)
+    character(len=*), intent(in)            :: prefix
+    type(carmastate_type), intent(inout)    :: cs
+    real(kind=f), allocatable               :: pc_snap(:,:)
+    real(kind=f), allocatable               :: coaglg_iz(:,:), coagpe_iz(:,:)
+    integer                                 :: rc_loc, ie, ib, i
+    integer, parameter                      :: iz = 1
+    interface
+      subroutine coagl(carma, cstate, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma; type(carmastate_type), intent(inout) :: cstate
+        integer, intent(inout) :: rc
+      end subroutine coagl
+      subroutine coagp(carma, cstate, ibin, ielem, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma; type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in) :: ibin, ielem; integer, intent(inout) :: rc
+      end subroutine coagp
+      subroutine csolve(carma, cstate, ibin, ielem, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma; type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in) :: ibin, ielem; integer, intent(inout) :: rc
+      end subroutine csolve
+    end interface
+
+    if (.not. allocated(cs%f_pc) .or. .not. allocated(cs%f_coaglg)) return
+    block
+      real(kind=f), allocatable :: pc_save(:,:,:)
+      real(kind=f), allocatable :: coaglg_save(:,:,:), coagpe_save(:,:,:)
+      allocate(pc_save(size(cs%f_t), carma%f_NBIN, carma%f_NELEM))
+      allocate(coaglg_save(size(cs%f_t), carma%f_NBIN, carma%f_NGROUP))
+      allocate(coagpe_save(size(cs%f_t), carma%f_NBIN, carma%f_NELEM))
+      pc_save = cs%f_pc
+      coaglg_save = cs%f_coaglg
+      coagpe_save = cs%f_coagpe
+
+      ! Snapshot pc before microslow
+      allocate(pc_snap(carma%f_NBIN, carma%f_NELEM))
+      do ie = 1, carma%f_NELEM
+        do ib = 1, carma%f_NBIN
+          pc_snap(ib, ie) = cs%f_pc(iz, ib, ie)
+        end do
+      end do
+      call dump_alloc_2d(prefix, 'pc_premicroslow_probe', pc_snap)
+
+      ! Mirror microslow: zero accumulators, call coagl, then loop coagp+csolve
+      cs%f_coagpe(:,:,:) = 0._f
+      cs%f_coaglg(:,:,:) = 0._f
+      rc_loc = 0
+      call coagl(carma, cs, rc_loc); if (rc_loc<0) rc_loc=0
+
+      ! Dump coaglg from this iz (before any csolve mutates pc)
+      allocate(coaglg_iz(carma%f_NBIN, carma%f_NGROUP))
+      do i = 1, carma%f_NGROUP; do ib = 1, carma%f_NBIN
+        coaglg_iz(ib, i) = cs%f_coaglg(iz, ib, i)
+      end do; end do
+      call dump_alloc_2d(prefix, 'coaglg_probe', coaglg_iz)
+      deallocate(coaglg_iz)
+
+      ! Run coagp + csolve per (ielem, ibin), then dump coagpe at this iz
+      ! Note: coagp at (ibin, ielem) accumulates ONLY contributions to that
+      ! cell, but writes to all iz. For our NZ=1 case, it's just (ibin, ielem).
+      ! We capture coagpe AFTER all coagp calls finish, since csolve doesn't
+      ! reset it.
+      do ie = 1, carma%f_NELEM
+        do ib = 1, carma%f_NBIN
+          call coagp(carma, cs, ib, ie, rc_loc); if (rc_loc<0) rc_loc=0
+          call csolve(carma, cs, ib, ie, rc_loc); if (rc_loc<0) rc_loc=0
+        end do
+      end do
+
+      ! Dump coagpe at this iz
+      allocate(coagpe_iz(carma%f_NBIN, carma%f_NELEM))
+      do ie = 1, carma%f_NELEM; do ib = 1, carma%f_NBIN
+        coagpe_iz(ib, ie) = cs%f_coagpe(iz, ib, ie)
+      end do; end do
+      call dump_alloc_2d(prefix, 'coagpe_probe', coagpe_iz)
+      deallocate(coagpe_iz)
+
+      ! Snapshot pc after csolve
+      do ie = 1, carma%f_NELEM
+        do ib = 1, carma%f_NBIN
+          pc_snap(ib, ie) = cs%f_pc(iz, ib, ie)
+        end do
+      end do
+      call dump_alloc_2d(prefix, 'pc_postmicroslow_probe', pc_snap)
+      deallocate(pc_snap)
+
+      ! Restore
+      cs%f_pc = pc_save
+      cs%f_coaglg = coaglg_save
+      cs%f_coagpe = coagpe_save
+      deallocate(pc_save, coaglg_save, coagpe_save)
+    end block
+  end subroutine dump_microslow_probe
 
 
   !! Probe: nsubsteps at end-of-step state. Saves/restores cstate.
@@ -1151,6 +1266,52 @@ contains
     end block
 
     deallocate(dm2d, pratt3d, prat3d, pden1_2d, palr2d, igrowgas_r)
+
+    ! Coag setup tables (kbin, volx, pkernel, npairl, npairu)
+    ! Shapes (Fortran 1-based):
+    !   kbin    (NGROUP,NGROUP,NGROUP,NBIN,NBIN)
+    !   volx    (NGROUP,NGROUP,NGROUP,NBIN,NBIN)
+    !   pkernel (NBIN,NBIN,NGROUP,NGROUP,NGROUP,6)
+    !   npairl  (NGROUP,NBIN)
+    !   npairu  (NGROUP,NBIN)
+    block
+      real(kind=f), allocatable :: kbin5(:,:,:,:,:), volx5(:,:,:,:,:)
+      real(kind=f), allocatable :: pkernel6(:,:,:,:,:,:)
+      real(kind=f), allocatable :: npairl_r(:,:), npairu_r(:,:)
+      integer :: i1,i2,i3,i4,i5,i6
+      if (allocated(carma%f_kbin)) then
+        allocate(kbin5(ng, ng, ng, nb, nb))
+        do i5 = 1, nb; do i4 = 1, nb
+          do i3 = 1, ng; do i2 = 1, ng; do i1 = 1, ng
+            kbin5(i1,i2,i3,i4,i5) = real(carma%f_kbin(i1,i2,i3,i4,i5), kind=f)
+          end do; end do; end do
+        end do; end do
+        call dump_alloc_5d(prefix, 'kbin', kbin5)
+        deallocate(kbin5)
+      end if
+      if (allocated(carma%f_volx)) then
+        allocate(volx5(ng, ng, ng, nb, nb))
+        volx5 = carma%f_volx
+        call dump_alloc_5d(prefix, 'volx', volx5)
+        deallocate(volx5)
+      end if
+      if (allocated(carma%f_pkernel)) then
+        allocate(pkernel6(nb, nb, ng, ng, ng, 6))
+        pkernel6 = carma%f_pkernel
+        call dump_alloc_6d(prefix, 'pkernel', pkernel6)
+        deallocate(pkernel6)
+      end if
+      if (allocated(carma%f_npairl)) then
+        allocate(npairl_r(ng, nb), npairu_r(ng, nb))
+        do i2 = 1, nb; do i1 = 1, ng
+          npairl_r(i1, i2) = real(carma%f_npairl(i1, i2), kind=f)
+          npairu_r(i1, i2) = real(carma%f_npairu(i1, i2), kind=f)
+        end do; end do
+        call dump_alloc_2d(prefix, 'npairl', npairl_r)
+        call dump_alloc_2d(prefix, 'npairu', npairu_r)
+        deallocate(npairl_r, npairu_r)
+      end if
+    end block
   end subroutine dump_carma_ppm
 
 
@@ -1289,17 +1450,20 @@ contains
   subroutine dump_carma_bins(prefix)
     character(len=*), intent(in)         :: prefix
     real(kind=f), allocatable            :: r2d(:,:), rmass2d(:,:), rmassup2d(:,:)
-    real(kind=f), allocatable            :: rmrat1d(:)
+    real(kind=f), allocatable            :: rmrat1d(:), rrat2d(:,:), rprat2d(:,:)
     integer                              :: ig, ib, nb, ng
 
     nb = carma%f_NBIN
     ng = carma%f_NGROUP
     allocate(r2d(nb, ng), rmass2d(nb, ng), rmassup2d(nb, ng), rmrat1d(ng))
+    allocate(rrat2d(nb, ng), rprat2d(nb, ng))
     do ig = 1, ng
       do ib = 1, nb
         r2d(ib, ig)       = carma%f_group(ig)%f_r(ib)
         rmass2d(ib, ig)   = carma%f_group(ig)%f_rmass(ib)
         rmassup2d(ib, ig) = carma%f_group(ig)%f_rmassup(ib)
+        rrat2d(ib, ig)    = carma%f_group(ig)%f_rrat(ib)
+        rprat2d(ib, ig)   = carma%f_group(ig)%f_rprat(ib)
       end do
       rmrat1d(ig) = carma%f_group(ig)%f_rmrat
     end do
@@ -1307,7 +1471,9 @@ contains
     call dump_alloc_2d(prefix, 'rmass_bin',   rmass2d)
     call dump_alloc_2d(prefix, 'rmassup_bin', rmassup2d)
     call dump_alloc_1d(prefix, 'rmrat_group', rmrat1d)
-    deallocate(r2d, rmass2d, rmassup2d, rmrat1d)
+    call dump_alloc_2d(prefix, 'rrat',        rrat2d)
+    call dump_alloc_2d(prefix, 'rprat',       rprat2d)
+    deallocate(r2d, rmass2d, rmassup2d, rmrat1d, rrat2d, rprat2d)
   end subroutine dump_carma_bins
 
 
@@ -1345,6 +1511,34 @@ contains
     write(u) arr
     close(u)
   end subroutine dump_alloc_3d
+
+
+  subroutine dump_alloc_5d(prefix, name, arr)
+    character(len=*), intent(in)         :: prefix, name
+    real(kind=f), intent(in)             :: arr(:,:,:,:,:)
+    character(len=512)                   :: path
+    integer                              :: u, ios
+    path = trim(prefix) // trim(name) // '.bin'
+    open(newunit=u, file=trim(path), access='stream', &
+         status='replace', iostat=ios)
+    if (ios /= 0) return
+    write(u) arr
+    close(u)
+  end subroutine dump_alloc_5d
+
+
+  subroutine dump_alloc_6d(prefix, name, arr)
+    character(len=*), intent(in)         :: prefix, name
+    real(kind=f), intent(in)             :: arr(:,:,:,:,:,:)
+    character(len=512)                   :: path
+    integer                              :: u, ios
+    path = trim(prefix) // trim(name) // '.bin'
+    open(newunit=u, file=trim(path), access='stream', &
+         status='replace', iostat=ios)
+    if (ios /= 0) return
+    write(u) arr
+    close(u)
+  end subroutine dump_alloc_6d
 
 
   subroutine dump_alloc_2d(prefix, name, arr)
