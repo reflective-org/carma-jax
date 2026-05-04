@@ -609,6 +609,121 @@ def test_binary_nuc_zhao1995_matches_fortran():
         raise AssertionError("\n".join(msg_lines))
 
 
+def test_microfast_growth_matches_fortran():
+    """Phase 9.1: JAX microfast_growth vs Fortran microfast.F90 (full chain).
+
+    Probe `dump_microfast_probe` calls Fortran's `microfast` directly at
+    end-of-step state and dumps `pc_post`, `gc_post`, `t_post`.
+
+    JAX `microfast_growth` is a growth-only kernel (rhompe=0 hardcoded,
+    single-gas H2O vapor pressure). The bench feeds it the same
+    `pc_pre`, `gc_pre`, `t_pre` and compares.
+
+    EXPECTED MISMATCH: JAX microfast_growth does NOT call sulfnuc and
+    does NOT compute H2SO4 supersaturation. For sulfate scenarios where
+    nucleation is active, this will produce different pc_post and
+    gc_post than Fortran microfast.
+
+    Documents the gap quantitatively for tracker / fix planning.
+    """
+    from carma.newstate_calc import microfast_growth
+    from carma.enums import ElementType
+    import jax.numpy as jnp
+
+    NBIN, NGROUP, NELEM, NGAS = 38, 1, 1, 2
+
+    d0 = read_substep(_DIFF_BASE / "scen_000", step=1)
+    if d0.dm_bin is None:
+        pytest.skip("static tables missing — re-run scripts/run_diagnostic_ensemble.py")
+
+    rmass_2d_j = jnp.asarray(d0.rmass_bin)
+    dm_2d_j = jnp.asarray(d0.dm_bin)
+    pratt_j = jnp.asarray(d0.pratt); prat_j = jnp.asarray(d0.prat)
+    pden1_j = jnp.asarray(d0.pden1); palr_j = jnp.asarray(d0.palr)
+    is_ice_arr = (False,)
+    # JAX microfast_growth uses gwtmol_arr[0] for the supersaturation
+    # call — the sulfate test's gas 0 is H2O (18.016).
+    igrowgas_arr = (1,)        # element 0 grows H2SO4 (Fortran 1-based → 1 here)
+    ienconc_arr = (0,)
+    igroup_arr = (0,)
+    gwtmol_arr = (18.016,)     # gas 0 = H2O (matches what microfast_growth references)
+
+    pc_max_rel = {}
+    gc_max_rel = {}
+    nuc_active_count = 0       # how many scenarios have rhompe > 0 (sulfnuc fired)
+
+    for scen_id in _ALL_SCEN_IDS:
+        scen_dir = _DIFF_BASE / f"scen_{scen_id:03d}"
+        d = read_substep(scen_dir, step=1)
+        pc_path = scen_dir / "substep_0001_pc_premicrofast_probe.bin"
+        if not pc_path.exists():
+            pytest.skip("microfast_probe missing — re-run scripts/run_diagnostic_ensemble.py")
+
+        pc_pre = np.fromfile(pc_path, dtype=np.float64).reshape(NBIN, NELEM, order="F")
+        pc_post_F = np.fromfile(scen_dir / "substep_0001_pc_postmicrofast_probe.bin",
+                                dtype=np.float64).reshape(NBIN, NELEM, order="F")
+        gc_pre = np.fromfile(scen_dir / "substep_0001_gc_premicrofast_probe.bin", dtype=np.float64)
+        gc_post_F = np.fromfile(scen_dir / "substep_0001_gc_postmicrofast_probe.bin",
+                                 dtype=np.float64)
+        t_arr = np.fromfile(scen_dir / "substep_0001_t_microfast_probe.bin", dtype=np.float64)
+
+        # Check whether sulfnuc fired in Fortran (rhompe_probe was dumped earlier)
+        rhompe_path = scen_dir / "substep_0001_rhompe_probe.bin"
+        if rhompe_path.exists():
+            rhompe_F = np.fromfile(rhompe_path, dtype=np.float64)
+            if (rhompe_F > 0).any():
+                nuc_active_count += 1
+
+        # JAX needs the auxiliary fields (akelvin, gro, etc.) — these are in d.
+        pc_in = jnp.zeros((1, NBIN, NELEM)).at[0, :, :].set(jnp.asarray(pc_pre))
+        gc_in = jnp.zeros((1, NGAS)).at[0, :].set(jnp.asarray(gc_pre))
+        t_in = jnp.asarray([t_arr[0]])
+
+        try:
+            pc_j, gc_j, t_j, rlheat_j, rc_j = microfast_growth(
+                pc_in, gc_in, t_in, 0, 1800.0,
+                jnp.asarray(d.rhoa), jnp.asarray(d.zmet),
+                jnp.zeros((1, NGAS)),  # rlhe placeholder (not in dump)
+                jnp.zeros((1, NGAS)),  # rlhm placeholder
+                jnp.zeros((1, NGAS)),  # diffus placeholder
+                jnp.asarray(d.akelvin), jnp.asarray(d.akelvini),
+                jnp.asarray(d.gro), jnp.asarray(d.gro1),
+                jnp.zeros((NGAS,)),    # gro2 placeholder
+                jnp.asarray(d.rup_wet), rmass_2d_j, dm_2d_j,
+                jnp.asarray(d.rup_wet),  # rlow_wet placeholder (not in dump)
+                pratt_j, prat_j, pden1_j, palr_j,
+                is_ice_arr, igrowgas_arr, ienconc_arr,
+                igroup_arr, gwtmol_arr,
+                NBIN, NGROUP, NGAS, NELEM,
+                dt_threshold=jnp.float64(0.0),
+                ds_threshold_arr=jnp.zeros(NGAS),
+                scale_threshold=jnp.float64(1.0),
+                itype_arr=(int(ElementType.I_VOLATILE),),
+            )
+        except Exception as e:
+            pytest.fail(f"scen {scen_id}: microfast_growth raised {type(e).__name__}: {e}")
+
+        pc_j_arr = np.asarray(pc_j[0])  # (NBIN, NELEM)
+        gc_j_arr = np.asarray(gc_j[0])
+
+        _, m_pc = compute_rel_err(pc_j_arr, pc_post_F)
+        _, m_gc = compute_rel_err(gc_j_arr, gc_post_F)
+        pc_max_rel[scen_id] = m_pc
+        gc_max_rel[scen_id] = m_gc
+
+    sd = _summary_plot_dir()
+    make_summary_plot("microfast_pc",  pc_max_rel, sd)
+    make_summary_plot("microfast_gc",  gc_max_rel, sd)
+
+    # Don't fail — this is a documentation-of-gap bench. Report stats.
+    pc_arr = np.array(list(pc_max_rel.values()))
+    gc_arr = np.array(list(gc_max_rel.values()))
+    print(f"\nmicrofast_growth vs Fortran microfast (1000 scenarios):")
+    print(f"  Sulfnuc active in {nuc_active_count}/1000 scenarios")
+    print(f"  pc max rel err: max={pc_arr.max():.3e}  median={np.median(pc_arr):.3e}  pass@1e-10={(pc_arr<=1e-10).sum()}/1000")
+    print(f"  gc max rel err: max={gc_arr.max():.3e}  median={np.median(gc_arr):.3e}  pass@1e-10={(gc_arr<=1e-10).sum()}/1000")
+
+
 def test_microslow_matches_fortran():
     """Phase 8.18-8.20: JAX microslow (coagl + coagp + csolve composed)
     matches Fortran's pc_postmicroslow.

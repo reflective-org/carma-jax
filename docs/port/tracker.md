@@ -160,7 +160,7 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
 ## Phase 9 — `step_full` / microfast composition
 
 ### `src/carma/newstate_calc.py`  ↔  `newstate_calc.F90`
-- [ ] `microfast_growth` (composed; bench against full microfast.F90 output per substep)
+- [/] `microfast_growth` — **structural gap exposed**. JAX `microfast_growth` is a growth-only kernel: it hardcodes `rhompe = zeros` (no sulfnuc wiring), uses `vaporp_h2o_murphy2005` for whichever gas index 0 happens to be (H2O in sulfate test), and computes supersaturation only for gas 0 — but for sulfate growth, the *growing* gas is H2SO4 (gas 1), so the entire growth chain operates on the wrong supersaturation. Bench result: **pc max rel err = 1.0**, **gc max rel err = 2.0** across all 1000 scenarios — the sulfnuc-driven peak in nucbin is missing and gc[H2SO4] is essentially unchanged in JAX while Fortran shows real consumption. Sulfnuc fires in 1000/1000 scenarios. **Fix**: rewrite microfast_growth to (a) call sulfnuc when both H2O and H2SO4 are present, (b) thread rhompe into psolve, (c) compute pvapl/pvapi and supsatl/supsati per-gas via the correct routine (Murphy 2005 for H2O, Ayers 1980 for H2SO4), (d) loop pheat over the right `igrowgas`. Probe `dump_microfast_probe` is in place. **Awaiting user direction before patching.**
 
 ### `src/carma/newstate_calc_jit.py`  ↔  `newstate_calc.F90` (retry block)
 - [ ] adaptive retry loop (`nretries`, `nsubsteps` decisions match Fortran)

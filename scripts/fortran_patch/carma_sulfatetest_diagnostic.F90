@@ -374,6 +374,13 @@ contains
     ! before & after, lets JAX bench each piece.
     call dump_microslow_probe(prefix, cs)
 
+    ! Per-substep probe: full microfast at end-of-step state. Mirrors
+    ! microfast.F90: zeromicro → totalcondensate → supersat → sulfnuc →
+    ! growevapl → cloud nuc/freeze (no-op for sulfate) → growp/upgxfer/
+    ! psolve loop → evapp → downgxfer → downgevapply → gsolve → tsolve.
+    ! Saves/restores cstate. Dumps pc/gc/t before & after.
+    call dump_microfast_probe(prefix, cs)
+
     ! Per-substep probe: full microfast prefix at end-of-step state up
     ! through psolve. Mirrors microfast.F90: sulfnuc → growevapl →
     ! per-bin growp → psolve. Dumps pc_postpsolve_probe (NBIN, NELEM at iz).
@@ -701,6 +708,86 @@ contains
 
     deallocate(prev_ice, prev_liq, tot_ice, tot_liq, gc_pre, gc_post)
   end subroutine dump_gsolve_probe
+
+
+  !! Probe: invoke Fortran's microfast directly at end-of-step state and
+  !! dump pc / gc / t before and after. Saves/restores cstate. dtime is
+  !! the test's substep size = dtime_orig / 1 (single substep at end-of-step).
+  subroutine dump_microfast_probe(prefix, cs)
+    character(len=*), intent(in)            :: prefix
+    type(carmastate_type), intent(inout)    :: cs
+    real(kind=f), allocatable               :: pc_pre(:,:), pc_post(:,:)
+    real(kind=f), allocatable               :: gc_pre(:), gc_post(:)
+    real(kind=f) :: t_pre, t_post
+    integer                                 :: rc_loc, ie, ib
+    integer, parameter                      :: iz = 1
+    real(kind=f), parameter                 :: scale_thr = 1._f
+    interface
+      subroutine microfast(carma, cstate, iz, scale_threshold, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma
+        type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in) :: iz
+        real(kind=f) :: scale_threshold
+        integer, intent(inout) :: rc
+      end subroutine microfast
+    end interface
+
+    if (.not. allocated(cs%f_pc)) return
+    allocate(pc_pre(carma%f_NBIN, carma%f_NELEM))
+    allocate(pc_post(carma%f_NBIN, carma%f_NELEM))
+    allocate(gc_pre(carma%f_NGAS), gc_post(carma%f_NGAS))
+
+    block
+      real(kind=f), allocatable :: pc_save(:,:,:), gc_save(:,:), t_save(:)
+      real(kind=f), allocatable :: rlheat_save(:)
+      real(kind=f) :: rlprod_save
+      allocate(pc_save(size(cs%f_t), carma%f_NBIN, carma%f_NELEM))
+      allocate(gc_save(size(cs%f_t), carma%f_NGAS), t_save(size(cs%f_t)))
+      allocate(rlheat_save(size(cs%f_t)))
+      pc_save = cs%f_pc; gc_save = cs%f_gc; t_save = cs%f_t
+      rlheat_save = cs%f_rlheat; rlprod_save = cs%f_rlprod
+
+      ! Snapshot pc/gc/t before microfast
+      do ie = 1, carma%f_NELEM
+        do ib = 1, carma%f_NBIN
+          pc_pre(ib, ie) = cs%f_pc(iz, ib, ie)
+        end do
+      end do
+      gc_pre = cs%f_gc(iz, :)
+      t_pre = cs%f_t(iz)
+
+      ! Run microfast (which internally zeromicros & does the full chain)
+      rc_loc = 0
+      call microfast(carma, cs, iz, scale_thr, rc_loc); if (rc_loc<0) rc_loc=0
+
+      ! Snapshot pc/gc/t after microfast
+      do ie = 1, carma%f_NELEM
+        do ib = 1, carma%f_NBIN
+          pc_post(ib, ie) = cs%f_pc(iz, ib, ie)
+        end do
+      end do
+      gc_post = cs%f_gc(iz, :)
+      t_post = cs%f_t(iz)
+
+      ! Restore
+      cs%f_pc = pc_save; cs%f_gc = gc_save; cs%f_t = t_save
+      cs%f_rlheat = rlheat_save; cs%f_rlprod = rlprod_save
+      deallocate(pc_save, gc_save, t_save, rlheat_save)
+    end block
+
+    call dump_alloc_2d(prefix, 'pc_premicrofast_probe',  pc_pre)
+    call dump_alloc_2d(prefix, 'pc_postmicrofast_probe', pc_post)
+    call dump_alloc_1d(prefix, 'gc_premicrofast_probe',  gc_pre)
+    call dump_alloc_1d(prefix, 'gc_postmicrofast_probe', gc_post)
+    block
+      real(kind=f) :: tarr(2)
+      tarr(1) = t_pre; tarr(2) = t_post
+      call dump_alloc_1d(prefix, 't_microfast_probe', tarr)
+    end block
+
+    deallocate(pc_pre, pc_post, gc_pre, gc_post)
+  end subroutine dump_microfast_probe
 
 
   !! Probe: full microslow chain at end-of-step state. Saves/restores
