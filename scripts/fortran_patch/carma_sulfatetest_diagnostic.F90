@@ -327,6 +327,7 @@ contains
     call dump_3d(prefix, 'rhop', cs%f_rhop)
     call dump_3d(prefix, 'r_wet', cs%f_r_wet)
     call dump_3d(prefix, 'rhop_wet', cs%f_rhop_wet)
+    call dump_3d(prefix, 'rup_wet', cs%f_rup_wet)
 
     ! Auxiliary state used by gasexchange (cmf, totevap as float for binary I/O).
     call dump_2d(prefix, 'cmf', cs%f_cmf)
@@ -336,6 +337,13 @@ contains
     ! end-of-step cstate so the JAX bench has matching inputs/outputs
     ! that bypass the multi-substep gsolve/tsolve evolution complication.
     call dump_zhao1995_probe(prefix, cs)
+
+    ! Per-substep probe: invoke pheat per bin and dump dmdt (NBIN,).
+    ! pheat computes the mass growth rate for one particle in each bin,
+    ! including optional particle heating (do_pheat=false in sulfate test,
+    ! so the simple Köhler formula runs). dmdt is the key output that feeds
+    ! growevapl but is not stored in cstate directly.
+    call dump_pheat_probe(prefix, cs)
 
     ! Per-substep probe: invoke maxconc at end-of-step state and dump the
     ! result. pconmax is computed pre-microfast inside newstate_calc.F90:175
@@ -440,6 +448,51 @@ contains
   !! newstate_calc.F90:175, which is computed on pre-microfast pc. This
   !! probe gives end-of-step (pc, zmet) → pconmax so the JAX bench
   !! has a matched pair.
+  !! Probe: call pheat for each bin at end-of-step state and dump the
+  !! resulting dmdt array (NBIN,). Sulfate test: NGROUP=1, igas=igash2so4,
+  !! NZ=1. do_pheat=false and NWAVE=0, so the simple no-radiation branch
+  !! runs: dmdt = pvap*(ss+1-akas)*gro/(1+gro*gro1*pvap).
+  subroutine dump_pheat_probe(prefix, cs)
+    character(len=*), intent(in)            :: prefix
+    type(carmastate_type), intent(inout)    :: cs
+    real(kind=f), allocatable               :: dmdt(:)
+    integer                                 :: ib, nb, igrp, iep, igas_s
+    integer                                 :: rc_loc
+    integer, parameter                      :: iz = 1
+    interface
+      subroutine pheat(carma, cstate, iz, igroup, iepart, ibin, igas, dmdt, rc)
+        use carma_precision_mod
+        use carma_types_mod
+        type(carma_type), intent(in)         :: carma
+        type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in)                  :: iz, igroup, iepart, ibin, igas
+        real(kind=f), intent(out)            :: dmdt
+        integer, intent(inout)               :: rc
+      end subroutine pheat
+    end interface
+
+    if (.not. allocated(cs%f_gro)) return
+    nb      = carma%f_NBIN
+    igrp    = 1   ! single group
+    iep     = carma%f_group(igrp)%f_ienconc
+    igas_s  = carma%f_igash2so4   ! H2SO4 gas index (1-based Fortran)
+    if (igas_s == 0) return       ! gas not registered
+
+    ! growevapl calls pheat for ibin=1..NBIN-1 (1-based) only — the last
+    ! bin has no upper boundary, so pheat is never called for it.
+    ! Probe matches that range and sets dmdt(nb)=0 for the unused slot.
+    allocate(dmdt(nb))
+    dmdt(:) = 0._f
+    rc_loc = 0
+    do ib = 1, nb-1
+      call pheat(carma, cs, iz, igrp, iep, ib, igas_s, dmdt(ib), rc_loc)
+      if (rc_loc < 0) then; dmdt(ib) = 0._f; rc_loc = 0; end if
+    end do
+    call dump_alloc_1d(prefix, 'pheat_probe', dmdt)
+    deallocate(dmdt)
+  end subroutine dump_pheat_probe
+
+
   subroutine dump_maxconc_probe(prefix, cs)
     character(len=*), intent(in)            :: prefix
     type(carmastate_type), intent(inout)    :: cs
