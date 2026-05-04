@@ -118,7 +118,7 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
 - [-] `evap_poly` — same gate (called from `evapp.F90:181`). Defer.
 
 ### `src/carma/solvers/psolve.py`  ↔  `psolve.F90`
-- [ ] `psolve`
+- [x] `psolve` (1000/1000 pass at rtol 1e-10; max 4.0e-15, median ~6.5e-16, near machine ε). **Sequential dependency**: Fortran's microfast loop `do ielem; do ibin; growp; upgxfer; psolve` has growp at bin `i` reading `pc[i-1]` AFTER psolve at `i-1` already updated it. The bench mirrors that loop order — pre-computing growpe in advance gave bin-3+ drift. Probe `dump_psolve_probe` runs the full prefix `maxconc → sulfnuc → growevapl → per-(ie,ib){growp,upgxfer,psolve}` at end-of-step state and dumps `pc_prepsolve_probe`, `rhompe_probe`, `pc_postpsolve_probe`.
 
 ### `src/carma/solvers/gsolve.py`  ↔  `gsolve.F90`
 - [ ] `gsolve`
