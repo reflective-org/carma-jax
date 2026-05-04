@@ -706,7 +706,118 @@ def test_microfast_full_matches_fortran():
 # test_microfast_full_matches_fortran above.
 
 
-def test_microfast_full_jit_matches_fortran():
+def test_newstate_calc_full_substep_evolution_matches_fortran():
+    """Phase 9.2: multi-substep state evolution given identical
+    substep schedules.
+
+    The retry-decision logic in Fortran ``newstate_calc.F90`` is
+    triggered by ``gc < 0`` detection in ``gsolve``, which is
+    floating-point-sensitive at the boundary. JAX and Fortran detect
+    these transients at slightly different substep counts due to
+    accumulated rounding, so they pick *different* converged
+    ``ntsubsteps`` values for the same scenario. The final converged
+    state, however, is essentially identical (mass conservation
+    ~1e-4 relative, total counts within 0.02%).
+
+    To validate the math (not the decision logic), this bench fixes
+    JAX's ``ntsubsteps`` to Fortran's ``zsubsteps`` (per scenario) and
+    runs the full multi-substep loop with the linear gas/temperature
+    drift. Compares final ``pc``, ``gc``, ``t`` to Fortran's post-step
+    state.
+
+    Subset: scenarios with ``zsubsteps <= 1024`` (474/1000 scenarios,
+    avg ~246 substeps/scen, ~117k total inner substeps) — runtime
+    bounded under 30 s.
+    """
+    from carma.microfast_full import make_microfast_full_jit
+    import jax.numpy as jnp
+
+    NBIN, NGROUP, NELEM, NGAS = 38, 1, 1, 2
+    DTIME = 1800.0
+    NTS_LIMIT = 1024
+
+    d0 = read_substep(_DIFF_BASE / "scen_000", step=1)
+    if d0.dm_bin is None or d0.zsubsteps is None:
+        pytest.skip("retry-state dump fields missing — re-run scripts/run_diagnostic_ensemble.py")
+
+    rmass_2d_j = jnp.asarray(d0.rmass_bin)
+    dm_2d_j = jnp.asarray(d0.dm_bin)
+    rmassup_j = jnp.asarray(d0.rmassup_bin[:, 0])
+    rmrat_v = float(d0.rmrat_group[0])
+    r_bins_j = jnp.asarray(d0.r_bin[:, 0])
+    pratt_j = jnp.asarray(d0.pratt); prat_j = jnp.asarray(d0.prat)
+    pden1_j = jnp.asarray(d0.pden1); palr_j = jnp.asarray(d0.palr)
+    ds_thr = jnp.zeros(NGAS)
+
+    mf_jit = make_microfast_full_jit(
+        nbin=NBIN, ngroup=NGROUP, nelem=NELEM, ngas=NGAS,
+    )
+
+    pc_max_rel = {}
+    gc_max_rel = {}
+    failures = []
+
+    for scen_id in _ALL_SCEN_IDS:
+        scen_dir = _DIFF_BASE / f"scen_{scen_id:03d}"
+        d = read_substep(scen_dir, step=1)
+        nts_F = int(d.zsubsteps[0])
+        if nts_F > NTS_LIMIT:
+            continue
+
+        rlhe_arr = np.fromfile(scen_dir / "substep_0001_rlhe_probe.bin",
+                               dtype=np.float64)
+        rlhm_arr = np.fromfile(scen_dir / "substep_0001_rlhm_probe.bin",
+                               dtype=np.float64)
+        rlhe = jnp.asarray(rlhe_arr).reshape(1, NGAS)
+        rlhm = jnp.asarray(rlhm_arr).reshape(1, NGAS)
+
+        pc = jnp.asarray(d.pcl)
+        gc = jnp.asarray(d.gcl)
+        t = jnp.asarray(d.told)
+        d_gc_j = jnp.asarray(d.d_gc)
+        d_t_j = jnp.asarray(d.d_t)
+        dtime_sub = DTIME / nts_F
+        fraction = 1.0 / nts_F
+
+        for _isub in range(nts_F):
+            gc = gc + d_gc_j * fraction
+            t = t + d_t_j * fraction
+            pc, gc, t, _, _ = mf_jit(
+                pc, gc, t, dtime_sub,
+                jnp.asarray(d.rhoa), jnp.asarray(d.zmet),
+                jnp.asarray(d.akelvin), jnp.asarray(d.akelvini),
+                jnp.asarray(d.gro), jnp.asarray(d.gro1),
+                jnp.asarray(d.rup_wet),
+                rmass_2d_j, dm_2d_j, rmassup_j, r_bins_j, rmrat_v,
+                pratt_j, prat_j, pden1_j, palr_j,
+                rlhe, rlhm, ds_thr,
+            )
+
+        pc_J = np.asarray(pc[0])
+        gc_J = np.asarray(gc[0])
+
+        _, m_pc = compute_rel_err(pc_J, d.pc[0])
+        _, m_gc = compute_rel_err(gc_J, d.gc[0])
+        pc_max_rel[scen_id] = m_pc
+        gc_max_rel[scen_id] = m_gc
+
+        tol = _tol_for("microfast")
+        if m_pc > tol:
+            failures.append(("pc", scen_id, m_pc))
+        if m_gc > tol:
+            failures.append(("gc", scen_id, m_gc))
+
+    sd = _summary_plot_dir()
+    make_summary_plot("newstate_substep_pc", pc_max_rel, sd)
+    make_summary_plot("newstate_substep_gc", gc_max_rel, sd)
+
+    if failures:
+        msg_lines = [f"newstate_calc multi-substep evolution mismatched on {len(failures)} (output, scen):"]
+        for which, scen_id, err in failures[:10]:
+            msg_lines.append(f"  {which} scen {scen_id}: rel err {err:.3e}")
+        if len(failures) > 10:
+            msg_lines.append(f"  ... and {len(failures) - 10} more")
+        raise AssertionError("\n".join(msg_lines))
     """Phase 9.1 JIT: ``make_microfast_full_jit`` returns a JIT'd closure
     using ``lax.scan`` for the per-(ie, ib) loop. Bench-validated against
     the same Fortran microfast probe as the non-JIT version.
