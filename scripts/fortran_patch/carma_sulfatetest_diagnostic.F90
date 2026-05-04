@@ -343,6 +343,10 @@ contains
     ! sulfate scope (rnuclg=0 throughout).
     call dump_growp_probe(prefix, cs)
 
+    ! Per-substep probe: totalcondensate + gsolve at end-of-step state.
+    ! Internally saves/restores pc, gc, t so other probes remain valid.
+    call dump_gsolve_probe(prefix, cs)
+
     ! Per-substep probe: full microfast prefix at end-of-step state up
     ! through psolve. Mirrors microfast.F90: sulfnuc → growevapl →
     ! per-bin growp → psolve. Dumps pc_postpsolve_probe (NBIN, NELEM at iz).
@@ -529,6 +533,149 @@ contains
   end subroutine dump_growp_probe
 
 
+  !! Probe: totalcondensate + gsolve at end-of-step state.
+  !! 1. Compute previous_ice/previous_liquid via totalcondensate on the
+  !!    starting cstate (the dump's pc).
+  !! 2. Run the full microfast evolution sequence (sulfnuc → growevapl →
+  !!    psolve loop → evapp → downgevapply) to produce the post-evolution pc.
+  !! 3. Compute total_ice/total_liquid via totalcondensate on post pc.
+  !! 4. Snapshot gc[iz,:], call gsolve, dump gc_pregsolve, gc_postgsolve.
+  !! 5. Also dumps previous_ice, total_ice, previous_liquid, total_liquid.
+  subroutine dump_gsolve_probe(prefix, cs)
+    character(len=*), intent(in)            :: prefix
+    type(carmastate_type), intent(inout)    :: cs
+    real(kind=f), allocatable               :: prev_ice(:), prev_liq(:)
+    real(kind=f), allocatable               :: tot_ice(:), tot_liq(:)
+    real(kind=f), allocatable               :: gc_pre(:), gc_post(:)
+    integer                                 :: rc_loc, ie, ib, ng
+    integer, parameter                      :: iz = 1
+    real(kind=f), parameter                 :: scale_thr = 1._f
+    interface
+      subroutine maxconc(carma, cstate, iz, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma; type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in) :: iz; integer, intent(inout) :: rc
+      end subroutine maxconc
+      subroutine sulfnuc(carma, cstate, iz, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma; type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in) :: iz; integer, intent(inout) :: rc
+      end subroutine sulfnuc
+      subroutine growevapl(carma, cstate, iz, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma; type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in) :: iz; integer, intent(inout) :: rc
+      end subroutine growevapl
+      subroutine growp(carma, cstate, iz, ibin, ielem, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma; type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in) :: iz, ibin, ielem; integer, intent(inout) :: rc
+      end subroutine growp
+      subroutine upgxfer(carma, cstate, iz, ibin, ielem, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma; type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in) :: iz, ibin, ielem; integer, intent(inout) :: rc
+      end subroutine upgxfer
+      subroutine psolve(carma, cstate, iz, ibin, ielem, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma; type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in) :: iz, ibin, ielem; integer, intent(inout) :: rc
+      end subroutine psolve
+      subroutine evapp(carma, cstate, iz, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma; type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in) :: iz; integer, intent(inout) :: rc
+      end subroutine evapp
+      subroutine downgxfer(carma, cstate, iz, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma; type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in) :: iz; integer, intent(inout) :: rc
+      end subroutine downgxfer
+      subroutine downgevapply(carma, cstate, iz, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma; type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in) :: iz; integer, intent(inout) :: rc
+      end subroutine downgevapply
+      subroutine totalcondensate(carma, cstate, iz, total_ice, total_liquid, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma; type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in) :: iz
+        real(kind=f), intent(out) :: total_ice(2), total_liquid(2)  ! NGAS=2 in sulfate test
+        integer, intent(inout) :: rc
+      end subroutine totalcondensate
+      subroutine gsolve(carma, cstate, iz, previous_ice, previous_liquid, scale_threshold, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma; type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in) :: iz
+        real(kind=f), intent(in) :: previous_ice(2), previous_liquid(2)  ! NGAS=2
+        real(kind=f) :: scale_threshold
+        integer, intent(inout) :: rc
+      end subroutine gsolve
+    end interface
+
+    if (.not. allocated(cs%f_gc)) return
+    ng = carma%f_NGAS
+    allocate(prev_ice(ng), prev_liq(ng), tot_ice(ng), tot_liq(ng))
+    allocate(gc_pre(ng), gc_post(ng))
+
+    ! Save state that this probe will mutate, restore at end
+    block
+      real(kind=f), allocatable :: pc_save(:,:,:), gc_save(:,:), t_save(:)
+      real(kind=f), allocatable :: rlheat_save(:)
+      allocate(pc_save(size(cs%f_t), carma%f_NBIN, carma%f_NELEM))
+      allocate(gc_save(size(cs%f_t), ng), t_save(size(cs%f_t)))
+      allocate(rlheat_save(size(cs%f_t)))
+      pc_save = cs%f_pc; gc_save = cs%f_gc; t_save = cs%f_t
+      rlheat_save = cs%f_rlheat
+
+    ! Step 1: previous_ice/liquid from starting pc
+    rc_loc = 0
+    call totalcondensate(carma, cs, iz, prev_ice, prev_liq, rc_loc); if (rc_loc<0) rc_loc=0
+
+    ! Step 2: full microfast evolution
+    cs%f_growlg(:,:) = 0._f; cs%f_evaplg(:,:) = 0._f
+    cs%f_growpe(:,:) = 0._f; cs%f_evappe(:,:) = 0._f
+    cs%f_rnucpe(:,:) = 0._f; cs%f_rhompe(:,:) = 0._f
+    cs%f_rnuclg(:,:,:) = 0._f
+    call maxconc(carma, cs, iz, rc_loc); if (rc_loc<0) rc_loc=0
+    call sulfnuc(carma, cs, iz, rc_loc); if (rc_loc<0) rc_loc=0
+    call growevapl(carma, cs, iz, rc_loc); if (rc_loc<0) rc_loc=0
+    do ie = 1, carma%f_NELEM
+      do ib = 1, carma%f_NBIN
+        call growp(carma, cs, iz, ib, ie, rc_loc); if (rc_loc<0) rc_loc=0
+        call upgxfer(carma, cs, iz, ib, ie, rc_loc); if (rc_loc<0) rc_loc=0
+        call psolve(carma, cs, iz, ib, ie, rc_loc); if (rc_loc<0) rc_loc=0
+      end do
+    end do
+    call evapp(carma, cs, iz, rc_loc); if (rc_loc<0) rc_loc=0
+    call downgxfer(carma, cs, iz, rc_loc); if (rc_loc<0) rc_loc=0
+    call downgevapply(carma, cs, iz, rc_loc); if (rc_loc<0) rc_loc=0
+
+    ! Step 3: total_ice/liquid from post pc
+    call totalcondensate(carma, cs, iz, tot_ice, tot_liq, rc_loc); if (rc_loc<0) rc_loc=0
+
+    ! Step 4: snapshot gc, run gsolve, snapshot gc again
+    gc_pre = cs%f_gc(iz, :)
+    call gsolve(carma, cs, iz, prev_ice, prev_liq, scale_thr, rc_loc); if (rc_loc<0) rc_loc=0
+    gc_post = cs%f_gc(iz, :)
+
+    call dump_alloc_1d(prefix, 'previous_ice_probe',    prev_ice)
+    call dump_alloc_1d(prefix, 'previous_liquid_probe', prev_liq)
+    call dump_alloc_1d(prefix, 'total_ice_probe',       tot_ice)
+    call dump_alloc_1d(prefix, 'total_liquid_probe',    tot_liq)
+    call dump_alloc_1d(prefix, 'gc_pregsolve_probe',    gc_pre)
+    call dump_alloc_1d(prefix, 'gc_postgsolve_probe',   gc_post)
+
+    ! Restore mutated state so subsequent probes start from dump's cstate.
+    cs%f_pc = pc_save; cs%f_gc = gc_save; cs%f_t = t_save
+    cs%f_rlheat = rlheat_save
+    deallocate(pc_save, gc_save, t_save, rlheat_save)
+    end block
+
+    deallocate(prev_ice, prev_liq, tot_ice, tot_liq, gc_pre, gc_post)
+  end subroutine dump_gsolve_probe
+
+
   !! Probe: full microfast prefix (sulfnuc → growevapl → growp/upgxfer →
   !! psolve per (ibin, ielem)) at end-of-step state. Dumps:
   !!   pc_prepsolve_probe  : pc[iz, :, :] before psolve loop (after sulfnuc/growevapl)
@@ -575,42 +722,52 @@ contains
     end interface
 
     if (.not. allocated(cs%f_pc)) return
-    ! Zero accumulators that microfast normally zeros at start of substep
-    cs%f_growlg(:,:) = 0._f; cs%f_evaplg(:,:) = 0._f
-    cs%f_growpe(:,:) = 0._f; cs%f_evappe(:,:) = 0._f
-    cs%f_rnucpe(:,:) = 0._f; cs%f_rhompe(:,:) = 0._f
-    cs%f_rnuclg(:,:,:) = 0._f
-    rc_loc = 0
-    call maxconc(carma, cs, iz, rc_loc); if (rc_loc < 0) rc_loc = 0
-    call sulfnuc(carma, cs, iz, rc_loc); if (rc_loc < 0) rc_loc = 0
-    call growevapl(carma, cs, iz, rc_loc); if (rc_loc < 0) rc_loc = 0
+    block
+      real(kind=f), allocatable :: pc_save(:,:,:), gc_save(:,:), t_save(:)
+      allocate(pc_save(size(cs%f_t), carma%f_NBIN, carma%f_NELEM))
+      allocate(gc_save(size(cs%f_t), carma%f_NGAS), t_save(size(cs%f_t)))
+      pc_save = cs%f_pc; gc_save = cs%f_gc; t_save = cs%f_t
 
-    ! Snapshot pc before psolve loop
-    allocate(pc_snap(carma%f_NBIN, carma%f_NELEM))
-    do ie = 1, carma%f_NELEM
-      do ib = 1, carma%f_NBIN
-        pc_snap(ib, ie) = cs%f_pc(iz, ib, ie)
-      end do
-    end do
-    call dump_alloc_2d(prefix, 'pc_prepsolve_probe', pc_snap)
-    call dump_alloc_2d(prefix, 'rhompe_probe', cs%f_rhompe)
+      ! Zero accumulators that microfast normally zeros at start of substep
+      cs%f_growlg(:,:) = 0._f; cs%f_evaplg(:,:) = 0._f
+      cs%f_growpe(:,:) = 0._f; cs%f_evappe(:,:) = 0._f
+      cs%f_rnucpe(:,:) = 0._f; cs%f_rhompe(:,:) = 0._f
+      cs%f_rnuclg(:,:,:) = 0._f
+      rc_loc = 0
+      call maxconc(carma, cs, iz, rc_loc); if (rc_loc < 0) rc_loc = 0
+      call sulfnuc(carma, cs, iz, rc_loc); if (rc_loc < 0) rc_loc = 0
+      call growevapl(carma, cs, iz, rc_loc); if (rc_loc < 0) rc_loc = 0
 
-    ! Run growp, upgxfer, psolve per (ibin, ielem)
-    do ie = 1, carma%f_NELEM
-      do ib = 1, carma%f_NBIN
-        call growp(carma, cs, iz, ib, ie, rc_loc); if (rc_loc < 0) rc_loc = 0
-        call upgxfer(carma, cs, iz, ib, ie, rc_loc); if (rc_loc < 0) rc_loc = 0
-        call psolve(carma, cs, iz, ib, ie, rc_loc); if (rc_loc < 0) rc_loc = 0
+      ! Snapshot pc before psolve loop
+      allocate(pc_snap(carma%f_NBIN, carma%f_NELEM))
+      do ie = 1, carma%f_NELEM
+        do ib = 1, carma%f_NBIN
+          pc_snap(ib, ie) = cs%f_pc(iz, ib, ie)
+        end do
       end do
-    end do
+      call dump_alloc_2d(prefix, 'pc_prepsolve_probe', pc_snap)
+      call dump_alloc_2d(prefix, 'rhompe_probe', cs%f_rhompe)
 
-    do ie = 1, carma%f_NELEM
-      do ib = 1, carma%f_NBIN
-        pc_snap(ib, ie) = cs%f_pc(iz, ib, ie)
+      ! Run growp, upgxfer, psolve per (ibin, ielem)
+      do ie = 1, carma%f_NELEM
+        do ib = 1, carma%f_NBIN
+          call growp(carma, cs, iz, ib, ie, rc_loc); if (rc_loc < 0) rc_loc = 0
+          call upgxfer(carma, cs, iz, ib, ie, rc_loc); if (rc_loc < 0) rc_loc = 0
+          call psolve(carma, cs, iz, ib, ie, rc_loc); if (rc_loc < 0) rc_loc = 0
+        end do
       end do
-    end do
-    call dump_alloc_2d(prefix, 'pc_postpsolve_probe', pc_snap)
-    deallocate(pc_snap)
+
+      do ie = 1, carma%f_NELEM
+        do ib = 1, carma%f_NBIN
+          pc_snap(ib, ie) = cs%f_pc(iz, ib, ie)
+        end do
+      end do
+      call dump_alloc_2d(prefix, 'pc_postpsolve_probe', pc_snap)
+      deallocate(pc_snap)
+
+      cs%f_pc = pc_save; cs%f_gc = gc_save; cs%f_t = t_save
+      deallocate(pc_save, gc_save, t_save)
+    end block
   end subroutine dump_psolve_probe
 
 
@@ -651,37 +808,44 @@ contains
     end interface
 
     if (.not. allocated(cs%f_evappe)) return
-    cs%f_growlg(:,:) = 0._f; cs%f_evaplg(:,:) = 0._f
-    cs%f_evappe(:,:) = 0._f; cs%f_rnucpe(:,:) = 0._f
-    rc_loc = 0
-    call maxconc(carma, cs, iz, rc_loc)
-    if (rc_loc < 0) rc_loc = 0
-    call growevapl(carma, cs, iz, rc_loc)
-    if (rc_loc < 0) rc_loc = 0
-    call evapp(carma, cs, iz, rc_loc)
-    if (rc_loc < 0) rc_loc = 0
-    call dump_alloc_2d(prefix, 'evappe_probe', cs%f_evappe)
+    block
+      real(kind=f), allocatable :: pc_save(:,:,:)
+      allocate(pc_save(size(cs%f_t), carma%f_NBIN, carma%f_NELEM))
+      pc_save = cs%f_pc
 
-    ! Snapshot pc[iz, :, :] before downgevapply, then call it and dump
-    ! the result so JAX can bench the explicit-Euler apply.
-    allocate(pc_probe(carma%f_NBIN, carma%f_NELEM))
-    do ie = 1, carma%f_NELEM
-      do ib = 1, carma%f_NBIN
-        pc_probe(ib, ie) = cs%f_pc(iz, ib, ie)
+      cs%f_growlg(:,:) = 0._f; cs%f_evaplg(:,:) = 0._f
+      cs%f_evappe(:,:) = 0._f; cs%f_rnucpe(:,:) = 0._f
+      rc_loc = 0
+      call maxconc(carma, cs, iz, rc_loc)
+      if (rc_loc < 0) rc_loc = 0
+      call growevapl(carma, cs, iz, rc_loc)
+      if (rc_loc < 0) rc_loc = 0
+      call evapp(carma, cs, iz, rc_loc)
+      if (rc_loc < 0) rc_loc = 0
+      call dump_alloc_2d(prefix, 'evappe_probe', cs%f_evappe)
+
+      allocate(pc_probe(carma%f_NBIN, carma%f_NELEM))
+      do ie = 1, carma%f_NELEM
+        do ib = 1, carma%f_NBIN
+          pc_probe(ib, ie) = cs%f_pc(iz, ib, ie)
+        end do
       end do
-    end do
-    call dump_alloc_2d(prefix, 'pc_predowng_probe', pc_probe)
+      call dump_alloc_2d(prefix, 'pc_predowng_probe', pc_probe)
 
-    call downgevapply(carma, cs, iz, rc_loc)
-    if (rc_loc < 0) rc_loc = 0
+      call downgevapply(carma, cs, iz, rc_loc)
+      if (rc_loc < 0) rc_loc = 0
 
-    do ie = 1, carma%f_NELEM
-      do ib = 1, carma%f_NBIN
-        pc_probe(ib, ie) = cs%f_pc(iz, ib, ie)
+      do ie = 1, carma%f_NELEM
+        do ib = 1, carma%f_NBIN
+          pc_probe(ib, ie) = cs%f_pc(iz, ib, ie)
+        end do
       end do
-    end do
-    call dump_alloc_2d(prefix, 'pc_postdowng_probe', pc_probe)
-    deallocate(pc_probe)
+      call dump_alloc_2d(prefix, 'pc_postdowng_probe', pc_probe)
+      deallocate(pc_probe)
+
+      cs%f_pc = pc_save
+      deallocate(pc_save)
+    end block
   end subroutine dump_evapp_probe
 
 
