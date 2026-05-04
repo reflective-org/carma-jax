@@ -137,23 +137,23 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
 
 ### Coag pipeline (instrumented in Phase 0 per user direction)
 
-### `src/carma/coagulation/setup_coag.py`  ↔  `setupcoag.F90` + `setupckern.F90`
-- [ ] `setup_coag` (kbin, volx, pkernel)
+### `src/carma/coagulation/setup_coag.py`  ↔  `setupcoag.F90`
+- [x] `setup_coag` — volx, pkernel, npairl, npairu all match Fortran exactly (rel err < 1e-12). kbin transitively validated via pair-list derivation (npairl/npairu). Static bench: build JAX setup_coag from rmass/rmrat and compare against dumped Fortran tables.
 
 ### `src/carma/setup_ckern.py`  ↔  `setupckern.F90`
-- [ ] `setup_ckern` (Brownian + grav coag kernel)
+- [x] `setup_ckern` — **bug fixed**: ported the missing Van der Waals enhancement (Chan & Mozurkewich 2001) from setupckern.F90:271-279 into `setup_ckern_jit` via new `use_vw` argument. Reduces JAX/Fortran disagreement from ~50% (factor-of-2 at small bins) to ~e-12 to e-10. 1000/1000 pass at rtol=1e-9 (max 2.1e-10, median 6.8e-12). Per-kernel tol relaxed to 1e-9 because of sqrt+exp+log reordering through Brownian + Fuchs + grav chains.
 
 ### `src/carma/coagulation/coagl.py`  ↔  `coagl.F90`
-- [ ] `coagl` (loss rate)
+- [x] `coagl` (1000/1000 bit-exact). Probe `dump_microslow_probe` zeros coag accumulators, calls coagl, dumps `coaglg_probe`. JAX coagl uses einsum over (ckernel × pcl × volx) — bit-identical to Fortran's nested loops.
 
 ### `src/carma/coagulation/coagp.py`  ↔  `coagp.F90`
-- [ ] `coagp` (production rate)
+- [x] `coagp` (transitively validated via microslow bench, 1000/1000 near-ε). JAX implements the production via pre-computed pair-list gathers in `make_microslow`; the standalone `coagp_bin` is a stub. Bench validates the composed effect through microslow's pc_postmicroslow.
 
 ### `src/carma/coagulation/csolve.py`  ↔  `csolve.F90`
-- [ ] `csolve` (coag solver)
+- [x] `csolve` (transitively validated via microslow bench, 1000/1000 near-ε). Implicit Euler `pc_new = (pc_old + dt*ppd) / (1 + dt*pls)` is fused into the per-bin scan inside `make_microslow`.
 
 ### `src/carma/microslow.py`  ↔  `microslow.F90`
-- [ ] `microslow` (composition)
+- [x] `microslow` (1000/1000 pass at rtol=1e-10; max 2.2e-16, median bit-exact). Composes coagl + coagp + csolve. Probe `dump_microslow_probe` runs the full microslow chain at end-of-step state; JAX `make_microslow` JIT'd function is fed the same inputs.
 
 ---
 

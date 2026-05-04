@@ -12,9 +12,19 @@ from carma.constants import BK, GRAV, PI
 from carma.precision import DTYPE
 
 
+# Van der Waals enhancement constants (Chan & Mozurkewich, JAS 2001).
+# Mirrors setupckern.F90:127-134. Applies between sulfate-sulfate group pairs.
+_VW_A1 = DTYPE(0.0757)
+_VW_A3 = DTYPE(0.0015)
+_VW_B0 = DTYPE(0.0151)
+_VW_B1 = DTYPE(-0.186)
+_VW_B3 = DTYPE(-0.0163)
+_VW_HAM = DTYPE(6.4e-13)        # erg, Hamaker constant
+
+
 @jax.jit
 def setup_ckern_jit(t, rhoa, zmet, rmu, r_wet, rrat, rprat, bpm, rmass, re, vf,
-                    cstick):
+                    cstick, use_vw=None):
     """Compute coagulation kernels — fully vectorized, JIT-compiled.
 
     Computes Brownian + gravitational collection kernel for all
@@ -33,6 +43,12 @@ def setup_ckern_jit(t, rhoa, zmet, rmu, r_wet, rrat, rprat, bpm, rmass, re, vf,
         re: Reynolds number (NZ, NBIN, NGROUP).
         vf: Fall velocity (NZ+1, NBIN, NGROUP) [cm/s].
         cstick: Sticking coefficient (scalar).
+        use_vw: Optional (NGROUP, NGROUP) bool array. Where True, the
+            Van der Waals enhancement (Chan & Mozurkewich 2001) replaces
+            ``cstick`` with ``Einf/Enot`` for that group pair (mirrors
+            setupckern.F90:271-279). Default None → no VdW (raw cstick
+            everywhere). Fortran sets it to ``is_sulfate[j1] AND
+            is_sulfate[j2]``.
 
     Returns:
         ckernel: (NZ, NBIN, NBIN, NGROUP, NGROUP) [cm^3/s].
@@ -86,7 +102,34 @@ def setup_ckern_jit(t, rhoa, zmet, rmu, r_wet, rrat, rprat, bpm, rmass, re, vf,
     # === Brownian kernel ===
     rp = r1 + r2                              # (NZ, NB, NB, NG, NG)
     dp = d1 + d2
-    gg = jnp.sqrt(g1**2 + g2**2) * DTYPE(cstick)
+
+    # Van der Waals enhancement (Chan & Mozurkewich 2001) — replaces
+    # ``cstick`` with ``Einf/Enot`` for sulfate-sulfate pairs.
+    # Mirrors setupckern.F90:271-279.
+    if use_vw is not None:
+        # hp = ham/(kT) * 4·r1·r2 / (r1+r2)^2
+        temp1_b = temp1[:, None, None, None, None]      # (NZ,1,1,1,1)
+        hp = _VW_HAM / temp1_b * (
+            DTYPE(4.0) * r1 * r2 / jnp.maximum(rp ** 2, DTYPE(1e-300))
+        )
+        hpln = jnp.log(DTYPE(1.0) + hp)
+        Enot = DTYPE(1.0) + _VW_A1 * hpln + _VW_A3 * hpln ** 3
+        sqrt_hp = jnp.sqrt(jnp.maximum(hp, DTYPE(0.0)))
+        Einf = (
+            DTYPE(1.0)
+            + jnp.sqrt(jnp.maximum(hp / DTYPE(3.0), DTYPE(0.0)))
+            / (DTYPE(1.0) + _VW_B0 * sqrt_hp)
+            + _VW_B1 * hpln + _VW_B3 * hpln ** 3
+        )
+        cstick_vw = Einf / jnp.maximum(Enot, DTYPE(1e-300))
+
+        # use_vw is (NG, NG); broadcast to (1, 1, 1, NG, NG)
+        use_vw_b = jnp.asarray(use_vw, dtype=bool)[None, None, None, :, :]
+        cstick_eff = jnp.where(use_vw_b, cstick_vw, DTYPE(cstick))
+    else:
+        cstick_eff = DTYPE(cstick)
+
+    gg = jnp.sqrt(g1**2 + g2**2) * cstick_eff
     delt = jnp.sqrt(dt1_b**2 + dt2_b**2)
     term1 = rp / (rp + delt)
     term2 = DTYPE(4.0) * dp / (gg * rp)
@@ -179,8 +222,17 @@ def setup_ckern_jit(t, rhoa, zmet, rmu, r_wet, rrat, rprat, bpm, rmass, re, vf,
 
 
 def setup_ckern(config, t, rhoa, zmet, rmu, r_wet, rrat, rprat, bpm, rmass, re, vf):
-    """Convenience wrapper matching the original signature."""
+    """Convenience wrapper matching the original signature.
+
+    Builds the ``use_vw`` mask from the per-group ``is_sulfate`` flags
+    (mirrors setupckern.F90:234) and forwards to ``setup_ckern_jit``.
+    """
+    is_sulfate = jnp.asarray(
+        [bool(g.is_sulfate) for g in config.groups], dtype=bool,
+    )
+    use_vw = is_sulfate[:, None] & is_sulfate[None, :]
     return setup_ckern_jit(
         t, rhoa, zmet, rmu, r_wet, rrat, rprat, bpm, rmass, re, vf,
         cstick=DTYPE(config.cstick),
+        use_vw=use_vw,
     )

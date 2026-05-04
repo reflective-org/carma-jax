@@ -43,6 +43,10 @@ Array shapes (in numpy, after Fortran→C order conversion):
     pconmax     (NZ, NGROUP)
     coaglg      (NZ, NBIN, NGROUP)
     coagpe      (NZ, NBIN, NELEM)
+    rmu         (NZ,)                                 — dynamic viscosity
+    bpm         (NZ, NBIN, NGROUP)                    — Cunningham slip correction
+    re          (NZ, NBIN, NGROUP)                    — Reynolds number
+    vf          (NZP1, NBIN, NGROUP)                  — fall velocity
     pcl         (NZ, NBIN, NELEM)                     — prestep pc snapshot
     gcl         (NZ, NGAS)                            — prestep gc snapshot
     told        (NZ,)                                 — prestep t snapshot
@@ -60,6 +64,8 @@ Array shapes (in numpy, after Fortran→C order conversion):
     rmass_bin   (NBIN, NGROUP)                        — only present at step 1 (static)
     rmassup_bin (NBIN, NGROUP)                        — only present at step 1 (static)
     rmrat_group (NGROUP,)                             — only present at step 1 (static)
+    rrat        (NBIN, NGROUP)                        — only present at step 1 (static)
+    rprat       (NBIN, NGROUP)                        — only present at step 1 (static)
     dm_bin      (NBIN, NGROUP)                        — only present at step 1 (static)
     pratt       (3, NBIN, NGROUP)                     — only present at step 1 (static)
     prat        (4, NBIN, NGROUP)                     — only present at step 1 (static)
@@ -74,6 +80,11 @@ Array shapes (in numpy, after Fortran→C order conversion):
     is_grp_ice  (NGROUP,)                             — only present at step 1 (static, 0/1 float)
     inuc2elem   (NELEM, NELEM)                        — only present at step 1 (static, float-encoded int)
     inucproc    (NELEM, NELEM)                        — only present at step 1 (static, float-encoded int)
+    kbin        (NGROUP, NGROUP, NGROUP, NBIN, NBIN)  — only at step 1 (static, float-encoded int)
+    volx        (NGROUP, NGROUP, NGROUP, NBIN, NBIN)  — only at step 1 (static)
+    pkernel     (NBIN, NBIN, NGROUP, NGROUP, NGROUP, 6) — only at step 1 (static)
+    npairl      (NGROUP, NBIN)                        — only at step 1 (static, float-encoded int)
+    npairu      (NGROUP, NBIN)                        — only at step 1 (static, float-encoded int)
 """
 
 from __future__ import annotations
@@ -97,6 +108,7 @@ def _shape_map(dims):
     NZ, NBIN, NELEM, NGROUP, NGAS = (
         dims["NZ"], dims["NBIN"], dims["NELEM"], dims["NGROUP"], dims["NGAS"],
     )
+    NZP1 = NZ + 1
     return {
         "pc":         (NZ, NBIN, NELEM),
         "gc":         (NZ, NGAS),
@@ -139,11 +151,17 @@ def _shape_map(dims):
         "cmf":        (NBIN, NGROUP),
         "totevap":    (NBIN, NGROUP),
         "rup_wet":    (NZ, NBIN, NGROUP),
+        "rmu":        (NZ,),
+        "bpm":        (NZ, NBIN, NGROUP),
+        "re":         (NZ, NBIN, NGROUP),
+        "vf":         (NZP1, NBIN, NGROUP),
         "ckernel":    (NZ, NBIN, NBIN, NGROUP, NGROUP),
         "r_bin":       (NBIN, NGROUP),
         "rmass_bin":   (NBIN, NGROUP),
         "rmassup_bin": (NBIN, NGROUP),
         "rmrat_group": (NGROUP,),
+        "rrat":        (NBIN, NGROUP),
+        "rprat":       (NBIN, NGROUP),
         "dm_bin":      (NBIN, NGROUP),
         "pratt":       (3, NBIN, NGROUP),
         "prat":        (4, NBIN, NGROUP),
@@ -158,6 +176,11 @@ def _shape_map(dims):
         "is_grp_ice":  (NGROUP,),
         "inuc2elem":   (NELEM, NELEM),
         "inucproc":    (NELEM, NELEM),
+        "kbin":        (NGROUP, NGROUP, NGROUP, NBIN, NBIN),
+        "volx":        (NGROUP, NGROUP, NGROUP, NBIN, NBIN),
+        "pkernel":     (NBIN, NBIN, NGROUP, NGROUP, NGROUP, 6),
+        "npairl":      (NGROUP, NBIN),
+        "npairu":      (NGROUP, NBIN),
     }
 
 
@@ -211,11 +234,17 @@ class SubstepDump:
     cmf:       np.ndarray
     totevap:   np.ndarray
     rup_wet:   np.ndarray
+    rmu:       np.ndarray
+    bpm:       np.ndarray
+    re:        np.ndarray
+    vf:        np.ndarray
     ckernel:   Optional[np.ndarray] = None
     r_bin:       Optional[np.ndarray] = None
     rmass_bin:   Optional[np.ndarray] = None
     rmassup_bin: Optional[np.ndarray] = None
     rmrat_group: Optional[np.ndarray] = None
+    rrat:        Optional[np.ndarray] = None
+    rprat:       Optional[np.ndarray] = None
     dm_bin:      Optional[np.ndarray] = None
     pratt:       Optional[np.ndarray] = None
     prat:        Optional[np.ndarray] = None
@@ -230,6 +259,11 @@ class SubstepDump:
     is_grp_ice:  Optional[np.ndarray] = None
     inuc2elem:   Optional[np.ndarray] = None
     inucproc:    Optional[np.ndarray] = None
+    kbin:        Optional[np.ndarray] = None
+    volx:        Optional[np.ndarray] = None
+    pkernel:     Optional[np.ndarray] = None
+    npairl:      Optional[np.ndarray] = None
+    npairu:      Optional[np.ndarray] = None
 
 
 def _load_one(path: Path, expected_shape: tuple) -> np.ndarray:
@@ -314,11 +348,17 @@ def read_substep(out_dir, step: int, dims=None) -> SubstepDump:
         cmf=_load_one(_path("cmf"), shapes["cmf"]),
         totevap=_load_one(_path("totevap"), shapes["totevap"]),
         rup_wet=_load_one(_path("rup_wet"), shapes["rup_wet"]),
+        rmu=_load_one(_path("rmu"), shapes["rmu"]),
+        bpm=_load_one(_path("bpm"), shapes["bpm"]),
+        re=_load_one(_path("re"), shapes["re"]),
+        vf=_load_one(_path("vf"), shapes["vf"]),
         ckernel=_opt("ckernel"),
         r_bin=_opt("r_bin"),
         rmass_bin=_opt("rmass_bin"),
         rmassup_bin=_opt("rmassup_bin"),
         rmrat_group=_opt("rmrat_group"),
+        rrat=_opt("rrat"),
+        rprat=_opt("rprat"),
         dm_bin=_opt("dm_bin"),
         pratt=_opt("pratt"),
         prat=_opt("prat"),
@@ -333,6 +373,11 @@ def read_substep(out_dir, step: int, dims=None) -> SubstepDump:
         is_grp_ice=_opt("is_grp_ice"),
         inuc2elem=_opt("inuc2elem"),
         inucproc=_opt("inucproc"),
+        kbin=_opt("kbin"),
+        volx=_opt("volx"),
+        pkernel=_opt("pkernel"),
+        npairl=_opt("npairl"),
+        npairu=_opt("npairu"),
     )
 
 
