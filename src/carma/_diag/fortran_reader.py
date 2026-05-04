@@ -55,6 +55,12 @@ Array shapes (in numpy, after Fortran→C order conversion):
     rmass_bin   (NBIN, NGROUP)                        — only present at step 1 (static)
     rmassup_bin (NBIN, NGROUP)                        — only present at step 1 (static)
     rmrat_group (NGROUP,)                             — only present at step 1 (static)
+    dm_bin      (NBIN, NGROUP)                        — only present at step 1 (static)
+    pratt       (3, NBIN, NGROUP)                     — only present at step 1 (static)
+    prat        (4, NBIN, NGROUP)                     — only present at step 1 (static)
+    pden1       (NBIN, NGROUP)                        — only present at step 1 (static)
+    palr        (4, NGROUP)                           — only present at step 1 (static)
+    igrowgas    (NELEM,)                              — only present at step 1 (static, float-encoded int)
 """
 
 from __future__ import annotations
@@ -120,6 +126,12 @@ def _shape_map(dims):
         "rmass_bin":   (NBIN, NGROUP),
         "rmassup_bin": (NBIN, NGROUP),
         "rmrat_group": (NGROUP,),
+        "dm_bin":      (NBIN, NGROUP),
+        "pratt":       (3, NBIN, NGROUP),
+        "prat":        (4, NBIN, NGROUP),
+        "pden1":       (NBIN, NGROUP),
+        "palr":        (4, NGROUP),
+        "igrowgas":    (NELEM,),
     }
 
 
@@ -173,6 +185,12 @@ class SubstepDump:
     rmass_bin:   Optional[np.ndarray] = None
     rmassup_bin: Optional[np.ndarray] = None
     rmrat_group: Optional[np.ndarray] = None
+    dm_bin:      Optional[np.ndarray] = None
+    pratt:       Optional[np.ndarray] = None
+    prat:        Optional[np.ndarray] = None
+    pden1:       Optional[np.ndarray] = None
+    palr:        Optional[np.ndarray] = None
+    igrowgas:    Optional[np.ndarray] = None
 
 
 def _load_one(path: Path, expected_shape: tuple) -> np.ndarray:
@@ -257,6 +275,12 @@ def read_substep(out_dir, step: int, dims=None) -> SubstepDump:
         rmass_bin=_opt("rmass_bin"),
         rmassup_bin=_opt("rmassup_bin"),
         rmrat_group=_opt("rmrat_group"),
+        dm_bin=_opt("dm_bin"),
+        pratt=_opt("pratt"),
+        prat=_opt("prat"),
+        pden1=_opt("pden1"),
+        palr=_opt("palr"),
+        igrowgas=_opt("igrowgas"),
     )
 
 

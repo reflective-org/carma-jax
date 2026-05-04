@@ -7,7 +7,7 @@ Ported from: growevapl.F90
 
 import jax.numpy as jnp
 
-from carma.constants import FEW_PC
+from carma.constants import FEW_PC, SMALL_PC
 from carma.precision import DTYPE
 from carma.growth.pheat import pheat
 
@@ -203,8 +203,9 @@ def growevapl(pc, growlg, evaplg,
         for ibin in range(nbin - 1):
             dmdt_val = dmdt[ibin]
             pc_val = pc[iz, ibin, iepart]
+            pc_val_next = pc[iz, ibin + 1, iepart]
 
-            # Growth (dmdt > 0): flux from bin ibin to ibin+1
+            # Growth (dmdt > 0 AND pc[ibin] > SMALL_PC) — mirrors Fortran:212-213
             x_grow = dmdt_val * dtime / dm[ibin, ig]
             grow_ppm = jnp.where(
                 x_grow < DTYPE(1.0),
@@ -215,11 +216,13 @@ def growevapl(pc, growlg, evaplg,
                 dmdt_val / dm[ibin, ig],
             )
             growlg = growlg.at[ibin, ig].set(
-                jnp.where(dmdt_val > DTYPE(0.0), grow_ppm, growlg[ibin, ig])
+                jnp.where(
+                    (dmdt_val > DTYPE(0.0)) & (pc_val > SMALL_PC),
+                    grow_ppm, growlg[ibin, ig],
+                )
             )
 
-            # Evaporation (dmdt < 0): flux from bin ibin+1 to ibin
-            pc_val_next = pc[iz, ibin + 1, iepart]
+            # Evaporation (dmdt < 0 AND pc[ibin+1] > SMALL_PC) — mirrors Fortran:225-226
             x_evap = -dmdt_val * dtime / dm[ibin + 1, ig]
             evap_ppm = jnp.where(
                 x_evap < DTYPE(1.0),
@@ -230,13 +233,16 @@ def growevapl(pc, growlg, evaplg,
                 -dmdt_val / dm[ibin + 1, ig],
             )
             evaplg = evaplg.at[ibin + 1, ig].set(
-                jnp.where(dmdt_val < DTYPE(0.0), evap_ppm, evaplg[ibin + 1, ig])
+                jnp.where(
+                    (dmdt_val < DTYPE(0.0)) & (pc_val_next > SMALL_PC),
+                    evap_ppm, evaplg[ibin + 1, ig],
+                )
             )
 
-            # Special boundary: evaporation at bin 0
+            # Special boundary: evaporation at bin 0 — mirrors Fortran:242-244
             evaplg = evaplg.at[0, ig].set(
                 jnp.where(
-                    (ibin == 0) & (dmdt_val < DTYPE(0.0)),
+                    (ibin == 0) & (dmdt_val < DTYPE(0.0)) & (pc_val_next > SMALL_PC),
                     -dmdt_val / dm[0, ig],
                     evaplg[0, ig],
                 )

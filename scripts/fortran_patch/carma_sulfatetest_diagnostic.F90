@@ -338,6 +338,12 @@ contains
     ! that bypass the multi-substep gsolve/tsolve evolution complication.
     call dump_zhao1995_probe(prefix, cs)
 
+    ! Per-substep probe: invoke maxconc then growevapl at end-of-step
+    ! state and dump growlg + evaplg (NBIN,NGROUP). The dumped growlg/
+    ! evaplg are from microfast and reflect a pre-advance pc state;
+    ! this probe gives a properly matched (pc, growlg, evaplg) triple.
+    call dump_growevapl_probe(prefix, cs)
+
     ! Per-substep probe: invoke pheat per bin and dump dmdt (NBIN,).
     ! pheat computes the mass growth rate for one particle in each bin,
     ! including optional particle heating (do_pheat=false in sulfate test,
@@ -357,10 +363,11 @@ contains
     ! kernel-level validation of the JAX gasexchange port.
     call dump_gasexchange_probe(prefix, cs)
 
-    ! Static carma bin grid (r, rmass per group). Dumped at step 1
+    ! Static carma PPM and growth tables. Dumped at step 1 only.
     ! only — these don't change across substeps.
     if (istep_d == 1) then
       call dump_carma_bins(prefix)
+      call dump_carma_ppm(prefix)
       call dump_5d(prefix, 'ckernel', cs%f_ckernel)
     end if
   end subroutine dump_substep
@@ -452,6 +459,87 @@ contains
   !! resulting dmdt array (NBIN,). Sulfate test: NGROUP=1, igas=igash2so4,
   !! NZ=1. do_pheat=false and NWAVE=0, so the simple no-radiation branch
   !! runs: dmdt = pvap*(ss+1-akas)*gro/(1+gro*gro1*pvap).
+  !! Probe: call maxconc then growevapl at end-of-step cstate and dump
+  !! the resulting growlg and evaplg arrays (NBIN, NGROUP). maxconc is
+  !! called first so pconmax reflects the end-of-step pc (otherwise
+  !! growevapl's FEW_PC gate might use stale pconmax from pre-microfast).
+  !! Dump the PPM growth tables from the carma object (static, step-1 only).
+  !! Shapes: dm (NBIN,NGROUP), pratt (3,NBIN,NGROUP), prat (4,NBIN,NGROUP),
+  !!         pden1 (NBIN,NGROUP), palr (4,NGROUP), igrowgas (NELEM).
+  subroutine dump_carma_ppm(prefix)
+    character(len=*), intent(in)         :: prefix
+    real(kind=f), allocatable            :: dm2d(:,:), pratt3d(:,:,:), prat3d(:,:,:)
+    real(kind=f), allocatable            :: pden1_2d(:,:), palr2d(:,:)
+    real(kind=f), allocatable            :: igrowgas_r(:)
+    integer                              :: ig, ib, nb, ng, ne
+
+    nb = carma%f_NBIN
+    ng = carma%f_NGROUP
+    ne = carma%f_NELEM
+    allocate(dm2d(nb, ng), pratt3d(3, nb, ng), prat3d(4, nb, ng))
+    allocate(pden1_2d(nb, ng), palr2d(4, ng), igrowgas_r(ne))
+    ! dm is per-group in carmagroup_type
+    do ig = 1, ng
+      do ib = 1, nb
+        dm2d(ib, ig) = carma%f_group(ig)%f_dm(ib)
+      end do
+    end do
+    ! pratt, prat, pden1, palr are in carma_type directly
+    pratt3d = carma%f_pratt
+    prat3d  = carma%f_prat
+    pden1_2d = carma%f_pden1
+    palr2d  = carma%f_palr
+    do ig = 1, ne
+      igrowgas_r(ig) = real(carma%f_igrowgas(ig), kind=f)
+    end do
+    call dump_alloc_2d(prefix, 'dm_bin',   dm2d)
+    call dump_alloc_3d(prefix, 'pratt',    pratt3d)
+    call dump_alloc_3d(prefix, 'prat',     prat3d)
+    call dump_alloc_2d(prefix, 'pden1',    pden1_2d)
+    call dump_alloc_2d(prefix, 'palr',     palr2d)
+    call dump_alloc_1d(prefix, 'igrowgas', igrowgas_r)
+    deallocate(dm2d, pratt3d, prat3d, pden1_2d, palr2d, igrowgas_r)
+  end subroutine dump_carma_ppm
+
+
+  subroutine dump_growevapl_probe(prefix, cs)
+    character(len=*), intent(in)            :: prefix
+    type(carmastate_type), intent(inout)    :: cs
+    integer                                 :: rc_loc
+    integer, parameter                      :: iz = 1
+    interface
+      subroutine maxconc(carma, cstate, iz, rc)
+        use carma_precision_mod
+        use carma_types_mod
+        type(carma_type), intent(in)         :: carma
+        type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in)                  :: iz
+        integer, intent(inout)               :: rc
+      end subroutine maxconc
+      subroutine growevapl(carma, cstate, iz, rc)
+        use carma_precision_mod
+        use carma_types_mod
+        type(carma_type), intent(in)         :: carma
+        type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in)                  :: iz
+        integer, intent(inout)               :: rc
+      end subroutine growevapl
+    end interface
+
+    if (.not. allocated(cs%f_growlg)) return
+    ! Zero growlg/evaplg so probe output is purely from this call.
+    cs%f_growlg(:,:) = 0._f
+    cs%f_evaplg(:,:) = 0._f
+    rc_loc = 0
+    call maxconc(carma, cs, iz, rc_loc)
+    if (rc_loc < 0) rc_loc = 0
+    call growevapl(carma, cs, iz, rc_loc)
+    if (rc_loc < 0) rc_loc = 0
+    call dump_alloc_2d(prefix, 'growlg_probe', cs%f_growlg)
+    call dump_alloc_2d(prefix, 'evaplg_probe', cs%f_evaplg)
+  end subroutine dump_growevapl_probe
+
+
   subroutine dump_pheat_probe(prefix, cs)
     character(len=*), intent(in)            :: prefix
     type(carmastate_type), intent(inout)    :: cs
@@ -591,6 +679,20 @@ contains
     call dump_alloc_2d(prefix, 'totevap', as_float)
     deallocate(as_float)
   end subroutine dump_totevap
+
+
+  subroutine dump_alloc_3d(prefix, name, arr)
+    character(len=*), intent(in)         :: prefix, name
+    real(kind=f), intent(in)             :: arr(:,:,:)
+    character(len=512)                   :: path
+    integer                              :: u, ios
+    path = trim(prefix) // trim(name) // '.bin'
+    open(newunit=u, file=trim(path), access='stream', &
+         status='replace', iostat=ios)
+    if (ios /= 0) return
+    write(u) arr
+    close(u)
+  end subroutine dump_alloc_3d
 
 
   subroutine dump_alloc_2d(prefix, name, arr)
