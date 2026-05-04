@@ -159,8 +159,11 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
 
 ## Phase 9 — `step_full` / microfast composition
 
-### `src/carma/newstate_calc.py`  ↔  `newstate_calc.F90`
-- [ ] `microfast_growth` (composed; bench against full microfast.F90 output per substep)
+### `src/carma/microfast_full.py`  ↔  `microfast.F90`
+- [x] `microfast_full` (1000/1000 pass at rtol=1e-10; pc max 1.05e-12 / median 3.9e-15, gc max 8.7e-12 / median 8.8e-15 — both near machine ε). New module written for sulfate scope; mirrors Fortran microfast.F90 exactly (sulfnuc → growevapl → per-(ie,ib){growp+psolve(+rhompe)} → evapp → downgevapply → gsolve → tsolve, with per-gas vapor pressure: Murphy 2005 for H2O, Ayers 1980 for H2SO4). Probe `dump_microfast_probe` calls Fortran microfast directly at end-of-step state.
+
+### `src/carma/newstate_calc.py`  ↔  `newstate_calc.F90` (legacy, deprecated for sulfate)
+- [-] `microfast_growth` (legacy) — water-only / growth-only stub: hardcodes `rhompe=zeros`, single-gas vapor pressure. Bench against Fortran microfast showed pc max rel err = 1.0 (completely wrong). Use `microfast_full` instead for sulfate. Defer cleanup to a future refactor of step_full.
 
 ### `src/carma/newstate_calc_jit.py`  ↔  `newstate_calc.F90` (retry block)
 - [ ] adaptive retry loop (`nretries`, `nsubsteps` decisions match Fortran)

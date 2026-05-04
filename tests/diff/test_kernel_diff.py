@@ -609,6 +609,103 @@ def test_binary_nuc_zhao1995_matches_fortran():
         raise AssertionError("\n".join(msg_lines))
 
 
+def test_microfast_full_matches_fortran():
+    """Phase 9.1: JAX `microfast_full` matches Fortran microfast.F90.
+
+    `microfast_full` (in src/carma/microfast_full.py) composes the
+    validated Phase 7-8 kernels with the correct interleaving:
+        zeromicro → totalcondensate → vapor pressure (per-gas) →
+        supersat (per-gas) → sulfnuc → growevapl → per-(ie,ib){growp,
+        psolve(+rhompe)} → evapp → downgevapply → gsolve → tsolve
+
+    Validated 1000/1000 at rtol=1e-10 against Fortran microfast probe.
+    """
+    from carma.microfast_full import microfast_full
+    import jax.numpy as jnp
+
+    NBIN, NGROUP, NELEM, NGAS = 38, 1, 1, 2
+    DTIME = 1800.0
+
+    d0 = read_substep(_DIFF_BASE / "scen_000", step=1)
+    if d0.dm_bin is None:
+        pytest.skip("static tables missing — re-run scripts/run_diagnostic_ensemble.py")
+
+    rmass_2d_j = jnp.asarray(d0.rmass_bin)
+    dm_2d_j = jnp.asarray(d0.dm_bin)
+    rmassup_j = jnp.asarray(d0.rmassup_bin[:, 0])
+    rmrat_v = float(d0.rmrat_group[0])
+    r_bins_j = jnp.asarray(d0.r_bin[:, 0])
+    pratt_j = jnp.asarray(d0.pratt); prat_j = jnp.asarray(d0.prat)
+    pden1_j = jnp.asarray(d0.pden1); palr_j = jnp.asarray(d0.palr)
+
+    pc_max_rel = {}
+    gc_max_rel = {}
+    failures = []
+
+    for scen_id in _ALL_SCEN_IDS:
+        scen_dir = _DIFF_BASE / f"scen_{scen_id:03d}"
+        d = read_substep(scen_dir, step=1)
+        pc_pre = np.fromfile(scen_dir / "substep_0001_pc_premicrofast_probe.bin",
+                             dtype=np.float64).reshape(NBIN, NELEM, order="F")
+        pc_post_F = np.fromfile(scen_dir / "substep_0001_pc_postmicrofast_probe.bin",
+                                dtype=np.float64).reshape(NBIN, NELEM, order="F")
+        gc_pre = np.fromfile(scen_dir / "substep_0001_gc_premicrofast_probe.bin",
+                             dtype=np.float64)
+        gc_post_F = np.fromfile(scen_dir / "substep_0001_gc_postmicrofast_probe.bin",
+                                dtype=np.float64)
+        t_arr = np.fromfile(scen_dir / "substep_0001_t_microfast_probe.bin",
+                            dtype=np.float64)
+
+        pc_in = jnp.zeros((1, NBIN, NELEM)).at[0, :, :].set(jnp.asarray(pc_pre))
+        gc_in = jnp.zeros((1, NGAS)).at[0, :].set(jnp.asarray(gc_pre))
+        t_in = jnp.asarray([t_arr[0]])
+
+        pc_j, gc_j, t_j, rlheat_j, rc_j = microfast_full(
+            pc_in, gc_in, t_in, DTIME,
+            jnp.asarray(d.rhoa), jnp.asarray(d.zmet),
+            jnp.asarray(d.akelvin), jnp.asarray(d.akelvini),
+            jnp.asarray(d.gro), jnp.asarray(d.gro1),
+            jnp.asarray(d.rup_wet),
+            rmass_2d_j, dm_2d_j, rmassup_j, r_bins_j, rmrat_v,
+            pratt_j, prat_j, pden1_j, palr_j,
+            iz=0,
+            nbin=NBIN, ngroup=NGROUP, nelem=NELEM, ngas=NGAS,
+        )
+
+        pc_post_J = np.asarray(pc_j[0])
+        gc_post_J = np.asarray(gc_j[0])
+
+        _, m_pc = compute_rel_err(pc_post_J, pc_post_F)
+        _, m_gc = compute_rel_err(gc_post_J, gc_post_F)
+        pc_max_rel[scen_id] = m_pc
+        gc_max_rel[scen_id] = m_gc
+
+        tol = _tol_for("microfast")
+        if m_pc > tol:
+            failures.append(("pc", scen_id, m_pc))
+        if m_gc > tol:
+            failures.append(("gc", scen_id, m_gc))
+
+    sd = _summary_plot_dir()
+    make_summary_plot("microfast_full_pc", pc_max_rel, sd)
+    make_summary_plot("microfast_full_gc", gc_max_rel, sd)
+
+    if failures:
+        msg_lines = [f"microfast_full mismatched on {len(failures)} (output, scen) tuples:"]
+        for which, scen_id, err in failures[:10]:
+            msg_lines.append(f"  {which} scen {scen_id}: rel err {err:.3e}")
+        if len(failures) > 10:
+            msg_lines.append(f"  ... and {len(failures) - 10} more")
+        raise AssertionError("\n".join(msg_lines))
+
+
+# NOTE: legacy `microfast_growth` (in src/carma/newstate_calc.py) is a
+# growth-only / single-gas-H2O kernel and does NOT match Fortran microfast
+# for sulfate scenarios. The faithful sulfate-aware port is
+# `microfast_full` in src/carma/microfast_full.py — bench is
+# test_microfast_full_matches_fortran above.
+
+
 def test_microslow_matches_fortran():
     """Phase 8.18-8.20: JAX microslow (coagl + coagp + csolve composed)
     matches Fortran's pc_postmicroslow.
