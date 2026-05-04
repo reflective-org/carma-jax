@@ -107,15 +107,15 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
 - [-] `upgxfer` — gated on `rnuclg(ifrom,igfrom,igroup) > 0` (upgxfer.F90:104). Sulfate test never invokes heterogeneous nucleation (Phase 7.10) so `rnuclg = 0` everywhere; upgxfer's `rnucpe` accumulator is never updated. Verified empirically: `rnucpe = 0` across all 1000 scenarios.
 
 ### `src/carma/growth/evapp.py`  ↔  `evapp.F90` + `evap_ingrp.F90`
-- [ ] `evapp`
-- [ ] `downgevapply`
+- [x] `evapp` (1000/1000 pass at rtol 1e-10; max 9.9e-14, median bit-exact). Sulfate test: NELEM=1, no cores → falls into `ic1==0` branch → calls `evap_ingrp` per bin (`evappe[ibin-1] += pc[ibin] * evaplg[ibin]`). evap_mono and evap_poly are core-only paths (see Phase 8.9).
+- [x] `downgevapply` (in `src/carma/growth/evapp.py`; matches `downgevapply.F90`) — 1000/1000 pass at rtol 1e-10, max 9.4e-15, median bit-exact. Explicit Euler `pc += dt * (evappe + rnucpe)` then `smallconc` floor. Probe dumps both `pc_predowng_probe` and `pc_postdowng_probe`.
 
 ### `src/carma/growth/downgxfer.py`  ↔  `downgxfer.F90`
-- [ ] `downgxfer`
+- [-] `downgxfer` — gated on `rnuclg(ifrom,igfrom,igroup) > 0` (downgxfer.F90:106), same as upgxfer (Phase 8.7). Sulfate test never invokes heterogeneous nucleation, so `rnuclg = 0` and `rnucpe` accumulator never updates. Defer to a test scenario that adds I_HETNUCSULF.
 
 ### `src/carma/growth/evap_mono.py` + `evap_poly.py`  ↔  `evap_mono.F90` + `evap_poly.F90`
-- [ ] `evap_mono`
-- [ ] `evap_poly`
+- [-] `evap_mono` — invoked from `evapp.F90:153,179` only when `ic1 != 0` (group has cores) AND `evap_total` is set. Sulfate test has `ncore=0` → `ic1=0` → these branches are unreachable. Defer to multi-element test.
+- [-] `evap_poly` — same gate (called from `evapp.F90:181`). Defer.
 
 ### `src/carma/solvers/psolve.py`  ↔  `psolve.F90`
 - [ ] `psolve`

@@ -343,6 +343,12 @@ contains
     ! sulfate scope (rnuclg=0 throughout).
     call dump_growp_probe(prefix, cs)
 
+    ! Per-substep probe: evapp + downgevapply at end-of-step state.
+    ! Mirrors microfast's growevapl→growp→upgxfer→psolve→evapp→downg
+    ! sequence. JAX bench feeds end-of-step pc+evaplg and verifies
+    ! evappe (from evapp) + pc_after_apply (from downgevapply).
+    call dump_evapp_probe(prefix, cs)
+
     ! Per-substep probe: invoke maxconc then growevapl at end-of-step
     ! state and dump growlg + evaplg (NBIN,NGROUP). The dumped growlg/
     ! evaplg are from microfast and reflect a pre-advance pc state;
@@ -516,6 +522,77 @@ contains
     end do
     call dump_alloc_2d(prefix, 'growpe_probe', cs%f_growpe)
   end subroutine dump_growp_probe
+
+
+  !! Probe: compute evaplg via growevapl, then call evapp at end-of-step
+  !! state and dump evappe (NBIN, NELEM). Also calls downgevapply and
+  !! dumps the post-apply pc (NBIN, NELEM at iz=1).
+  subroutine dump_evapp_probe(prefix, cs)
+    character(len=*), intent(in)            :: prefix
+    type(carmastate_type), intent(inout)    :: cs
+    real(kind=f), allocatable               :: pc_probe(:,:)
+    integer                                 :: rc_loc, ie, ib
+    integer, parameter                      :: iz = 1
+    interface
+      subroutine maxconc(carma, cstate, iz, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in)         :: carma
+        type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in)                  :: iz; integer, intent(inout) :: rc
+      end subroutine maxconc
+      subroutine growevapl(carma, cstate, iz, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in)         :: carma
+        type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in)                  :: iz; integer, intent(inout) :: rc
+      end subroutine growevapl
+      subroutine evapp(carma, cstate, iz, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in)         :: carma
+        type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in)                  :: iz; integer, intent(inout) :: rc
+      end subroutine evapp
+      subroutine downgevapply(carma, cstate, iz, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in)         :: carma
+        type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in)                  :: iz; integer, intent(inout) :: rc
+      end subroutine downgevapply
+    end interface
+
+    if (.not. allocated(cs%f_evappe)) return
+    cs%f_growlg(:,:) = 0._f; cs%f_evaplg(:,:) = 0._f
+    cs%f_evappe(:,:) = 0._f; cs%f_rnucpe(:,:) = 0._f
+    rc_loc = 0
+    call maxconc(carma, cs, iz, rc_loc)
+    if (rc_loc < 0) rc_loc = 0
+    call growevapl(carma, cs, iz, rc_loc)
+    if (rc_loc < 0) rc_loc = 0
+    call evapp(carma, cs, iz, rc_loc)
+    if (rc_loc < 0) rc_loc = 0
+    call dump_alloc_2d(prefix, 'evappe_probe', cs%f_evappe)
+
+    ! Snapshot pc[iz, :, :] before downgevapply, then call it and dump
+    ! the result so JAX can bench the explicit-Euler apply.
+    allocate(pc_probe(carma%f_NBIN, carma%f_NELEM))
+    do ie = 1, carma%f_NELEM
+      do ib = 1, carma%f_NBIN
+        pc_probe(ib, ie) = cs%f_pc(iz, ib, ie)
+      end do
+    end do
+    call dump_alloc_2d(prefix, 'pc_predowng_probe', pc_probe)
+
+    call downgevapply(carma, cs, iz, rc_loc)
+    if (rc_loc < 0) rc_loc = 0
+
+    do ie = 1, carma%f_NELEM
+      do ib = 1, carma%f_NBIN
+        pc_probe(ib, ie) = cs%f_pc(iz, ib, ie)
+      end do
+    end do
+    call dump_alloc_2d(prefix, 'pc_postdowng_probe', pc_probe)
+    deallocate(pc_probe)
+  end subroutine dump_evapp_probe
 
 
   subroutine dump_carma_ppm(prefix)

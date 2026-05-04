@@ -605,6 +605,159 @@ def test_binary_nuc_zhao1995_matches_fortran():
         raise AssertionError("\n".join(msg_lines))
 
 
+def test_evapp_matches_fortran():
+    """Phase 8.8a: JAX evapp matches Fortran's evapp(evappe).
+
+    Sulfate test: NELEM=1, no cores, I_VOLATILE → falls into the
+    `ic1 == 0` branch → calls `evap_ingrp` per bin, which sums
+    `pc[ibin] * evaplg[ibin]` into `evappe[ibin-1]`. evap_mono and
+    evap_poly are core-only paths and never run in this scope.
+
+    Probe: dump_evapp_probe runs maxconc → growevapl → evapp at
+    end-of-step state and dumps evappe.
+    """
+    from carma.growth.evapp import evapp
+    from carma.growth.growevapl import growevapl
+    from carma.utils.smallconc import maxconc
+    from carma.enums import ElementType
+    import jax.numpy as jnp
+
+    NBIN, NGROUP, NELEM = 38, 1, 1
+    d0 = read_substep(_DIFF_BASE / "scen_000", step=1)
+    if d0.dm_bin is None:
+        pytest.skip("PPM tables not in dump — re-run scripts/run_diagnostic_ensemble.py")
+    dm_j = jnp.asarray(d0.dm_bin); pratt_j = jnp.asarray(d0.pratt)
+    prat_j = jnp.asarray(d0.prat); pden1_j = jnp.asarray(d0.pden1)
+    palr_j = jnp.asarray(d0.palr)
+    igrowgas_arr = jnp.asarray([int(d0.igrowgas[0]) - 1])
+    ienconc_arr = jnp.asarray([0]); is_ice_arr = jnp.asarray([False])
+    itype_arr = jnp.asarray([int(ElementType.I_VOLATILE)])
+    igroup_arr = jnp.asarray([0])
+
+    evappe_max_rel = {}
+    failures = []
+
+    for scen_id in _ALL_SCEN_IDS:
+        scen_dir = _DIFF_BASE / f"scen_{scen_id:03d}"
+        d = read_substep(scen_dir, step=1)
+        probe_path = scen_dir / "substep_0001_evappe_probe.bin"
+        if not probe_path.exists():
+            pytest.skip("evappe_probe.bin not in dump — re-run scripts/run_diagnostic_ensemble.py")
+        evappe_F = np.fromfile(probe_path, dtype=np.float64).reshape(
+            NBIN, NELEM, order="F",
+        )
+
+        pconmax_j = maxconc(jnp.asarray(d.pc), ienconc_arr, jnp.asarray(d.zmet))
+        gl_j, el_j = growevapl(
+            jnp.asarray(d.pc),
+            jnp.zeros((NBIN, NGROUP)), jnp.zeros((NBIN, NGROUP)),
+            jnp.asarray(d.supsatl), jnp.asarray(d.supsati),
+            jnp.asarray(d.pvapl), jnp.asarray(d.pvapi),
+            jnp.asarray(d.akelvin), jnp.asarray(d.akelvini),
+            jnp.asarray(d.gro), jnp.asarray(d.gro1), jnp.asarray(d.rup_wet),
+            jnp.asarray(d.rmass_bin), dm_j, pconmax_j,
+            pratt_j, prat_j, pden1_j, palr_j,
+            is_ice_arr, igrowgas_arr, ienconc_arr, 1800.0, 0, NBIN, NGROUP,
+        )
+        evappe_j = evapp(
+            jnp.asarray(d.pc), jnp.zeros((NBIN, NELEM)), el_j, pconmax_j,
+            ienconc_arr, itype_arr, igroup_arr, 0, NBIN, NGROUP, NELEM,
+        )
+
+        _, m = compute_rel_err(np.asarray(evappe_j), evappe_F)
+        evappe_max_rel[scen_id] = m
+        if m > _tol_for("evapp"):
+            failures.append((scen_id, m))
+
+    make_summary_plot("evapp_evappe", evappe_max_rel, _summary_plot_dir())
+    if failures:
+        msg_lines = [f"evapp mismatched on {len(failures)} scenarios:"]
+        for scen_id, err in failures[:10]:
+            msg_lines.append(f"  scen {scen_id}: rel err {err:.3e}")
+        if len(failures) > 10:
+            msg_lines.append(f"  ... and {len(failures) - 10} more")
+        raise AssertionError("\n".join(msg_lines))
+
+
+def test_downgevapply_matches_fortran():
+    """Phase 8.8b: JAX downgevapply matches Fortran's downgevapply (post-apply pc).
+
+    Fortran (downgevapply.F90): pc += dtime * (evappe + rnucpe), then smallconc.
+    JAX downgevapply does the same explicit-Euler apply with SMALL_PC floor.
+    Sulfate test: rnucpe = 0 (Phase 7.10), so this is just pc += dt*evappe.
+
+    Probe dumps:
+      - pc_predowng_probe: pc at iz=1 before downgevapply
+      - pc_postdowng_probe: pc at iz=1 after downgevapply
+    """
+    from carma.growth.evapp import evapp, downgevapply
+    from carma.growth.growevapl import growevapl
+    from carma.utils.smallconc import maxconc
+    from carma.enums import ElementType
+    import jax.numpy as jnp
+
+    NBIN, NGROUP, NELEM = 38, 1, 1
+    d0 = read_substep(_DIFF_BASE / "scen_000", step=1)
+    if d0.dm_bin is None:
+        pytest.skip("PPM tables not in dump — re-run scripts/run_diagnostic_ensemble.py")
+    dm_j = jnp.asarray(d0.dm_bin); pratt_j = jnp.asarray(d0.pratt)
+    prat_j = jnp.asarray(d0.prat); pden1_j = jnp.asarray(d0.pden1)
+    palr_j = jnp.asarray(d0.palr)
+    igrowgas_arr = jnp.asarray([int(d0.igrowgas[0]) - 1])
+    ienconc_arr = jnp.asarray([0]); is_ice_arr = jnp.asarray([False])
+    itype_arr = jnp.asarray([int(ElementType.I_VOLATILE)])
+    igroup_arr = jnp.asarray([0])
+
+    pc_max_rel = {}
+    failures = []
+
+    for scen_id in _ALL_SCEN_IDS:
+        scen_dir = _DIFF_BASE / f"scen_{scen_id:03d}"
+        d = read_substep(scen_dir, step=1)
+        post_path = scen_dir / "substep_0001_pc_postdowng_probe.bin"
+        if not post_path.exists():
+            pytest.skip("pc_postdowng_probe not in dump — re-run scripts/run_diagnostic_ensemble.py")
+        pcpost_F = np.fromfile(post_path, dtype=np.float64).reshape(
+            NBIN, NELEM, order="F",
+        )
+
+        pconmax_j = maxconc(jnp.asarray(d.pc), ienconc_arr, jnp.asarray(d.zmet))
+        gl_j, el_j = growevapl(
+            jnp.asarray(d.pc),
+            jnp.zeros((NBIN, NGROUP)), jnp.zeros((NBIN, NGROUP)),
+            jnp.asarray(d.supsatl), jnp.asarray(d.supsati),
+            jnp.asarray(d.pvapl), jnp.asarray(d.pvapi),
+            jnp.asarray(d.akelvin), jnp.asarray(d.akelvini),
+            jnp.asarray(d.gro), jnp.asarray(d.gro1), jnp.asarray(d.rup_wet),
+            jnp.asarray(d.rmass_bin), dm_j, pconmax_j,
+            pratt_j, prat_j, pden1_j, palr_j,
+            is_ice_arr, igrowgas_arr, ienconc_arr, 1800.0, 0, NBIN, NGROUP,
+        )
+        ev_j = evapp(
+            jnp.asarray(d.pc), jnp.zeros((NBIN, NELEM)), el_j, pconmax_j,
+            ienconc_arr, itype_arr, igroup_arr, 0, NBIN, NGROUP, NELEM,
+        )
+        pc_j = downgevapply(
+            jnp.asarray(d.pc), ev_j, jnp.zeros((NBIN, NELEM)),
+            1800.0, 0, NBIN, NELEM,
+        )
+        pc_j_iz0 = np.asarray(pc_j[0])  # (NBIN, NELEM)
+
+        _, m = compute_rel_err(pc_j_iz0, pcpost_F)
+        pc_max_rel[scen_id] = m
+        if m > _tol_for("downgevapply"):
+            failures.append((scen_id, m))
+
+    make_summary_plot("downgevapply_pc", pc_max_rel, _summary_plot_dir())
+    if failures:
+        msg_lines = [f"downgevapply mismatched on {len(failures)} scenarios:"]
+        for scen_id, err in failures[:10]:
+            msg_lines.append(f"  scen {scen_id}: rel err {err:.3e}")
+        if len(failures) > 10:
+            msg_lines.append(f"  ... and {len(failures) - 10} more")
+        raise AssertionError("\n".join(msg_lines))
+
+
 def test_growp_matches_fortran():
     """Phase 8.6: JAX growp matches Fortran's growp(growpe) per (ibin, ielem).
 
