@@ -57,16 +57,22 @@ def gsolve(gc, rlprod, previous_ice, previous_liquid, total_ice, total_liquid,
 
         # Update gas concentration
         gc = gc.at[iz, igas].add(dtime * gasprod)
-
-        # Check convergence threshold
-        threshold = dgc_threshold_arr[igas] / scale_threshold
         gc_val = gc[iz, igas]
+
+        # If gc went negative, request retry — mass conservation is broken
+        # (mirrors gsolve.F90:65-78). This is the dominant retry trigger
+        # for sulfate scenarios where nucleation depletes H2SO4 in one
+        # substep.
+        rc = jnp.where(gc_val < DTYPE(0.0), RC_WARNING_RETRY, rc)
+
+        # Check convergence threshold (only when dgc_threshold > 0;
+        # sulfate test has dgc_threshold=0 so this branch is gated off).
+        threshold = dgc_threshold_arr[igas] / scale_threshold
         relative_change = jnp.where(
             jnp.abs(gc_val) > DTYPE(1e-50),
             jnp.abs(dtime * gasprod / gc_val),
             DTYPE(0.0),
         )
-        # If threshold > 0 and change exceeds it, suggest retry
         rc = jnp.where(
             (threshold > DTYPE(0.0)) & (relative_change > threshold),
             RC_WARNING_RETRY,

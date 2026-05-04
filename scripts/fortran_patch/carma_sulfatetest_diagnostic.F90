@@ -329,6 +329,14 @@ contains
     call dump_2d(prefix, 'd_gc', cs%f_d_gc)
     call dump_1d(prefix, 'd_t', cs%f_d_t)
 
+    ! Adaptive-retry state (newstate_calc retry loop outputs)
+    call dump_1d(prefix, 'zsubsteps', cs%f_zsubsteps)
+    block
+      real(kind=f) :: nret_arr(1)
+      nret_arr(1) = cs%f_nretries
+      call dump_alloc_1d(prefix, 'nretries', nret_arr)
+    end block
+
     ! Aerosol kinematics (for setup_ckern bench)
     call dump_1d(prefix, 'rmu', cs%f_rmu)
     call dump_3d(prefix, 'bpm', cs%f_bpm)
