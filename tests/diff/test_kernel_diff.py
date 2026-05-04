@@ -605,6 +605,83 @@ def test_binary_nuc_zhao1995_matches_fortran():
         raise AssertionError("\n".join(msg_lines))
 
 
+def test_growp_matches_fortran():
+    """Phase 8.6: JAX growp matches Fortran's growp(growpe) per (ibin, ielem).
+
+    Fortran growp.F90: growpe[ibin, ielem] = pc[iz, ibin-1, ielem] * growlg[ibin-1, igroup]
+    (gated on igrowgas != 0, ibin > 0, pconmax > FEW_PC).
+
+    The growp probe runs the chain `maxconc → growevapl → growp` at
+    end-of-step state and dumps growpe (NBIN, NELEM). JAX side does the
+    same chain to get growlg, then applies growp per bin.
+
+    Sulfate test: NGROUP=1, NELEM=1, igas=H2SO4 (1, 0-based).
+    """
+    from carma.growth.growp import growp
+    from carma.growth.growevapl import growevapl
+    from carma.utils.smallconc import maxconc
+    import jax.numpy as jnp
+
+    NBIN, NGROUP, NELEM = 38, 1, 1
+
+    d0 = read_substep(_DIFF_BASE / "scen_000", step=1)
+    if d0.dm_bin is None:
+        pytest.skip("PPM tables not in dump — re-run scripts/run_diagnostic_ensemble.py")
+    dm_j = jnp.asarray(d0.dm_bin); pratt_j = jnp.asarray(d0.pratt)
+    prat_j = jnp.asarray(d0.prat); pden1_j = jnp.asarray(d0.pden1)
+    palr_j = jnp.asarray(d0.palr)
+    igrowgas_arr = jnp.asarray([int(d0.igrowgas[0]) - 1])
+    igas_num = int(d0.igrowgas[0]) - 1
+    ienconc_arr = jnp.asarray([0]); is_ice_arr = jnp.asarray([False])
+
+    growpe_max_rel = {}
+    failures = []
+
+    for scen_id in _ALL_SCEN_IDS:
+        scen_dir = _DIFF_BASE / f"scen_{scen_id:03d}"
+        d = read_substep(scen_dir, step=1)
+        probe_path = scen_dir / "substep_0001_growpe_probe.bin"
+        if not probe_path.exists():
+            pytest.skip("growpe_probe.bin not in dump — re-run scripts/run_diagnostic_ensemble.py")
+        growpe_F = np.fromfile(probe_path, dtype=np.float64).reshape(
+            NBIN, NELEM, order="F",
+        )
+
+        pconmax_j = maxconc(jnp.asarray(d.pc), ienconc_arr, jnp.asarray(d.zmet))
+        gl_j, _ = growevapl(
+            jnp.asarray(d.pc),
+            jnp.zeros((NBIN, NGROUP)), jnp.zeros((NBIN, NGROUP)),
+            jnp.asarray(d.supsatl), jnp.asarray(d.supsati),
+            jnp.asarray(d.pvapl), jnp.asarray(d.pvapi),
+            jnp.asarray(d.akelvin), jnp.asarray(d.akelvini),
+            jnp.asarray(d.gro), jnp.asarray(d.gro1), jnp.asarray(d.rup_wet),
+            jnp.asarray(d.rmass_bin), dm_j, pconmax_j,
+            pratt_j, prat_j, pden1_j, palr_j,
+            is_ice_arr, igrowgas_arr, ienconc_arr, 1800.0, 0, NBIN, NGROUP,
+        )
+
+        growpe_j = jnp.zeros((NBIN, NELEM))
+        for ib in range(NBIN):
+            growpe_j = growp(
+                jnp.asarray(d.pc), growpe_j, gl_j, pconmax_j,
+                0, ib, 0, 0, igas_num,
+            )
+
+        _, m = compute_rel_err(np.asarray(growpe_j), growpe_F)
+        growpe_max_rel[scen_id] = m
+        if m > _tol_for("growp"):
+            failures.append((scen_id, m))
+
+    make_summary_plot("growp_growpe", growpe_max_rel, _summary_plot_dir())
+    if failures:
+        msg_lines = [f"growp mismatched on {len(failures)} scenarios:"]
+        for scen_id, err in failures[:10]:
+            msg_lines.append(f"  scen {scen_id}: rel err {err:.3e}")
+        if len(failures) > 10:
+            msg_lines.append(f"  ... and {len(failures) - 10} more")
+        raise AssertionError("\n".join(msg_lines))
+
+
 def test_growevapl_matches_fortran():
     """Phase 8.5: JAX growevapl matches Fortran's growevapl(growlg, evaplg)
     across all scenarios at substep 1.

@@ -338,6 +338,11 @@ contains
     ! that bypass the multi-substep gsolve/tsolve evolution complication.
     call dump_zhao1995_probe(prefix, cs)
 
+    ! Per-substep probe: growp at end-of-step state (matched to end-of-
+    ! step pc + growlg from growevapl probe). upgxfer is a no-op in
+    ! sulfate scope (rnuclg=0 throughout).
+    call dump_growp_probe(prefix, cs)
+
     ! Per-substep probe: invoke maxconc then growevapl at end-of-step
     ! state and dump growlg + evaplg (NBIN,NGROUP). The dumped growlg/
     ! evaplg are from microfast and reflect a pre-advance pc state;
@@ -466,6 +471,53 @@ contains
   !! Dump the PPM growth tables from the carma object (static, step-1 only).
   !! Shapes: dm (NBIN,NGROUP), pratt (3,NBIN,NGROUP), prat (4,NBIN,NGROUP),
   !!         pden1 (NBIN,NGROUP), palr (4,NGROUP), igrowgas (NELEM).
+  !! Probe: compute growlg via maxconc+growevapl then run growp for all
+  !! (ibin, ielem) and dump the resulting growpe (NBIN, NELEM).
+  !! Must rebuild growlg first because growlg gets zeroed between steps.
+  subroutine dump_growp_probe(prefix, cs)
+    character(len=*), intent(in)            :: prefix
+    type(carmastate_type), intent(inout)    :: cs
+    integer                                 :: rc_loc, ib, ie
+    integer, parameter                      :: iz = 1
+    interface
+      subroutine maxconc(carma, cstate, iz, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in)         :: carma
+        type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in)                  :: iz; integer, intent(inout) :: rc
+      end subroutine maxconc
+      subroutine growevapl(carma, cstate, iz, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in)         :: carma
+        type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in)                  :: iz; integer, intent(inout) :: rc
+      end subroutine growevapl
+      subroutine growp(carma, cstate, iz, ibin, ielem, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in)         :: carma
+        type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in)                  :: iz, ibin, ielem
+        integer, intent(inout)               :: rc
+      end subroutine growp
+    end interface
+
+    if (.not. allocated(cs%f_growpe)) return
+    cs%f_growlg(:,:) = 0._f; cs%f_evaplg(:,:) = 0._f; cs%f_growpe(:,:) = 0._f
+    rc_loc = 0
+    call maxconc(carma, cs, iz, rc_loc)
+    if (rc_loc < 0) rc_loc = 0
+    call growevapl(carma, cs, iz, rc_loc)
+    if (rc_loc < 0) rc_loc = 0
+    do ie = 1, carma%f_NELEM
+      do ib = 1, carma%f_NBIN
+        call growp(carma, cs, iz, ib, ie, rc_loc)
+        if (rc_loc < 0) rc_loc = 0
+      end do
+    end do
+    call dump_alloc_2d(prefix, 'growpe_probe', cs%f_growpe)
+  end subroutine dump_growp_probe
+
+
   subroutine dump_carma_ppm(prefix)
     character(len=*), intent(in)         :: prefix
     real(kind=f), allocatable            :: dm2d(:,:), pratt3d(:,:,:), prat3d(:,:,:)

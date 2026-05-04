@@ -101,10 +101,10 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
 - [x] `growevapl` (1000/1000 pass at rtol 1e-10; growlg max 1.8e-13 / evaplg max 9.9e-14, both medians near ε). **Bug fixed**: JAX was missing the `pc > SMALL_PC` gate on the growth/evaporation flux branches (`growevapl.F90:212-226`), causing non-zero evaplg on bins where `pc ≤ 1e-50` (Fortran zeros those out). Probe: `dump_growevapl_probe` calls maxconc then growevapl at end-of-step state. Diagnostic also dumps PPM tables (dm, pratt, prat, pden1, palr, igrowgas) and rup_wet.
 
 ### `src/carma/growth/growp.py`  ↔  `growp.F90`
-- [ ] `growp`
+- [x] `growp` (1000/1000 pass at rtol 1e-10; max 1.8e-13, median ~7e-16, near machine ε). Probe: `dump_growp_probe` runs `maxconc → growevapl → growp` chain at end-of-step state and dumps `growpe`. Trivial kernel — `growpe[ibin,ielem] = pc[ibin-1,ielem] * growlg[ibin-1,igroup]` with `pconmax > FEW_PC` gate.
 
 ### `src/carma/growth/upgxfer.py`  ↔  `upgxfer.F90`
-- [ ] `upgxfer`
+- [-] `upgxfer` — gated on `rnuclg(ifrom,igfrom,igroup) > 0` (upgxfer.F90:104). Sulfate test never invokes heterogeneous nucleation (Phase 7.10) so `rnuclg = 0` everywhere; upgxfer's `rnucpe` accumulator is never updated. Verified empirically: `rnucpe = 0` across all 1000 scenarios.
 
 ### `src/carma/growth/evapp.py`  ↔  `evapp.F90` + `evap_ingrp.F90`
 - [ ] `evapp`
