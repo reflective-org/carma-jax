@@ -56,6 +56,7 @@ def make_step_full_faithful(
     do_homogeneous=True,
     do_heterogeneous=False,
     do_pheatatm=False,
+    ppm_coefs=None,
 ):
     """Build a single-column faithful microphysics step closure.
 
@@ -67,6 +68,9 @@ def make_step_full_faithful(
         minsubsteps, maxsubsteps, maxretries: substep bounds.
         do_homogeneous, do_heterogeneous: sulfnuc gates.
         do_pheatatm: enable particle heating in tsolve.
+        ppm_coefs: optional ``(pratt, prat, pden1, palr)`` tuple. If
+            provided, these PPM coefficients are baked into the closure.
+            If ``None``, falls back to ``getattr(config, ...)``.
 
     Returns:
         ``step(pc, gc, t, dtime, **env, **state) -> (pc_new, gc_new, t_new,
@@ -94,10 +98,13 @@ def make_step_full_faithful(
     r_bins = jnp.asarray(group.r, dtype=DTYPE)
     rmrat_val = float(group.rmrat)
 
-    pratt = jnp.asarray(getattr(config, "pratt", None))
-    prat = jnp.asarray(getattr(config, "prat", None))
-    pden1 = jnp.asarray(getattr(config, "pden1", None))
-    palr = jnp.asarray(getattr(config, "palr", None))
+    if ppm_coefs is not None:
+        pratt, prat, pden1, palr = (jnp.asarray(x, dtype=DTYPE) for x in ppm_coefs)
+    else:
+        pratt = jnp.asarray(getattr(config, "pratt"), dtype=DTYPE)
+        prat = jnp.asarray(getattr(config, "prat"), dtype=DTYPE)
+        pden1 = jnp.asarray(getattr(config, "pden1"), dtype=DTYPE)
+        palr = jnp.asarray(getattr(config, "palr"), dtype=DTYPE)
 
     # JIT'd microfast (faithful single-substep)
     mf_jit = make_microfast_full_jit(

@@ -1,21 +1,22 @@
-"""JAX ensemble runner (Phase 10.3).
+"""JAX ensemble runner (Phase 10).
 
-Drives ``make_step_full`` over the 1000-scenario ensemble via
-``jax.vmap`` on the batch axis. Each scenario advances the same
-180 000-s sulfate simulation (matching the Fortran ensemble's
-``nstep × dtime`` setup) and records ``(T_final,
-gc_h2so4_final, pc_final)`` for later parity comparison.
+Drives the **faithful** Phase-9 step (``make_step_full_faithful``)
+over the 1000-scenario ensemble. Each scenario runs the same
+``nstep × dtime`` sulfate simulation as the Fortran ensemble
+(``carma_sulfatetest_ensemble.F90``) and records ``(T_final,
+gc_h2so4_final, pc_final)``.
 
-This is deliberately scoped to the sulfate-column case that
-``make_step_full`` supports today: single-group sulfate, no
-transport, no coagulation. That matches the Fortran ensemble
-binary (``carma_sulfatetest_ensemble.F90``) exactly — no process
-is active on one side and absent on the other.
+The faithful chain (Phase 9.4) replaces the legacy operator-split
+``make_step_full`` + ``make_step_coag`` pair: one outer step now
+runs ``microslow`` once, then the adaptive-substep retry loop over
+``microfast_full`` (sulfnuc + growevapl + growp/psolve + evapp +
+gsolve + tsolve). Bench-validated 1000/1000 against Fortran
+microfast at near-machine ε (Phase 9.1) and across multi-substep
+schedules (Phase 9.2).
 
 Output is a compressed NPZ with the same keys as the Fortran
 aggregator (``T_final``, ``gc_h2so4_final``, ``pc_final``,
-``nstep_ran``, ``status``) so Phase 10.4 can compare them
-bit-for-key.
+``nstep_ran``, ``status``).
 """
 
 import argparse
@@ -36,7 +37,9 @@ sys.path.insert(0, str(_ROOT / "tests" / "unit"))
 from generate_sulfate_scenarios import load_scenarios
 from carma.constants import AVG, BK, WTMOL_H2O
 from carma.precision import DTYPE
-from carma.step_full import make_step_full
+from carma.prestep import prestep
+from carma.step_full_faithful import make_step_full_faithful
+from carma.utils.smallconc import maxconc
 from carma.vapor_pressure import vaporp_h2o_murphy2005
 
 # Reuse the env fixture from the step_full tests. _minimal_config
@@ -44,7 +47,7 @@ from carma.vapor_pressure import vaporp_h2o_murphy2005
 from test_step_full import _growth_env, _minimal_config as _test_minimal_config
 
 
-_GWTMOL_H2SO4 = 98.0
+_GWTMOL_H2SO4 = 98.078479    # matches Fortran CARMAGAS_Create call
 
 # Fortran sulfatetest bin grid (must match
 # carma_sulfatetest_ensemble.F90 for apples-to-apples parity):
@@ -89,11 +92,13 @@ def _fortran_matching_config():
         name="sulfate_num", rho=jnp.full((nbin,), rho), igroup=0,
         itype=2, icomposition=0, isolute=0, kappa=0.65,
     )
+    # Thresholds match Fortran sulfatetest_ensemble's CARMAGAS_Create calls
+    # (0.1 / 0.1 for both H2O and H2SO4).
     gas_h2o = GasConfig(name="H2O", wtmol=18.016, ivaprtn=2, icomposition=1,
-                         dgc_threshold=0.0, ds_threshold=0.0)
+                         dgc_threshold=0.1, ds_threshold=0.1)
     gas_h2so4 = GasConfig(name="H2SO4", wtmol=_GWTMOL_H2SO4, ivaprtn=4,
                            icomposition=2,
-                           dgc_threshold=0.0, ds_threshold=0.0)
+                           dgc_threshold=0.1, ds_threshold=0.1)
     solute = SoluteConfig(name="sulfate", ions=3, wtmol=_GWTMOL_H2SO4, rho=rho)
 
     # Build coagulation tables (sulfate ⊕ sulfate → sulfate, source=number).
@@ -111,12 +116,12 @@ def _fortran_matching_config():
         gases=(gas_h2o, gas_h2so4), solutes=(solute,),
         coag=coag_cfg,
         do_coag=True, do_grow=True, do_vtran=False, do_vdiff=False,
-        do_thermo=False, do_substep=False, do_explised=False,
+        do_thermo=True, do_substep=True, do_explised=False,
         do_incloud=False, do_clearsky=True, do_detrain=False,
         do_pheat=False, do_pheatatm=False, do_cnst_rlh=False,
         itbnd_pc=1, ibbnd_pc=1,
-        maxsubsteps=32, minsubsteps=1, maxretries=4, conmax=1e-4,
-        cstick=1.0, gsticki=1.0, gstickl=1.0, tstick=1.0, dt_threshold=0.0,
+        maxsubsteps=32, minsubsteps=1, maxretries=16, conmax=1e-4,
+        cstick=1.0, gsticki=1.0, gstickl=1.0, tstick=1.0, dt_threshold=1.0,
         igash2o=0, igash2so4=1, igasso2=-1,
     )
 
@@ -280,10 +285,14 @@ def _env_for_scenario(T_K, p_hPa, rh, h2so4_pptv, mu_nm, sigma_g, cfg,
     gc = jnp.asarray([[h2o_mmr * float(rhoa[0]),
                         h2so4_mmr * float(rhoa[0])]], dtype=DTYPE)
 
-    # Initial lognormal aerosol: seeded with 1e-18 g/g total mass
+    # Initial lognormal aerosol seed. Fortran's
+    # `carma_sulfatetest_ensemble.F90` normalises so Σ mmr = 1e-18 g/g.
+    # In JAX-internal CGS, pc is #/cm³/z and the equivalent mass-density
+    # constraint is Σ pc·rmass = 1e-18 · rhoa, so we multiply by rhoa
+    # here for apples-to-apples parity with Fortran.
     r_bins_np = np.asarray(r_dry)
     pc_sulf = _init_lognormal_pc(r_bins_np, mu_nm, sigma_g,
-                                   total_mass_g_per_cm3=1e-18)
+                                   total_mass_g_per_cm3=1.0e-18 * float(rhoa[0]))
     pc = jnp.zeros((nz, nbin, cfg.nelem), dtype=DTYPE)
     pc = pc.at[0, :, 0].set(pc_sulf)
 
@@ -308,21 +317,31 @@ def _env_for_scenario(T_K, p_hPa, rh, h2so4_pptv, mu_nm, sigma_g, cfg,
 
 
 def run_jax_ensemble(scenarios, dtime_s=1800.0, nstep=100):
-    """Run every scenario through make_step_full end-to-end.
+    """Run every scenario through ``make_step_full_faithful`` end-to-end.
 
-    Loops in Python for simplicity (not vmap) since each scenario
-    runs a sequential time loop; batching in vmap would require
-    scan over time within vmap over scenarios. That's a future
-    optimisation — the per-call 92 μs warm time × 1000 × 100
-    steps ≈ 9 s, fast enough."""
+    The faithful chain bundles microslow (coag) + microfast_full inside
+    one step closure and runs the adaptive substep retry per Fortran's
+    ``newstate_calc.F90``. ``prestep`` is invoked between steps to
+    refresh ``(pcl, gcl, told, d_gc, d_t, pconmax)`` exactly as Fortran
+    does.
+
+    Loops in Python over scenarios (not vmap); per-scenario warm time
+    is small enough that 1000 × 100 = 100k inner steps complete in a
+    few minutes."""
     cfg = _minimal_config()
     print(f"  bin grid: nbin={cfg.nbin}, rmin={float(cfg.groups[0].r[0])*1e7:.1f} nm, "
           f"rmrat={cfg.groups[0].rmrat}, rmax={float(cfg.groups[0].r[-1])*1e4:.2f} μm",
           flush=True)
     ppm_coefs = _compute_ppm_coefs(cfg)
-    step = make_step_full(cfg)
-    from carma.step import make_step_coag
-    step_coag = make_step_coag(cfg)
+    step = make_step_full_faithful(cfg, ppm_coefs=ppm_coefs)
+
+    # Static element/group descriptors for prestep.
+    itype_arr = jnp.asarray([e.itype for e in cfg.elements])
+    ienconc_arr = jnp.asarray([g.ienconc for g in cfg.groups])
+    igelem_arr = jnp.asarray([e.igroup for e in cfg.elements])
+    rmass_2d = jnp.stack(
+        [jnp.asarray(g.rmass, dtype=DTYPE) for g in cfg.groups], axis=1,
+    )
 
     n = int(scenarios["_n"])
     T_final = np.zeros(n, dtype=np.float64)
@@ -340,40 +359,41 @@ def run_jax_ensemble(scenarios, dtime_s=1800.0, nstep=100):
         pc = env["pc"]
         gc = env["gc"]
         t = env["t"]
-        ckernel = env["ckernel"]
-        # State carried through prestep:
-        pcl = pc
-        gcl = gc
-        told = t
-        env_no_state = {k: v for k, v in env.items()
-                        if k not in ("pc", "gc", "t", "ckernel")}
 
-        try:
-            for _ in range(nstep):
-                # Coagulation step (Phase 10.4b composition)
-                pc, gc, t, pcl, gcl, _ = step_coag(
-                    pc, gc, t, pcl, gcl, told, env["zmet"], ckernel,
-                    dtime_s,
-                )
-                told = t
-                # Growth + sulfate-nucleation step
-                pc, gc, t, _ = step(pc=pc, gc=gc, t=t, dtime=dtime_s,
-                                    **env_no_state)
-        except Exception as exc:            # noqa: BLE001
-            status[i] = f"error: {exc.__class__.__name__}: {str(exc)[:200]}"
-            continue
+        for _step_idx in range(nstep):
+            # No external advection / transport in this single-cell test, so
+            # the "saved" state at the start of each outer step is exactly
+            # the current state. Pass it as both (pc, gc, t) and
+            # (pcl, gcl, told); prestep then computes d_gc=d_t=0 and
+            # produces pconmax for microfast.
+            pc, gc, t, pcl, gcl, d_gc, d_t, pconmax = prestep(
+                pc, gc, t, pc, gc, t, env["zmet"],
+                itype_arr, ienconc_arr, igelem_arr, rmass_2d,
+                do_substep=True, do_coag=cfg.do_coag,
+            )
 
-        # Convert JAX internal-CGS outputs to Fortran's MMR convention
-        # to enable apples-to-apples parity:
+            pc, gc, t, _diag = step(
+                pc=pc, gc=gc, t=t, dtime=dtime_s,
+                rhoa=env["rhoa"], zmet=env["zmet"],
+                akelvin=env["akelvin"], akelvini=env["akelvini"],
+                gro=env["gro"], gro1=env["gro1"], rup_wet=env["rup_wet"],
+                rlhe=env["rlhe"], rlhm=env["rlhm"],
+                ckernel=env["ckernel"], pconmax=pconmax,
+                ds_threshold_arr=env["ds_threshold_arr"],
+                pcl=pcl, gcl=gcl, told=t, d_gc=d_gc, d_t=d_t,
+                dt_threshold=DTYPE(cfg.dt_threshold),
+            )
+
+        # Convert JAX internal-CGS outputs to Fortran's MMR convention:
         #   gc [g/cm³/z] / rhoa [g/cm³/z]  →  mmr [g/g]
         #   pc [#/cm³/z] × rmass [g] / rhoa → mmr_per_bin [g/g]
-        rhoa = float(env["rhoa"][0])          # g/cm³/z
+        rhoa = float(env["rhoa"][0])              # g/cm³/z
         rmass = np.asarray(cfg.groups[0].rmass)     # g per particle per bin
         T_final[i] = float(t[0])
         gc_final[i] = float(gc[0, 1]) / rhoa                    # g/g
         pc_final[i] = np.asarray(pc[0, :, 0]) * rmass / rhoa   # g/g per bin
 
-        if i % 100 == 0:
+        if i % 50 == 0:
             print(f"  scenario {i:4d}/{n}: T={T_final[i]:.1f}K, "
                   f"gc_H2SO4={gc_final[i]:.3e}", flush=True)
 
