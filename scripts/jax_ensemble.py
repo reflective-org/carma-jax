@@ -230,15 +230,41 @@ def _env_for_scenario(T_K, p_hPa, rh, h2so4_pptv, mu_nm, sigma_g, cfg,
         ngas=ngas, do_cnst_rlh=False,
     )
 
-    # Wet radii. For sulfate without hygroscopic swelling yet, approximate
-    # r_wet = r_dry (rup_wet = rup_dry, rlow_wet = rlow_dry).
-    r_dry = jnp.asarray(cfg.groups[0].r)
-    rup_dry = jnp.asarray(cfg.groups[0].rup)
-    rlow_dry = jnp.asarray(cfg.groups[0].rlow)
-    r_wet = r_dry[None, :, None]                    # (nz, nbin, ngroup)
-    rup_wet = rup_dry[None, :, None]
-    rlow_wet = rlow_dry[None, :, None]
-    re = jnp.zeros((nz, nbin, ngroup), dtype=DTYPE)   # Reynolds # ~0 for small particles
+    # H2SO4 gas mmr (g/g) and gas mass density (g/cm³) — used both for
+    # the gc tensor and for the wet-radius hygroscopic-growth call.
+    h2so4_mmr = h2so4_pptv * 1.0e-12 * (98.0 / 29.0)        # g/g
+    pvapl_Pa = jnp.exp(54.842763 - 6763.22 / T_K
+                        - 4.210 * jnp.log(T_K) + 0.000367 * T_K)
+    h2o_mmr = rh * float(pvapl_Pa) * 18.0 / (29.0 * p_hPa * 100.0)
+    rhoa_pure = float(rhoa[0]) / float(zmet[0])      # g/cm³ pure-air density
+    h2o_mass_cgs = h2o_mmr * rhoa_pure                # g/cm³
+    h2o_vp_cgs = float(pvapl_Pa) * 10.0               # Pa → dyne/cm²
+
+    # Wet radii via Fortran's I_WTPCT_H2SO4 path (sulfate group's irhswell).
+    # Recomputed once per scenario at initial T/RH/H2O — Fortran would refresh
+    # each Step call, but for this single-cell test T is constant and H2O
+    # drifts negligibly, so a static approximation tracks closely.
+    from carma.wetr import get_wetr
+    from carma.enums import SwellMethod
+    grp = cfg.groups[0]
+    r_dry = jnp.asarray(grp.r, dtype=DTYPE)
+    rup_dry = jnp.asarray(grp.rup, dtype=DTYPE)
+    rlow_dry = jnp.asarray(grp.rlow, dtype=DTYPE)
+    rho_dry_per_bin = jnp.full(r_dry.shape, _FORTRAN_RHO_SULF, dtype=DTYPE)
+    swell = int(SwellMethod.I_WTPCT_H2SO4)
+    r_wet_1d, rho_wet = get_wetr(r_dry, rho_dry_per_bin, rh, T_K, swell,
+        h2o_mass=h2o_mass_cgs, h2o_vp=h2o_vp_cgs,
+        gwtmol_h2so4=DTYPE(_GWTMOL_H2SO4))
+    rup_wet_1d, _ = get_wetr(rup_dry, rho_dry_per_bin, rh, T_K, swell,
+        h2o_mass=h2o_mass_cgs, h2o_vp=h2o_vp_cgs,
+        gwtmol_h2so4=DTYPE(_GWTMOL_H2SO4))
+    rlow_wet_1d, _ = get_wetr(rlow_dry, rho_dry_per_bin, rh, T_K, swell,
+        h2o_mass=h2o_mass_cgs, h2o_vp=h2o_vp_cgs,
+        gwtmol_h2so4=DTYPE(_GWTMOL_H2SO4))
+    r_wet = r_wet_1d[None, :, None]                 # (nz, nbin, ngroup)
+    rup_wet = rup_wet_1d[None, :, None]
+    rlow_wet = rlow_wet_1d[None, :, None]
+    re = jnp.zeros((nz, nbin, ngroup), dtype=DTYPE)
     rrat = jnp.ones((nbin, ngroup), dtype=DTYPE)
     eshape_arr = jnp.asarray([float(g.eshape) for g in cfg.groups], dtype=DTYPE)
     is_ice_arr = np.asarray([bool(g.is_ice) for g in cfg.groups])
@@ -247,12 +273,11 @@ def _env_for_scenario(T_K, p_hPa, rh, h2so4_pptv, mu_nm, sigma_g, cfg,
         [cfg.igash2so4 for _ in cfg.elements], dtype=np.int32)
 
     # Fall velocity, Reynolds number, slip correction (needed for coag kernel
-    # AND for setup_gkern — re is the real Reynolds, not zeros).
+    # AND for setup_gkern — re is the real Reynolds, not zeros). Uses wet
+    # radii and per-bin wet density from get_wetr above.
     from carma.setup_vf import setup_vf_jit
     rmass_2d = jnp.asarray(cfg.groups[0].rmass)[:, None]              # (nbin, ngroup)
-    rho_p_2d = jnp.full((nbin, ngroup), float(cfg.groups[0].rmass[0]
-                                                / cfg.groups[0].vol[0]),
-                         dtype=DTYPE)                                  # (nbin, ngroup)
+    rho_p_2d = rho_wet[:, None]                                        # (nbin, ngroup)
     rrat_2d = jnp.ones((nbin, ngroup), dtype=DTYPE)
     rprat_2d = jnp.ones((nbin, ngroup), dtype=DTYPE)
     vf, re_real, bpm = setup_vf_jit(
@@ -273,13 +298,6 @@ def _env_for_scenario(T_K, p_hPa, rh, h2so4_pptv, mu_nm, sigma_g, cfg,
         T, rhoa, zmet, rmu, r_wet, rrat_2d, rprat_2d, bpm, rmass_2d,
         re_real, vf, cfg.cstick,
     )
-
-    # H2SO4 gas mmr from scenario ppbv
-    h2so4_mmr = h2so4_pptv * 1.0e-12 * (98.0 / 29.0)        # g/g
-    # H2O mmr from RH × saturation (Murphy-Koop analytic estimate)
-    pvapl_Pa = jnp.exp(54.842763 - 6763.22 / T_K
-                        - 4.210 * jnp.log(T_K) + 0.000367 * T_K)
-    h2o_mmr = rh * float(pvapl_Pa) * 18.0 / (29.0 * p_hPa * 100.0)
 
     # gc in CGS: mmr × rhoa (rhoa already includes zmet factor)
     gc = jnp.asarray([[h2o_mmr * float(rhoa[0]),
