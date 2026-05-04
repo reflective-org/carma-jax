@@ -98,7 +98,7 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
 - [x] `pheat` (37×1000 = 37 000 (scen,bin) pairs pass at rtol 1e-10; median bit-exact, max 9.9e-14). Sulfate test: `do_pheat=False`, `NWAVE=0` → no-radiation branch only (`akas = exp(akelvin/rup_wet)` + standard Köhler dmdt). Probe calls Fortran's `pheat` for `ibin=1..NBIN-1` (matching growevapl's loop). Diagnostic now also dumps `rup_wet` (NZ,NBIN,NGROUP) used by the Kelvin factor.
 
 ### `src/carma/growth/growevapl.py`  ↔  `growevapl.F90`
-- [ ] `growevapl`
+- [x] `growevapl` (1000/1000 pass at rtol 1e-10; growlg max 1.8e-13 / evaplg max 9.9e-14, both medians near ε). **Bug fixed**: JAX was missing the `pc > SMALL_PC` gate on the growth/evaporation flux branches (`growevapl.F90:212-226`), causing non-zero evaplg on bins where `pc ≤ 1e-50` (Fortran zeros those out). Probe: `dump_growevapl_probe` calls maxconc then growevapl at end-of-step state. Diagnostic also dumps PPM tables (dm, pratt, prat, pden1, palr, igrowgas) and rup_wet.
 
 ### `src/carma/growth/growp.py`  ↔  `growp.F90`
 - [ ] `growp`

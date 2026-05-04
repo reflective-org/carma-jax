@@ -605,6 +605,101 @@ def test_binary_nuc_zhao1995_matches_fortran():
         raise AssertionError("\n".join(msg_lines))
 
 
+def test_growevapl_matches_fortran():
+    """Phase 8.5: JAX growevapl matches Fortran's growevapl(growlg, evaplg)
+    across all scenarios at substep 1.
+
+    Fortran growevapl.F90: PPM growth+evap loss rates. Called from microfast
+    with pconmax that was set pre-microfast — meaning the regular dumped
+    growlg/evaplg were computed on a different (pre-advance) pc state.
+    The `dump_growevapl_probe` calls maxconc then growevapl at end-of-step
+    so JAX and Fortran share the same pc/state.
+
+    Sulfate test: NGROUP=1, igas=H2SO4 (index 1, 0-based), no ice.
+    PPM tables (dm, pratt, prat, pden1, palr) are dumped at step 1 only.
+    dtime = 1800 s (carma_sulfatetest.F90).
+    """
+    from carma.growth.growevapl import growevapl
+    import jax.numpy as jnp
+
+    DTIME = 1800.0
+    iz = 0
+    NBIN = 38
+    NGROUP = 1
+    is_ice_arr = jnp.asarray([False])
+    ienconc_arr = jnp.asarray([0])
+
+    growlg_max_rel = {}
+    evaplg_max_rel = {}
+    failures = []
+
+    # Load step-1 static tables from scen_000 (same for all scenarios)
+    d0 = read_substep(_DIFF_BASE / "scen_000", step=1)
+    if d0.dm_bin is None or d0.pratt is None:
+        pytest.skip("PPM tables not in dump — re-run scripts/run_diagnostic_ensemble.py")
+    dm_j   = jnp.asarray(d0.dm_bin)
+    pratt_j = jnp.asarray(d0.pratt)
+    prat_j  = jnp.asarray(d0.prat)
+    pden1_j = jnp.asarray(d0.pden1)
+    palr_j  = jnp.asarray(d0.palr)
+    # igrowgas from dump is float-encoded Fortran 1-based; convert to 0-based int
+    igrowgas_arr = jnp.asarray(
+        [int(d0.igrowgas[0]) - 1]  # 2 (Fortran) → 1 (0-based H2SO4)
+    )
+
+    for scen_id in _ALL_SCEN_IDS:
+        scen_dir = _DIFF_BASE / f"scen_{scen_id:03d}"
+        d = read_substep(scen_dir, step=1)
+        growlg_F = np.fromfile(scen_dir / "substep_0001_growlg_probe.bin",
+                               dtype=np.float64).reshape(NBIN, NGROUP, order="F")
+        evaplg_F = np.fromfile(scen_dir / "substep_0001_evaplg_probe.bin",
+                               dtype=np.float64).reshape(NBIN, NGROUP, order="F")
+        if not (scen_dir / "substep_0001_growlg_probe.bin").exists():
+            pytest.skip("growlg_probe not in dump")
+
+        # Compute pconmax at end-of-step (matches what growevapl probe does)
+        from carma.utils.smallconc import maxconc
+        pconmax_j = maxconc(jnp.asarray(d.pc), ienconc_arr, jnp.asarray(d.zmet))
+
+        growlg_init = jnp.zeros((NBIN, NGROUP), dtype=jnp.float64)
+        evaplg_init = jnp.zeros((NBIN, NGROUP), dtype=jnp.float64)
+        growlg_j, evaplg_j = growevapl(
+            jnp.asarray(d.pc),
+            growlg_init, evaplg_init,
+            jnp.asarray(d.supsatl), jnp.asarray(d.supsati),
+            jnp.asarray(d.pvapl), jnp.asarray(d.pvapi),
+            jnp.asarray(d.akelvin), jnp.asarray(d.akelvini),
+            jnp.asarray(d.gro), jnp.asarray(d.gro1),
+            jnp.asarray(d.rup_wet),
+            jnp.asarray(d.rmass_bin), dm_j, pconmax_j,
+            pratt_j, prat_j, pden1_j, palr_j,
+            is_ice_arr, igrowgas_arr, ienconc_arr,
+            DTIME, iz, NBIN, NGROUP,
+        )
+
+        _, mg = compute_rel_err(np.asarray(growlg_j), growlg_F)
+        _, me = compute_rel_err(np.asarray(evaplg_j), evaplg_F)
+        growlg_max_rel[scen_id] = mg
+        evaplg_max_rel[scen_id] = me
+        tol = _tol_for("growevapl")
+        if mg > tol:
+            failures.append(("growlg", scen_id, mg))
+        if me > tol:
+            failures.append(("evaplg", scen_id, me))
+
+    sd = _summary_plot_dir()
+    make_summary_plot("growevapl_growlg", growlg_max_rel, sd)
+    make_summary_plot("growevapl_evaplg", evaplg_max_rel, sd)
+
+    if failures:
+        msg_lines = [f"growevapl mismatched on {len(failures)} (output, scen) tuples:"]
+        for which, scen_id, err in failures[:10]:
+            msg_lines.append(f"  {which} scen {scen_id}: rel err {err:.3e}")
+        if len(failures) > 10:
+            msg_lines.append(f"  ... and {len(failures) - 10} more")
+        raise AssertionError("\n".join(msg_lines))
+
+
 def test_pheat_matches_fortran():
     """Phase 8.4: JAX pheat matches Fortran's pheat for bins 0..NBIN-2
     across all scenarios at substep 1.
