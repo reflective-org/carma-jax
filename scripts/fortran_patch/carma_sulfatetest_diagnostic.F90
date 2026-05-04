@@ -322,6 +322,13 @@ contains
     call dump_3d(prefix, 'coaglg', cs%f_coaglg)
     call dump_3d(prefix, 'coagpe', cs%f_coagpe)
 
+    ! Prestep snapshots (state at start of substep, used by bookkeeping)
+    call dump_3d(prefix, 'pcl', cs%f_pcl)
+    call dump_2d(prefix, 'gcl', cs%f_gcl)
+    call dump_1d(prefix, 'told', cs%f_told)
+    call dump_2d(prefix, 'd_gc', cs%f_d_gc)
+    call dump_1d(prefix, 'd_t', cs%f_d_t)
+
     ! Wet radius / density (rhopart + getwetr outputs)
     call dump_1d(prefix, 'relhum', cs%f_relhum)
     call dump_3d(prefix, 'rhop', cs%f_rhop)
@@ -351,6 +358,10 @@ contains
     ! rlhe/rlhm (latent-heat coefs), rlprod (after gsolve), t_pre, t_post.
     ! Internally saves/restores cstate.
     call dump_tsolve_probe(prefix, cs)
+
+    ! Per-substep probe: nsubsteps at end-of-step state. Dumps the
+    ! suggested ntsubsteps integer (cast to f8).
+    call dump_nsubsteps_probe(prefix, cs)
 
     ! Per-substep probe: full microfast prefix at end-of-step state up
     ! through psolve. Mirrors microfast.F90: sulfnuc → growevapl →
@@ -679,6 +690,58 @@ contains
 
     deallocate(prev_ice, prev_liq, tot_ice, tot_liq, gc_pre, gc_post)
   end subroutine dump_gsolve_probe
+
+
+  !! Probe: nsubsteps at end-of-step state. Saves/restores cstate.
+  !! Calls maxconc first so pconmax matches end-of-step pc, then nsubsteps.
+  !! Dumps:
+  !!   nsubsteps_probe : 1-element array with the suggested ntsubsteps as f8.
+  subroutine dump_nsubsteps_probe(prefix, cs)
+    character(len=*), intent(in)            :: prefix
+    type(carmastate_type), intent(inout)    :: cs
+    integer                                 :: rc_loc, nts
+    real(kind=f)                            :: dtime_local
+    integer, parameter                      :: iz = 1
+    interface
+      subroutine maxconc(carma, cstate, iz, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma; type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in) :: iz; integer, intent(inout) :: rc
+      end subroutine maxconc
+      subroutine nsubsteps(carma, cstate, iz, dtime_save, ntsubsteps, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma; type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in) :: iz
+        real(kind=f), intent(in) :: dtime_save
+        integer, intent(inout) :: ntsubsteps, rc
+      end subroutine nsubsteps
+    end interface
+
+    if (.not. allocated(cs%f_pc)) return
+
+    block
+      real(kind=f), allocatable :: pconmax_save(:,:)
+      allocate(pconmax_save(size(cs%f_t), carma%f_NGROUP))
+      pconmax_save = cs%f_pconmax
+
+      rc_loc = 0
+      call maxconc(carma, cs, iz, rc_loc); if (rc_loc<0) rc_loc=0
+
+      ! Use the test's outer dtime (1800s)
+      dtime_local = cs%f_dtime_orig
+      nts = 1
+      call nsubsteps(carma, cs, iz, dtime_local, nts, rc_loc); if (rc_loc<0) rc_loc=0
+
+      cs%f_pconmax = pconmax_save
+      deallocate(pconmax_save)
+    end block
+
+    block
+      real(kind=f) :: arr(1)
+      arr(1) = real(nts, kind=f)
+      call dump_alloc_1d(prefix, 'nsubsteps_probe', arr)
+    end block
+  end subroutine dump_nsubsteps_probe
 
 
   !! Probe: full evolution → gsolve → tsolve at end-of-step state.
@@ -1048,6 +1111,45 @@ contains
     call dump_alloc_2d(prefix, 'pden1',    pden1_2d)
     call dump_alloc_2d(prefix, 'palr',     palr2d)
     call dump_alloc_1d(prefix, 'igrowgas', igrowgas_r)
+
+    ! Additional static config tables for nsubsteps and other solvers.
+    block
+      real(kind=f), allocatable :: inucgas_r(:), nnuc2elem_r(:)
+      real(kind=f), allocatable :: ienconc_r(:), itype_r(:), igelem_r(:)
+      real(kind=f), allocatable :: inuc2elem_r(:,:), inucproc_r(:,:)
+      real(kind=f), allocatable :: is_grp_ice_r(:)
+      integer :: i, j
+      allocate(inucgas_r(ng), nnuc2elem_r(ne), ienconc_r(ng))
+      allocate(itype_r(ne), igelem_r(ne), is_grp_ice_r(ng))
+      allocate(inuc2elem_r(ne, ne), inucproc_r(ne, ne))
+      do i = 1, ng
+        inucgas_r(i)   = real(carma%f_inucgas(i),   kind=f)
+        ienconc_r(i)   = real(carma%f_group(i)%f_ienconc, kind=f)
+        is_grp_ice_r(i) = merge(1._f, 0._f, carma%f_group(i)%f_is_ice)
+      end do
+      do i = 1, ne
+        nnuc2elem_r(i) = real(carma%f_nnuc2elem(i), kind=f)
+        itype_r(i)     = real(carma%f_element(i)%f_itype, kind=f)
+        igelem_r(i)    = real(carma%f_element(i)%f_igroup, kind=f)
+      end do
+      do j = 1, ne
+        do i = 1, ne
+          inuc2elem_r(i, j) = real(carma%f_inuc2elem(i, j), kind=f)
+          inucproc_r(i, j)  = real(carma%f_inucproc(i, j),  kind=f)
+        end do
+      end do
+      call dump_alloc_1d(prefix, 'inucgas',   inucgas_r)
+      call dump_alloc_1d(prefix, 'nnuc2elem', nnuc2elem_r)
+      call dump_alloc_1d(prefix, 'ienconc',   ienconc_r)
+      call dump_alloc_1d(prefix, 'itype',     itype_r)
+      call dump_alloc_1d(prefix, 'igelem',    igelem_r)
+      call dump_alloc_1d(prefix, 'is_grp_ice', is_grp_ice_r)
+      call dump_alloc_2d(prefix, 'inuc2elem', inuc2elem_r)
+      call dump_alloc_2d(prefix, 'inucproc',  inucproc_r)
+      deallocate(inucgas_r, nnuc2elem_r, ienconc_r, itype_r, igelem_r)
+      deallocate(is_grp_ice_r, inuc2elem_r, inucproc_r)
+    end block
+
     deallocate(dm2d, pratt3d, prat3d, pden1_2d, palr2d, igrowgas_r)
   end subroutine dump_carma_ppm
 
