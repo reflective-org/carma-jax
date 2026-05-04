@@ -605,6 +605,120 @@ def test_binary_nuc_zhao1995_matches_fortran():
         raise AssertionError("\n".join(msg_lines))
 
 
+def test_totalcondensate_matches_fortran():
+    """Phase 8.12a: JAX totalcondensate matches Fortran on dump's pc.
+
+    `previous_ice_probe` and `previous_liquid_probe` are computed by
+    Fortran's `totalcondensate` on the dumped pc (no mutation), so they're
+    a directly matched comparison.
+
+    Sulfate test: NELEM=1, no cores → volatilemass = pc * rmass. NGAS=2,
+    igrowgas[0]=H2SO4=1 (0-based). Group is liquid (not ice).
+    """
+    from carma.solvers.totalcondensate import totalcondensate
+    import jax.numpy as jnp
+
+    NBIN, NGROUP, NELEM, NGAS = 38, 1, 1, 2
+
+    prev_ice_max_rel = {}
+    prev_liq_max_rel = {}
+    failures = []
+
+    for scen_id in _ALL_SCEN_IDS:
+        scen_dir = _DIFF_BASE / f"scen_{scen_id:03d}"
+        d = read_substep(scen_dir, step=1)
+        ice_path = scen_dir / "substep_0001_previous_ice_probe.bin"
+        liq_path = scen_dir / "substep_0001_previous_liquid_probe.bin"
+        if not (ice_path.exists() and liq_path.exists()):
+            pytest.skip("totalcondensate probe files missing — re-run scripts/run_diagnostic_ensemble.py")
+        prev_ice_F = np.fromfile(ice_path, dtype=np.float64)
+        prev_liq_F = np.fromfile(liq_path, dtype=np.float64)
+
+        ti, tl = totalcondensate(
+            jnp.asarray(d.pc), jnp.asarray(d.rmass_bin),
+            jnp.asarray([0]), jnp.asarray([False]), jnp.asarray([1]),
+            NBIN, NGROUP, NGAS, 0,
+        )
+        ti_arr = np.asarray(ti); tl_arr = np.asarray(tl)
+        _, m_ice = compute_rel_err(ti_arr, prev_ice_F)
+        _, m_liq = compute_rel_err(tl_arr, prev_liq_F)
+        prev_ice_max_rel[scen_id] = m_ice
+        prev_liq_max_rel[scen_id] = m_liq
+        tol = _tol_for("totalcondensate")
+        if m_ice > tol:
+            failures.append(("ice", scen_id, m_ice))
+        if m_liq > tol:
+            failures.append(("liq", scen_id, m_liq))
+
+    sd = _summary_plot_dir()
+    make_summary_plot("totalcondensate_ice", prev_ice_max_rel, sd)
+    make_summary_plot("totalcondensate_liquid", prev_liq_max_rel, sd)
+
+    if failures:
+        msg_lines = [f"totalcondensate mismatched on {len(failures)} (output, scen) tuples:"]
+        for which, scen_id, err in failures[:10]:
+            msg_lines.append(f"  {which} scen {scen_id}: rel err {err:.3e}")
+        if len(failures) > 10:
+            msg_lines.append(f"  ... and {len(failures) - 10} more")
+        raise AssertionError("\n".join(msg_lines))
+
+
+def test_gsolve_matches_fortran():
+    """Phase 8.12b: JAX gsolve matches Fortran's gsolve(gc_post).
+
+    Fortran gsolve computes:
+        gasprod = ((prev_ice - tot_ice) + (prev_liq - tot_liq)) / dt
+        gc[iz, igas] += dt * gasprod
+
+    We feed JAX gsolve the Fortran-side previous_*/total_* and the
+    Fortran gc_pregsolve_probe and verify gc_postgsolve_probe matches.
+
+    Latent heat is not bench-validated here (rlhe/rlhm not in dump);
+    rlprod doesn't affect gc.
+    """
+    from carma.solvers.gsolve import gsolve
+    import jax.numpy as jnp
+
+    NGAS = 2
+    gc_max_rel = {}
+    failures = []
+
+    for scen_id in _ALL_SCEN_IDS:
+        scen_dir = _DIFF_BASE / f"scen_{scen_id:03d}"
+        d = read_substep(scen_dir, step=1)
+        prev_ice_F = np.fromfile(scen_dir/"substep_0001_previous_ice_probe.bin", dtype=np.float64)
+        prev_liq_F = np.fromfile(scen_dir/"substep_0001_previous_liquid_probe.bin", dtype=np.float64)
+        tot_ice_F = np.fromfile(scen_dir/"substep_0001_total_ice_probe.bin", dtype=np.float64)
+        tot_liq_F = np.fromfile(scen_dir/"substep_0001_total_liquid_probe.bin", dtype=np.float64)
+        gc_pre_F = np.fromfile(scen_dir/"substep_0001_gc_pregsolve_probe.bin", dtype=np.float64)
+        gc_post_F = np.fromfile(scen_dir/"substep_0001_gc_postgsolve_probe.bin", dtype=np.float64)
+
+        gc_init = jnp.zeros((1, NGAS)).at[0, :].set(jnp.asarray(gc_pre_F))
+        rlhe = jnp.zeros((1, NGAS)); rlhm = jnp.zeros((1, NGAS))
+        rhoa = jnp.asarray(d.rhoa); rlprod = jnp.zeros(())
+        gc_new, _, _ = gsolve(
+            gc_init, rlprod,
+            jnp.asarray(prev_ice_F), jnp.asarray(prev_liq_F),
+            jnp.asarray(tot_ice_F), jnp.asarray(tot_liq_F),
+            rlhe, rlhm, rhoa, 1800.0, 0, NGAS,
+            jnp.asarray([0.0, 0.0]), 1.0,
+        )
+        gc_new_arr = np.asarray(gc_new[0])
+        _, m = compute_rel_err(gc_new_arr, gc_post_F)
+        gc_max_rel[scen_id] = m
+        if m > _tol_for("gsolve"):
+            failures.append((scen_id, m))
+
+    make_summary_plot("gsolve_gc", gc_max_rel, _summary_plot_dir())
+    if failures:
+        msg_lines = [f"gsolve mismatched on {len(failures)} scenarios:"]
+        for scen_id, err in failures[:10]:
+            msg_lines.append(f"  scen {scen_id}: rel err {err:.3e}")
+        if len(failures) > 10:
+            msg_lines.append(f"  ... and {len(failures) - 10} more")
+        raise AssertionError("\n".join(msg_lines))
+
+
 def test_psolve_matches_fortran():
     """Phase 8.11: JAX psolve (interleaved with growp) matches Fortran.
 

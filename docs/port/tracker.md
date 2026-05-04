@@ -121,13 +121,13 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
 - [x] `psolve` (1000/1000 pass at rtol 1e-10; max 4.0e-15, median ~6.5e-16, near machine ε). **Sequential dependency**: Fortran's microfast loop `do ielem; do ibin; growp; upgxfer; psolve` has growp at bin `i` reading `pc[i-1]` AFTER psolve at `i-1` already updated it. The bench mirrors that loop order — pre-computing growpe in advance gave bin-3+ drift. Probe `dump_psolve_probe` runs the full prefix `maxconc → sulfnuc → growevapl → per-(ie,ib){growp,upgxfer,psolve}` at end-of-step state and dumps `pc_prepsolve_probe`, `rhompe_probe`, `pc_postpsolve_probe`.
 
 ### `src/carma/solvers/gsolve.py`  ↔  `gsolve.F90`
-- [ ] `gsolve`
+- [x] `gsolve` (1000/1000 pass at rtol 1e-10; max 3.8e-14, median bit-exact). Probe `dump_gsolve_probe` runs the full microfast evolution sequence (`sulfnuc → growevapl → psolve loop → evapp → downgevapply`) at end-of-step state, snapshots `previous_ice/liquid` and `total_ice/liquid` via `totalcondensate`, then calls `gsolve` to compute the gc update. Latent-heat (rlhe/rlhm) not in dump; `rlprod` not bench-validated (doesn't affect gc).
 
 ### `src/carma/solvers/tsolve.py`  ↔  `tsolve.F90`
 - [ ] `tsolve`
 
 ### `src/carma/solvers/totalcondensate.py`  ↔  `totalcondensate.F90`
-- [ ] `totalcondensate`
+- [x] `totalcondensate` (1000/1000 bit-exact at rtol 1e-10). Sulfate test: NELEM=1, no cores → `volatilemass = pc * rmass`. Liquid group (not ice). Probe directly compares to Fortran's `totalcondensate(dump.pc)` output dumped as `previous_ice_probe`/`previous_liquid_probe`.
 
 ### `src/carma/nsubsteps.py`  ↔  `nsubsteps.F90`
 - [ ] `nsubsteps`
