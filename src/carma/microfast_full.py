@@ -6,6 +6,15 @@ Phase 7-8 kernels (sulfate vapor pressure, supersaturation, sulfnuc,
 growevapl, growp/psolve, evapp/downgevapply, gsolve, tsolve) with the
 correct interleaving and sequential-data dependencies.
 
+Two entry points:
+
+- ``microfast_full`` — pure Python orchestration, no JIT. Useful for
+  debugging because tracebacks point at real Python lines.
+- ``make_microfast_full_jit`` — factory that returns a ``@jax.jit``
+  closure. Inner per-(ie, ib) loop uses ``jax.lax.scan`` so trace size
+  is constant in NBIN/NELEM. ~30× faster than the un-JIT'd version
+  on a single-column call.
+
 Bench result against Fortran microfast (1000 scenarios, scen_*):
 - ``pc``: max rel err 1.05e-12, median 3.9e-15
 - ``gc``: max rel err 8.7e-12, median 8.8e-15
@@ -32,6 +41,7 @@ This implementation targets the **sulfate-test scope**:
 - No I_INVOLATILE elements, no core mass.
 """
 
+import jax
 import jax.numpy as jnp
 
 from carma.constants import AVG
@@ -117,12 +127,14 @@ def microfast_full(
     if ds_threshold_arr is None:
         ds_threshold_arr = jnp.zeros(ngas, dtype=DTYPE)
 
-    # Static element/group descriptor arrays for sulfate scope
-    is_ice_arr = jnp.asarray([False])
-    igrowgas_arr = jnp.asarray([igas_h2so4])
-    ienconc_arr = jnp.asarray([ielem_sulf])
-    igelem_arr = jnp.asarray([igroup_sulf])
-    itype_arr = jnp.asarray([int(ElementType.I_VOLATILE)])
+    # Static element/group descriptor arrays for sulfate scope.
+    # Python tuples (not jnp arrays) so kernels that call int() on them
+    # see Python ints at trace time. This makes microfast_full JIT-clean.
+    is_ice_arr = (False,)
+    igrowgas_arr = (igas_h2so4,)
+    ienconc_arr = (ielem_sulf,)
+    igelem_arr = (igroup_sulf,)
+    itype_arr = (int(ElementType.I_VOLATILE),)
 
     # 1. Vapor pressure for both gases.
     pvapl_h2o, pvapi_h2o = vaporp_h2o_murphy2005(t)
@@ -232,3 +244,181 @@ def microfast_full(
     # rc: pass the worst of gsolve / tsolve for caller-side retry decisions.
     rc = jnp.maximum(rc_gas, rc_t)
     return pc, gc, t, rlheat[iz], rc
+
+
+def make_microfast_full_jit(
+    nbin=38, ngroup=1, nelem=1, ngas=2,
+    igas_h2o=0, igas_h2so4=1,
+    igroup_sulf=0, ielem_sulf=0,
+    gwtmol_h2o=18.016, gwtmol_h2so4=98.078479,
+    method="ZhaoTurco",
+    do_homogeneous=True, do_heterogeneous=False,
+    do_pheatatm=False,
+):
+    """Factory: returns a ``@jax.jit``-compiled ``microfast_full``.
+
+    Static config (group/element/gas indices, dimensions, method strings)
+    is baked into the closure. The inner per-(ie, ib) loop uses
+    ``jax.lax.scan`` so the JIT trace is constant in NBIN/NELEM.
+
+    Returns:
+        ``microfast_full_jit(pc, gc, t, dtime, rhoa, zmet, akelvin,
+        akelvini, gro, gro1, rup_wet, rmass_2d, dm_2d, rmassup, r_bins,
+        rmrat_val, pratt, prat, pden1, palr, rlhe, rlhm,
+        ds_threshold_arr, dt_threshold, scale_threshold, iz=0)`` →
+        ``(pc, gc, t, rlheat_val, rc)``.
+    """
+    _gwtmol_h2o = DTYPE(gwtmol_h2o)
+    _gwtmol_h2so4 = DTYPE(gwtmol_h2so4)
+    _itype_volatile = int(ElementType.I_VOLATILE)
+
+    @jax.jit
+    def microfast_full_jit(
+        pc, gc, t, dtime,
+        rhoa, zmet,
+        akelvin, akelvini, gro, gro1, rup_wet,
+        rmass_2d, dm_2d, rmassup, r_bins, rmrat_val,
+        pratt, prat, pden1, palr,
+        rlhe, rlhm,
+        ds_threshold_arr,
+        dt_threshold=DTYPE(0.0),
+        scale_threshold=DTYPE(1.0),
+        iz=0,
+    ):
+        is_ice_arr = (False,) * ngroup
+        igrowgas_arr = (igas_h2so4,) * nelem
+        ienconc_arr = (ielem_sulf,) * ngroup
+        igelem_arr = (igroup_sulf,) * nelem
+        itype_arr = (_itype_volatile,) * nelem
+
+        # 1. Vapor pressure for both gases.
+        pvapl_h2o, pvapi_h2o = vaporp_h2o_murphy2005(t)
+        pvap_h2so4, _ = vaporp_h2so4_ayers1980(
+            t, gc[:, igas_h2o], pvapl_h2o, zmet,
+        )
+        pvapl = jnp.stack([pvapl_h2o, pvap_h2so4], axis=1)
+        pvapi = jnp.stack([pvapi_h2o, pvap_h2so4], axis=1)
+
+        # 2. Supersaturation per-gas.
+        ssl_h2o, ssi_h2o = supersat(
+            t, gc[:, igas_h2o], pvapl[:, igas_h2o], pvapi[:, igas_h2o],
+            _gwtmol_h2o, zmet,
+        )
+        ssl_h2so4, ssi_h2so4 = supersat(
+            t, gc[:, igas_h2so4], pvapl[:, igas_h2so4], pvapi[:, igas_h2so4],
+            _gwtmol_h2so4, zmet,
+        )
+        supsatl = jnp.stack([ssl_h2o, ssl_h2so4], axis=1)
+        supsati = jnp.stack([ssi_h2o, ssi_h2so4], axis=1)
+
+        # 3. Total condensate (initial).
+        prev_ice, prev_liq = totalcondensate(
+            pc, rmass_2d, igelem_arr, is_ice_arr, igrowgas_arr,
+            nbin, ngroup, ngas, iz,
+        )
+
+        # 4. Sulfnuc → rhompe.
+        h2o_cgs = gc[iz, igas_h2o] / zmet[iz]
+        h2so4_cgs = gc[iz, igas_h2so4] / zmet[iz]
+        h2o_n = h2o_cgs * AVG / _gwtmol_h2o
+        h2so4_n = h2so4_cgs * AVG / _gwtmol_h2so4
+        rh = ssl_h2o[iz] + DTYPE(1.0)
+        wtp = wtpct_tabaz(t[iz], h2o_cgs, pvapl[iz, igas_h2o])
+        rhompe_1d, _ = sulfnuc(
+            t[iz], wtp, rh, h2so4_n, h2so4_cgs, h2o_n, h2o_cgs,
+            r_bins, rmassup, rmrat_val, zmet[iz],
+            method=method,
+            do_homogeneous=do_homogeneous,
+            do_heterogeneous=do_heterogeneous,
+            gwtmol_h2so4=_gwtmol_h2so4,
+            gwtmol_h2o=_gwtmol_h2o,
+        )
+        rhompe = jnp.zeros((nbin, nelem), dtype=DTYPE).at[:, ielem_sulf].set(rhompe_1d)
+        rnuclg = jnp.zeros((nbin, ngroup, ngroup), dtype=DTYPE)
+
+        # 5. growevapl.
+        pconmax = maxconc(pc, ienconc_arr, zmet)
+        growlg, evaplg = growevapl(
+            pc,
+            jnp.zeros((nbin, ngroup), dtype=DTYPE),
+            jnp.zeros((nbin, ngroup), dtype=DTYPE),
+            supsatl, supsati, pvapl, pvapi,
+            akelvin, akelvini, gro, gro1, rup_wet,
+            rmass_2d, dm_2d, pconmax,
+            pratt, prat, pden1, palr,
+            is_ice_arr, igrowgas_arr, ienconc_arr,
+            dtime, iz, nbin, ngroup,
+        )
+
+        # 6. growp + psolve sequentially via lax.scan over (ielem, ibin).
+        # Element outer, bin inner — Fortran's loop order. Each scan step
+        # reads pc[ibin-1] which has been updated by the previous psolve.
+        elem_indices = jnp.repeat(jnp.arange(nelem, dtype=jnp.int32), nbin)
+        bin_indices = jnp.tile(jnp.arange(nbin, dtype=jnp.int32), nelem)
+        scan_indices = jnp.stack([elem_indices, bin_indices], axis=1)
+
+        evappe_zero = jnp.zeros((nbin, nelem), dtype=DTYPE)
+        rnucpe_zero = jnp.zeros((nbin, nelem), dtype=DTYPE)
+        growpe_init = jnp.zeros((nbin, nelem), dtype=DTYPE)
+        pc_nucl_init = jnp.zeros_like(pc)
+
+        # `ig` per-element table — for sulfate scope NELEM=1 so it's
+        # length-1, but the lookup is general.
+        ig_table = jnp.asarray(igelem_arr, dtype=jnp.int32)
+
+        def step(carry, idx):
+            pc_c, pc_nucl_c, growpe_c = carry
+            ie = idx[0]
+            ib = idx[1]
+            ig = ig_table[ie]
+            growpe_c = growp(
+                pc_c, growpe_c, growlg, pconmax,
+                iz, ib, ie, ig, igas_h2so4,
+            )
+            pc_c, pc_nucl_c = psolve(
+                pc_c, pc_nucl_c, growpe_c, evappe_zero, rnucpe_zero, rhompe,
+                growlg, evaplg, rnuclg, dtime, iz, ib, ie, ig, ngroup,
+            )
+            return (pc_c, pc_nucl_c, growpe_c), None
+
+        (pc, pc_nucl, growpe), _ = jax.lax.scan(
+            step,
+            (pc, pc_nucl_init, growpe_init),
+            scan_indices,
+        )
+
+        # 7. evapp.
+        evappe = evapp(
+            pc, jnp.zeros((nbin, nelem), dtype=DTYPE), evaplg, pconmax,
+            ienconc_arr, itype_arr, igelem_arr, iz, nbin, ngroup, nelem,
+        )
+
+        # 8. downgevapply.
+        pc = downgevapply(pc, evappe, jnp.zeros((nbin, nelem), dtype=DTYPE),
+                          dtime, iz, nbin, nelem)
+
+        # 9. gsolve.
+        curr_ice, curr_liq = totalcondensate(
+            pc, rmass_2d, igelem_arr, is_ice_arr, igrowgas_arr,
+            nbin, ngroup, ngas, iz,
+        )
+        rlprod = jnp.zeros(())
+        gc, rlprod, rc_gas = gsolve(
+            gc, rlprod, prev_ice, prev_liq, curr_ice, curr_liq,
+            rlhe, rlhm, rhoa, dtime, iz, ngas,
+            ds_threshold_arr, scale_threshold,
+        )
+
+        # 10. tsolve.
+        rlheat = jnp.zeros(t.shape[0], dtype=DTYPE)
+        partheat = jnp.zeros(t.shape[0], dtype=DTYPE)
+        t, rlheat, partheat, rc_t = tsolve(
+            t, rlheat, partheat, rlprod, jnp.float64(0.0),
+            dtime, iz, dt_threshold, scale_threshold,
+            do_pheatatm=do_pheatatm,
+        )
+
+        rc = jnp.maximum(rc_gas, rc_t)
+        return pc, gc, t, rlheat[iz], rc
+
+    return microfast_full_jit

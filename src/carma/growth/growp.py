@@ -38,16 +38,20 @@ def growp(pc, growpe, growlg, pconmax, iz, ibin, ielem, igroup, igrowgas):
     Returns:
         Updated growpe array (NBIN, NELEM).
     """
-    # Only if this group grows (checked via number conc element) and not first bin
-    if igrowgas < 0 or ibin == 0:
-        return growpe
-
-    # Only if significant concentration in this group
+    # Gate as a traced expression so growp works under lax.scan (where
+    # ibin / igrowgas may be traced) as well as under unrolled Python
+    # loops (where they are concrete ints).
+    igrowgas_j = jnp.asarray(igrowgas)
+    ibin_j = jnp.asarray(ibin)
     has_particles = pconmax[iz, igroup] > FEW_PC
+    gate = (igrowgas_j >= 0) & (ibin_j > 0) & has_particles
 
-    # Growth production: particles from bin i-1 growing into bin i
-    prod = pc[iz, ibin - 1, ielem] * growlg[ibin - 1, igroup]
-    prod = jnp.where(has_particles, prod, DTYPE(0.0))
+    # Growth production from bin i-1 into bin i. Reading at ibin-1 with
+    # ibin=0 would yield pc[-1] = pc[NBIN-1], but the gate masks that to
+    # zero so it doesn't pollute downstream.
+    src_bin = jnp.maximum(ibin_j - 1, 0)
+    prod_raw = pc[iz, src_bin, ielem] * growlg[src_bin, igroup]
+    prod = jnp.where(gate, prod_raw, DTYPE(0.0))
 
     growpe = growpe.at[ibin, ielem].set(prod)
 
