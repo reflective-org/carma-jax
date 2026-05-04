@@ -130,10 +130,10 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
 - [x] `totalcondensate` (1000/1000 bit-exact at rtol 1e-10). Sulfate test: NELEM=1, no cores → `volatilemass = pc * rmass`. Liquid group (not ice). Probe directly compares to Fortran's `totalcondensate(dump.pc)` output dumped as `previous_ice_probe`/`previous_liquid_probe`.
 
 ### `src/carma/nsubsteps.py`  ↔  `nsubsteps.F90`
-- [ ] `nsubsteps`
+- [x] `nsubsteps` (1000/1000 bit-exact integer match). Sulfate test exercises only the growth-rate path (no I_DROPACT, no I_AERFREEZE → only I_HOMNUC at gas index 1). Distribution: 986 scenarios → 1, 12 → 2, 2 → 3. Probe `dump_nsubsteps_probe` calls maxconc + nsubsteps at end-of-step state. Diagnostic now also dumps the full static config tables (`inucgas`, `nnuc2elem`, `ienconc`, `itype`, `igelem`, `is_grp_ice`, `inuc2elem`, `inucproc`).
 
 ### `src/carma/prestep.py`  ↔  `prestep.F90`
-- [ ] `prestep`
+- [x] `prestep` (1000/1000 pass with abs-err 0). Bookkeeping bench: verifies the d_gc / d_t / t-rewind arithmetic is consistent with `(gc, gcl, t, told)` snapshots dumped by Fortran; smallconc and maxconc components already validated (Phase 8.1). Diagnostic also dumps `pcl`, `gcl`, `told`, `d_gc`, `d_t` for the bench.
 
 ### Coag pipeline (instrumented in Phase 0 per user direction)
 

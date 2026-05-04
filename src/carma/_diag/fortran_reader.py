@@ -43,6 +43,11 @@ Array shapes (in numpy, after Fortran→C order conversion):
     pconmax     (NZ, NGROUP)
     coaglg      (NZ, NBIN, NGROUP)
     coagpe      (NZ, NBIN, NELEM)
+    pcl         (NZ, NBIN, NELEM)                     — prestep pc snapshot
+    gcl         (NZ, NGAS)                            — prestep gc snapshot
+    told        (NZ,)                                 — prestep t snapshot
+    d_gc        (NZ, NGAS)                            — substep d_gc bookkeeping
+    d_t         (NZ,)                                 — substep d_t bookkeeping
     relhum      (NZ,)                                 — RH for swelling
     rhop        (NZ, NBIN, NGROUP)                    — dry particle density
     r_wet       (NZ, NBIN, NGROUP)                    — wet radius (getwetr)
@@ -61,6 +66,14 @@ Array shapes (in numpy, after Fortran→C order conversion):
     pden1       (NBIN, NGROUP)                        — only present at step 1 (static)
     palr        (4, NGROUP)                           — only present at step 1 (static)
     igrowgas    (NELEM,)                              — only present at step 1 (static, float-encoded int)
+    inucgas     (NGROUP,)                             — only present at step 1 (static, float-encoded int)
+    nnuc2elem   (NELEM,)                              — only present at step 1 (static, float-encoded int)
+    ienconc     (NGROUP,)                             — only present at step 1 (static, float-encoded int)
+    itype       (NELEM,)                              — only present at step 1 (static, float-encoded int)
+    igelem      (NELEM,)                              — only present at step 1 (static, float-encoded int)
+    is_grp_ice  (NGROUP,)                             — only present at step 1 (static, 0/1 float)
+    inuc2elem   (NELEM, NELEM)                        — only present at step 1 (static, float-encoded int)
+    inucproc    (NELEM, NELEM)                        — only present at step 1 (static, float-encoded int)
 """
 
 from __future__ import annotations
@@ -114,6 +127,11 @@ def _shape_map(dims):
         "pconmax":    (NZ, NGROUP),
         "coaglg":     (NZ, NBIN, NGROUP),
         "coagpe":     (NZ, NBIN, NELEM),
+        "pcl":        (NZ, NBIN, NELEM),
+        "gcl":        (NZ, NGAS),
+        "told":       (NZ,),
+        "d_gc":       (NZ, NGAS),
+        "d_t":        (NZ,),
         "relhum":     (NZ,),
         "rhop":       (NZ, NBIN, NGROUP),
         "r_wet":      (NZ, NBIN, NGROUP),
@@ -132,6 +150,14 @@ def _shape_map(dims):
         "pden1":       (NBIN, NGROUP),
         "palr":        (4, NGROUP),
         "igrowgas":    (NELEM,),
+        "inucgas":     (NGROUP,),
+        "nnuc2elem":   (NELEM,),
+        "ienconc":     (NGROUP,),
+        "itype":       (NELEM,),
+        "igelem":      (NELEM,),
+        "is_grp_ice":  (NGROUP,),
+        "inuc2elem":   (NELEM, NELEM),
+        "inucproc":    (NELEM, NELEM),
     }
 
 
@@ -173,6 +199,11 @@ class SubstepDump:
     pconmax:   np.ndarray
     coaglg:    np.ndarray
     coagpe:    np.ndarray
+    pcl:       np.ndarray
+    gcl:       np.ndarray
+    told:      np.ndarray
+    d_gc:      np.ndarray
+    d_t:       np.ndarray
     relhum:    np.ndarray
     rhop:      np.ndarray
     r_wet:     np.ndarray
@@ -191,6 +222,14 @@ class SubstepDump:
     pden1:       Optional[np.ndarray] = None
     palr:        Optional[np.ndarray] = None
     igrowgas:    Optional[np.ndarray] = None
+    inucgas:     Optional[np.ndarray] = None
+    nnuc2elem:   Optional[np.ndarray] = None
+    ienconc:     Optional[np.ndarray] = None
+    itype:       Optional[np.ndarray] = None
+    igelem:      Optional[np.ndarray] = None
+    is_grp_ice:  Optional[np.ndarray] = None
+    inuc2elem:   Optional[np.ndarray] = None
+    inucproc:    Optional[np.ndarray] = None
 
 
 def _load_one(path: Path, expected_shape: tuple) -> np.ndarray:
@@ -263,6 +302,11 @@ def read_substep(out_dir, step: int, dims=None) -> SubstepDump:
         pconmax=_load_one(_path("pconmax"), shapes["pconmax"]),
         coaglg=_load_one(_path("coaglg"), shapes["coaglg"]),
         coagpe=_load_one(_path("coagpe"), shapes["coagpe"]),
+        pcl=_load_one(_path("pcl"), shapes["pcl"]),
+        gcl=_load_one(_path("gcl"), shapes["gcl"]),
+        told=_load_one(_path("told"), shapes["told"]),
+        d_gc=_load_one(_path("d_gc"), shapes["d_gc"]),
+        d_t=_load_one(_path("d_t"), shapes["d_t"]),
         relhum=_load_one(_path("relhum"), shapes["relhum"]),
         rhop=_load_one(_path("rhop"), shapes["rhop"]),
         r_wet=_load_one(_path("r_wet"), shapes["r_wet"]),
@@ -281,6 +325,14 @@ def read_substep(out_dir, step: int, dims=None) -> SubstepDump:
         pden1=_opt("pden1"),
         palr=_opt("palr"),
         igrowgas=_opt("igrowgas"),
+        inucgas=_opt("inucgas"),
+        nnuc2elem=_opt("nnuc2elem"),
+        ienconc=_opt("ienconc"),
+        itype=_opt("itype"),
+        igelem=_opt("igelem"),
+        is_grp_ice=_opt("is_grp_ice"),
+        inuc2elem=_opt("inuc2elem"),
+        inucproc=_opt("inucproc"),
     )
 
 
