@@ -347,6 +347,11 @@ contains
     ! Internally saves/restores pc, gc, t so other probes remain valid.
     call dump_gsolve_probe(prefix, cs)
 
+    ! Per-substep probe: gsolve + tsolve at end-of-step state. Dumps
+    ! rlhe/rlhm (latent-heat coefs), rlprod (after gsolve), t_pre, t_post.
+    ! Internally saves/restores cstate.
+    call dump_tsolve_probe(prefix, cs)
+
     ! Per-substep probe: full microfast prefix at end-of-step state up
     ! through psolve. Mirrors microfast.F90: sulfnuc → growevapl →
     ! per-bin growp → psolve. Dumps pc_postpsolve_probe (NBIN, NELEM at iz).
@@ -674,6 +679,168 @@ contains
 
     deallocate(prev_ice, prev_liq, tot_ice, tot_liq, gc_pre, gc_post)
   end subroutine dump_gsolve_probe
+
+
+  !! Probe: full evolution → gsolve → tsolve at end-of-step state.
+  !! Dumps:
+  !!   t_pretsolve_probe  : t[iz] before tsolve (after gsolve sets rlprod)
+  !!   t_posttsolve_probe : t[iz] after tsolve
+  !!   rlprod_probe       : rlprod scalar (set by gsolve)
+  !!   rlheat_pre_probe   : rlheat[iz] before tsolve
+  !!   rlheat_post_probe  : rlheat[iz] after tsolve
+  !!   rlhe_probe         : rlhe[iz, :] (NGAS,)
+  !!   rlhm_probe         : rlhm[iz, :] (NGAS,)
+  !! Saves/restores cstate.
+  subroutine dump_tsolve_probe(prefix, cs)
+    character(len=*), intent(in)            :: prefix
+    type(carmastate_type), intent(inout)    :: cs
+    real(kind=f), allocatable               :: prev_ice(:), prev_liq(:)
+    real(kind=f), allocatable               :: scal_a(:), scal_b(:)
+    real(kind=f), allocatable               :: rlhe1(:), rlhm1(:)
+    real(kind=f) :: t_pre, t_post, rlheat_pre, rlheat_post, rlprod_val
+    integer                                 :: rc_loc, ie, ib, ng
+    integer, parameter                      :: iz = 1
+    real(kind=f), parameter                 :: scale_thr = 1._f
+    interface
+      subroutine maxconc(carma, cstate, iz, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma; type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in) :: iz; integer, intent(inout) :: rc
+      end subroutine maxconc
+      subroutine sulfnuc(carma, cstate, iz, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma; type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in) :: iz; integer, intent(inout) :: rc
+      end subroutine sulfnuc
+      subroutine growevapl(carma, cstate, iz, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma; type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in) :: iz; integer, intent(inout) :: rc
+      end subroutine growevapl
+      subroutine growp(carma, cstate, iz, ibin, ielem, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma; type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in) :: iz, ibin, ielem; integer, intent(inout) :: rc
+      end subroutine growp
+      subroutine upgxfer(carma, cstate, iz, ibin, ielem, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma; type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in) :: iz, ibin, ielem; integer, intent(inout) :: rc
+      end subroutine upgxfer
+      subroutine psolve(carma, cstate, iz, ibin, ielem, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma; type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in) :: iz, ibin, ielem; integer, intent(inout) :: rc
+      end subroutine psolve
+      subroutine evapp(carma, cstate, iz, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma; type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in) :: iz; integer, intent(inout) :: rc
+      end subroutine evapp
+      subroutine downgxfer(carma, cstate, iz, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma; type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in) :: iz; integer, intent(inout) :: rc
+      end subroutine downgxfer
+      subroutine downgevapply(carma, cstate, iz, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma; type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in) :: iz; integer, intent(inout) :: rc
+      end subroutine downgevapply
+      subroutine totalcondensate(carma, cstate, iz, total_ice, total_liquid, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma; type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in) :: iz
+        real(kind=f), intent(out) :: total_ice(2), total_liquid(2)
+        integer, intent(inout) :: rc
+      end subroutine totalcondensate
+      subroutine gsolve(carma, cstate, iz, previous_ice, previous_liquid, scale_threshold, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma; type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in) :: iz
+        real(kind=f), intent(in) :: previous_ice(2), previous_liquid(2)
+        real(kind=f) :: scale_threshold
+        integer, intent(inout) :: rc
+      end subroutine gsolve
+      subroutine tsolve(carma, cstate, iz, scale_threshold, rc)
+        use carma_precision_mod; use carma_types_mod
+        type(carma_type), intent(in) :: carma; type(carmastate_type), intent(inout) :: cstate
+        integer, intent(in) :: iz
+        real(kind=f) :: scale_threshold
+        integer, intent(inout) :: rc
+      end subroutine tsolve
+    end interface
+
+    if (.not. allocated(cs%f_t)) return
+    ng = carma%f_NGAS
+    allocate(prev_ice(ng), prev_liq(ng), scal_a(ng), scal_b(ng))
+    allocate(rlhe1(ng), rlhm1(ng))
+
+    block
+      real(kind=f), allocatable :: pc_save(:,:,:), gc_save(:,:), t_save(:)
+      real(kind=f), allocatable :: rlheat_save(:)
+      real(kind=f) :: rlprod_save
+      allocate(pc_save(size(cs%f_t), carma%f_NBIN, carma%f_NELEM))
+      allocate(gc_save(size(cs%f_t), ng), t_save(size(cs%f_t)))
+      allocate(rlheat_save(size(cs%f_t)))
+      pc_save = cs%f_pc; gc_save = cs%f_gc; t_save = cs%f_t
+      rlheat_save = cs%f_rlheat; rlprod_save = cs%f_rlprod
+
+      ! Run full microfast evolution
+      cs%f_growlg(:,:) = 0._f; cs%f_evaplg(:,:) = 0._f
+      cs%f_growpe(:,:) = 0._f; cs%f_evappe(:,:) = 0._f
+      cs%f_rnucpe(:,:) = 0._f; cs%f_rhompe(:,:) = 0._f
+      cs%f_rnuclg(:,:,:) = 0._f
+      rc_loc = 0
+      call totalcondensate(carma, cs, iz, prev_ice, prev_liq, rc_loc); if (rc_loc<0) rc_loc=0
+      call maxconc(carma, cs, iz, rc_loc); if (rc_loc<0) rc_loc=0
+      call sulfnuc(carma, cs, iz, rc_loc); if (rc_loc<0) rc_loc=0
+      call growevapl(carma, cs, iz, rc_loc); if (rc_loc<0) rc_loc=0
+      do ie = 1, carma%f_NELEM
+        do ib = 1, carma%f_NBIN
+          call growp(carma, cs, iz, ib, ie, rc_loc); if (rc_loc<0) rc_loc=0
+          call upgxfer(carma, cs, iz, ib, ie, rc_loc); if (rc_loc<0) rc_loc=0
+          call psolve(carma, cs, iz, ib, ie, rc_loc); if (rc_loc<0) rc_loc=0
+        end do
+      end do
+      call evapp(carma, cs, iz, rc_loc); if (rc_loc<0) rc_loc=0
+      call downgxfer(carma, cs, iz, rc_loc); if (rc_loc<0) rc_loc=0
+      call downgevapply(carma, cs, iz, rc_loc); if (rc_loc<0) rc_loc=0
+      call gsolve(carma, cs, iz, prev_ice, prev_liq, scale_thr, rc_loc); if (rc_loc<0) rc_loc=0
+
+      ! Snapshot t before tsolve
+      t_pre = cs%f_t(iz)
+      rlheat_pre = cs%f_rlheat(iz)
+      rlprod_val = cs%f_rlprod
+      ! Get latent-heat coeffs (NGAS at iz)
+      rlhe1 = cs%f_rlhe(iz, :)
+      rlhm1 = cs%f_rlhm(iz, :)
+
+      call tsolve(carma, cs, iz, scale_thr, rc_loc); if (rc_loc<0) rc_loc=0
+
+      t_post = cs%f_t(iz)
+      rlheat_post = cs%f_rlheat(iz)
+
+      ! Restore cstate
+      cs%f_pc = pc_save; cs%f_gc = gc_save; cs%f_t = t_save
+      cs%f_rlheat = rlheat_save; cs%f_rlprod = rlprod_save
+      deallocate(pc_save, gc_save, t_save, rlheat_save)
+    end block
+
+    scal_a = (/ t_pre, t_post /)
+    scal_b = (/ rlheat_pre, rlheat_post /)
+    call dump_alloc_1d(prefix, 't_tsolve_probe',     scal_a)
+    call dump_alloc_1d(prefix, 'rlheat_tsolve_probe', scal_b)
+    call dump_alloc_1d(prefix, 'rlhe_probe',         rlhe1)
+    call dump_alloc_1d(prefix, 'rlhm_probe',         rlhm1)
+    block
+      real(kind=f) :: rlp(1)
+      rlp(1) = rlprod_val
+      call dump_alloc_1d(prefix, 'rlprod_probe', rlp)
+    end block
+
+    deallocate(prev_ice, prev_liq, scal_a, scal_b, rlhe1, rlhm1)
+  end subroutine dump_tsolve_probe
 
 
   !! Probe: full microfast prefix (sulfnuc → growevapl → growp/upgxfer →

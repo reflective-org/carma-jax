@@ -605,6 +605,64 @@ def test_binary_nuc_zhao1995_matches_fortran():
         raise AssertionError("\n".join(msg_lines))
 
 
+def test_tsolve_matches_fortran():
+    """Phase 8.13: JAX tsolve matches Fortran's tsolve(t_post).
+
+    Fortran tsolve.F90: dt = dtime * rlprod (+ phprod if do_pheatatm).
+    Sulfate test has do_pheatatm=False so phprod is gated out.
+
+    The probe `dump_tsolve_probe` runs the full microfast evolution
+    sequence (sulfnuc → growevapl → psolve → evapp → downgevapply →
+    gsolve), then snapshots t_pre, calls tsolve, snapshots t_post.
+
+    JAX bench: feed t_pre + rlprod (scalar from gsolve) to JAX tsolve
+    with phprod=0 and verify t_post matches.
+    """
+    from carma.solvers.tsolve import tsolve
+    import jax.numpy as jnp
+
+    t_max_rel = {}
+    failures = []
+
+    for scen_id in _ALL_SCEN_IDS:
+        scen_dir = _DIFF_BASE / f"scen_{scen_id:03d}"
+        t_path = scen_dir / "substep_0001_t_tsolve_probe.bin"
+        rl_path = scen_dir / "substep_0001_rlheat_tsolve_probe.bin"
+        rlprod_path = scen_dir / "substep_0001_rlprod_probe.bin"
+        if not (t_path.exists() and rl_path.exists() and rlprod_path.exists()):
+            pytest.skip("tsolve probe files missing — re-run scripts/run_diagnostic_ensemble.py")
+        t_arr = np.fromfile(t_path, dtype=np.float64)
+        rlheat_arr = np.fromfile(rl_path, dtype=np.float64)
+        rlprod_arr = np.fromfile(rlprod_path, dtype=np.float64)
+        t_pre, t_post_F = float(t_arr[0]), float(t_arr[1])
+        rlheat_pre = float(rlheat_arr[0])
+        rlprod = float(rlprod_arr[0])
+
+        t_j = jnp.asarray([t_pre])
+        rlheat_j = jnp.asarray([rlheat_pre])
+        partheat_j = jnp.zeros(1)
+        t_new, _, _, _ = tsolve(
+            t_j, rlheat_j, partheat_j,
+            jnp.float64(rlprod), jnp.float64(0.0),    # phprod=0 (do_pheatatm=false)
+            1800.0, 0,
+            jnp.float64(0.0), 1.0,
+        )
+        t_post_J = float(t_new[0])
+        m = abs(t_post_J - t_post_F) / max(abs(t_post_F), 1e-300)
+        t_max_rel[scen_id] = m
+        if m > _tol_for("tsolve"):
+            failures.append((scen_id, m, t_post_J, t_post_F))
+
+    make_summary_plot("tsolve_t", t_max_rel, _summary_plot_dir())
+    if failures:
+        msg_lines = [f"tsolve mismatched on {len(failures)} scenarios:"]
+        for scen_id, err, j, f in failures[:10]:
+            msg_lines.append(f"  scen {scen_id}: rel err {err:.3e}  JAX={j}  F={f}")
+        if len(failures) > 10:
+            msg_lines.append(f"  ... and {len(failures) - 10} more")
+        raise AssertionError("\n".join(msg_lines))
+
+
 def test_totalcondensate_matches_fortran():
     """Phase 8.12a: JAX totalcondensate matches Fortran on dump's pc.
 

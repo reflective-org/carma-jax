@@ -12,8 +12,8 @@ from carma.precision import DTYPE
 
 
 def tsolve(t, rlheat, partheat, rlprod, phprod, dtime, iz,
-           dt_threshold, scale_threshold):
-    """Update temperature from latent heat and particle heating.
+           dt_threshold, scale_threshold, do_pheatatm=False):
+    """Update temperature from latent heat and (optional) particle heating.
 
     Args:
         t: Temperature (NZ,) [K].
@@ -25,6 +25,9 @@ def tsolve(t, rlheat, partheat, rlprod, phprod, dtime, iz,
         iz: Vertical level index.
         dt_threshold: Temperature convergence threshold [K].
         scale_threshold: Scaling factor for threshold.
+        do_pheatatm: If True, include particle heating term (matches
+            Fortran's `if (do_pheatatm)` gate at tsolve.F90:73). Default
+            False — sulfate test has do_pheatatm=False.
 
     Returns:
         Tuple of (t, rlheat, partheat, rc).
@@ -37,9 +40,10 @@ def tsolve(t, rlheat, partheat, rlprod, phprod, dtime, iz,
     # Accumulate latent heating
     rlheat = rlheat.at[iz].add(rlprod * dtime)
 
-    # Add particle heating
-    dt_val = dt_val + dtime * phprod
-    partheat = partheat.at[iz].add(phprod * dtime)
+    # Add particle heating only when do_pheatatm is enabled (Fortran gate)
+    if do_pheatatm:
+        dt_val = dt_val + dtime * phprod
+        partheat = partheat.at[iz].add(phprod * dtime)
 
     # Update temperature
     t = t.at[iz].add(dt_val)

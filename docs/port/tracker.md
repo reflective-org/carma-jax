@@ -124,7 +124,7 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
 - [x] `gsolve` (1000/1000 pass at rtol 1e-10; max 3.8e-14, median bit-exact). Probe `dump_gsolve_probe` runs the full microfast evolution sequence (`sulfnuc → growevapl → psolve loop → evapp → downgevapply`) at end-of-step state, snapshots `previous_ice/liquid` and `total_ice/liquid` via `totalcondensate`, then calls `gsolve` to compute the gc update. Latent-heat (rlhe/rlhm) not in dump; `rlprod` not bench-validated (doesn't affect gc).
 
 ### `src/carma/solvers/tsolve.py`  ↔  `tsolve.F90`
-- [ ] `tsolve`
+- [x] `tsolve` (1000/1000 bit-exact at rtol 1e-10). **Bug fixed**: JAX was applying `phprod` unconditionally; Fortran gates it on `do_pheatatm` (tsolve.F90:73). Sulfate test has `do_pheatatm=False` → phprod is skipped. Added `do_pheatatm=False` parameter to JAX `tsolve` (default matches sulfate test). Probe `dump_tsolve_probe` runs the full microfast evolution + gsolve, snapshots t_pre and rlprod, calls tsolve, snapshots t_post.
 
 ### `src/carma/solvers/totalcondensate.py`  ↔  `totalcondensate.F90`
 - [x] `totalcondensate` (1000/1000 bit-exact at rtol 1e-10). Sulfate test: NELEM=1, no cores → `volatilemass = pc * rmass`. Liquid group (not ice). Probe directly compares to Fortran's `totalcondensate(dump.pc)` output dumped as `previous_ice_probe`/`previous_liquid_probe`.
