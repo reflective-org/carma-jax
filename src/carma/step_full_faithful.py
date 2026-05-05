@@ -164,9 +164,15 @@ def make_step_full_faithful(
         """
         diag = {}
 
-        # Microslow (coag) — runs once per outer step.
+        # Microslow (coag) — runs once per outer step. Mirrors Fortran
+        # newstate_calc.F90:65,93 which saves `pcl = pc` AFTER microslow,
+        # so the substep retry restarts from the post-coag state, not
+        # the prestep snapshot. Without this re-snapshot, microslow's
+        # update is silently overwritten when newstate_calc_full uses
+        # `pcl` as the retry restart — coag becomes a no-op.
         if microslow_jit is not None:
             pc = microslow_jit(pc, pcl, ckernel, pconmax, zmet, dtime)
+            pcl = pc
 
         # Adaptive substep retry.
         pc, gc, t, rlheat, nts_used, nret_used = newstate_calc_full(
