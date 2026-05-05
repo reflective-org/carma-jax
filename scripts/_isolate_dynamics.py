@@ -169,7 +169,9 @@ def main():
     ax2.legend(fontsize=9)
 
     plt.tight_layout()
-    out = ROOT / "data" / f"_isolate_scen{SCEN:03d}.png"
+    out_dir = ROOT / "plots" / "diff" / "phase10"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"isolate_scen{SCEN:03d}.png"
     plt.savefig(out, dpi=110, bbox_inches="tight")
     print(f"\nsaved {out}")
 

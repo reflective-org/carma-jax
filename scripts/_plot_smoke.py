@@ -76,6 +76,8 @@ for i in range(n):
 axes[-1, 0].set_xlabel("r (nm)")
 axes[-1, 1].set_xlabel("r (nm)")
 plt.tight_layout()
-out = ROOT / "data" / "_smoke_jax_vs_fortran_n5.png"
+out_dir = ROOT / "plots" / "diff" / "phase10"
+out_dir.mkdir(parents=True, exist_ok=True)
+out = out_dir / "smoke_jax_vs_fortran_n5.png"
 plt.savefig(out, dpi=110, bbox_inches="tight")
 print(f"saved {out}")

@@ -82,6 +82,8 @@ ax[1].set_title("Per-bin parity (each dot = one scenario)")
 ax[1].legend(); ax[1].grid(True, alpha=0.3, which="both")
 
 plt.tight_layout()
-out_png = ROOT / "data/sulfate_parity_scatter.png"
+out_dir = ROOT / "plots" / "diff" / "phase10"
+out_dir.mkdir(parents=True, exist_ok=True)
+out_png = out_dir / "sulfate_parity_scatter.png"
 plt.savefig(out_png, dpi=110, bbox_inches="tight")
 print(f"saved {out_png}")
