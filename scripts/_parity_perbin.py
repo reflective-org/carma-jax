@@ -109,14 +109,21 @@ for ax, label in zip(axes, ["Mass concentration", "Number concentration"]):
 # without decimal, sub-nm with one decimal. ScalarFormatter rounded
 # 0.5 → "0" on the previous render which read as a meaningless "zero"
 # tick on a log axis.
-from matplotlib.ticker import FuncFormatter, NullLocator
+from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
 axes[-1].set_xlabel("Bin median diameter (nm)")
 xtick_d = [d for d in (1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000)
            if d_nm[0] * 0.6 <= d <= d_nm[-1] * 1.6]
 axes[-1].set_xticks(xtick_d)
 axes[-1].xaxis.set_major_formatter(
     FuncFormatter(lambda x, pos: f"{int(x)}" if x >= 1 else f"{x:g}"))
-axes[-1].xaxis.set_minor_locator(NullLocator())
+# Minor log ticks at 2,3,...,9 within each decade so the minor
+# gridlines render between the major ticks. (Default LogLocator with
+# subs="auto" places the standard 2..9 sub-decade ticks.)
+for ax_ in axes:
+    ax_.xaxis.set_minor_locator(LogLocator(base=10.0, subs=(2, 3, 4, 5, 6, 7, 8, 9), numticks=99))
+    ax_.xaxis.set_minor_formatter(NullFormatter())
+    ax_.grid(True, alpha=0.4, which="major", lw=0.7)
+    ax_.grid(True, alpha=0.2, which="minor", lw=0.4)
 
 plt.tight_layout()
 out_dir = ROOT / "plots" / "diff" / "phase10"
