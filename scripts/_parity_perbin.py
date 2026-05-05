@@ -52,7 +52,7 @@ rng = np.random.default_rng(0)
 jitter = rng.normal(loc=0.0, scale=0.07, size=(n_scen, nbin))
 jittered_x = d_nm[None, :] * np.exp(jitter)
 
-fig, axes = plt.subplots(2, 1, figsize=(14, 9), sharex=True)
+fig, axes = plt.subplots(2, 1, figsize=(14, 11), sharex=True)
 for ax, label in zip(axes, ["Mass concentration", "Number concentration"]):
     # Scatter every scenario's rel err per bin (n_scen × NBIN dots, jittered)
     ax.scatter(jittered_x.ravel(), rel_for_plot.ravel(),
@@ -77,14 +77,33 @@ for ax, label in zip(axes, ["Mass concentration", "Number concentration"]):
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_xlim(d_nm[0] * 0.6, d_nm[-1] * 1.6)
-    ax.set_ylim(1e-7, 2.0)
+    # Extra headroom above 1.0 so per-box diameter annotations fit
+    # below the panel title without overlap.
+    ax.set_ylim(1e-7, 5e2)
     ax.set_ylabel(f"{label}\nper-bin rel err  (J vs F)")
     ax.grid(True, alpha=0.3, which="both")
     ax.set_title(
         f"{label}: dot = one of {n_scen} scenarios, box = cross-scenario "
-        f"P25/median/P75; whiskers 1.5·IQR"
+        f"P25/median/P75; whiskers 1.5·IQR",
+        pad=12,
     )
     ax.legend(loc="lower right", fontsize=9)
+
+    # Annotate each box with its bin median diameter (nm), rotated
+    # 90° in the headroom above the data. Format: <1nm with 2
+    # decimals; 1–10 nm with 1 decimal; >10 nm as integer.
+    def _fmt_d(d):
+        if d < 1: return f"{d:.2f}"
+        if d < 10: return f"{d:.1f}"
+        return f"{int(round(d))}"
+    for b in range(nbin):
+        ax.annotate(
+            _fmt_d(d_nm[b]) + " nm",
+            xy=(d_nm[b], 3.5),
+            xycoords="data",
+            ha="center", va="bottom",
+            rotation=90, fontsize=6.5, color="0.25",
+        )
 
 # X-axis tick labels in nm. Use FuncFormatter to render cleanly: ints
 # without decimal, sub-nm with one decimal. ScalarFormatter rounded
