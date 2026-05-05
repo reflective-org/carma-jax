@@ -1,21 +1,22 @@
-"""JAX ensemble runner (Phase 10.3).
+"""JAX ensemble runner (Phase 10).
 
-Drives ``make_step_full`` over the 1000-scenario ensemble via
-``jax.vmap`` on the batch axis. Each scenario advances the same
-180 000-s sulfate simulation (matching the Fortran ensemble's
-``nstep × dtime`` setup) and records ``(T_final,
-gc_h2so4_final, pc_final)`` for later parity comparison.
+Drives the **faithful** Phase-9 step (``make_step_full_faithful``)
+over the 1000-scenario ensemble. Each scenario runs the same
+``nstep × dtime`` sulfate simulation as the Fortran ensemble
+(``carma_sulfatetest_ensemble.F90``) and records ``(T_final,
+gc_h2so4_final, pc_final)``.
 
-This is deliberately scoped to the sulfate-column case that
-``make_step_full`` supports today: single-group sulfate, no
-transport, no coagulation. That matches the Fortran ensemble
-binary (``carma_sulfatetest_ensemble.F90``) exactly — no process
-is active on one side and absent on the other.
+The faithful chain (Phase 9.4) replaces the legacy operator-split
+``make_step_full`` + ``make_step_coag`` pair: one outer step now
+runs ``microslow`` once, then the adaptive-substep retry loop over
+``microfast_full`` (sulfnuc + growevapl + growp/psolve + evapp +
+gsolve + tsolve). Bench-validated 1000/1000 against Fortran
+microfast at near-machine ε (Phase 9.1) and across multi-substep
+schedules (Phase 9.2).
 
 Output is a compressed NPZ with the same keys as the Fortran
 aggregator (``T_final``, ``gc_h2so4_final``, ``pc_final``,
-``nstep_ran``, ``status``) so Phase 10.4 can compare them
-bit-for-key.
+``nstep_ran``, ``status``).
 """
 
 import argparse
@@ -36,7 +37,9 @@ sys.path.insert(0, str(_ROOT / "tests" / "unit"))
 from generate_sulfate_scenarios import load_scenarios
 from carma.constants import AVG, BK, WTMOL_H2O
 from carma.precision import DTYPE
-from carma.step_full import make_step_full
+from carma.prestep import prestep
+from carma.step_full_faithful import make_step_full_faithful
+from carma.utils.smallconc import maxconc
 from carma.vapor_pressure import vaporp_h2o_murphy2005
 
 # Reuse the env fixture from the step_full tests. _minimal_config
@@ -44,7 +47,7 @@ from carma.vapor_pressure import vaporp_h2o_murphy2005
 from test_step_full import _growth_env, _minimal_config as _test_minimal_config
 
 
-_GWTMOL_H2SO4 = 98.0
+_GWTMOL_H2SO4 = 98.078479    # matches Fortran CARMAGAS_Create call
 
 # Fortran sulfatetest bin grid (must match
 # carma_sulfatetest_ensemble.F90 for apples-to-apples parity):
@@ -64,36 +67,43 @@ def _fortran_matching_config():
     )
     import jax.numpy as jnp
 
+    # Use carma.bins.setup_bins for the bin geometry — it already
+    # implements Fortran's setupbins.F90:140-164 formulas correctly.
+    # The previous open-coded geometry here used rmassup = rmass·√rmrat
+    # and rlow = rup-derived, but Fortran uses
+    # rmassup = 2·rmrat/(rmrat+1)·rmass and dr = vrfact·(rmass/rho)^(1/3),
+    # which give rup/r ≈ 1.10 (not 1.122) for rmrat=2. The mismatch
+    # biased setup_gkern's Knudsen → gro by ~4% and rup_wet by ~2%.
+    from carma.bins import setup_bins
     nbin = _FORTRAN_NBIN
     rho = _FORTRAN_RHO_SULF
     rmin = _FORTRAN_RMIN_CM
     rmrat = _FORTRAN_RMRAT
-    vmin = (4.0 / 3.0) * np.pi * rmin**3 * rho
-    rmass = vmin * rmrat ** np.arange(nbin)
-    rmassup = rmass * rmrat**0.5
-    r = (3.0 * rmass / (4.0 * np.pi * rho)) ** (1.0 / 3.0)
+    r, rmass, vol, dr, dm, rup, rlow, rmassup = setup_bins(rmin, rmrat, nbin, rho)
+    r_np = np.asarray(r)
 
     group = GroupConfig(
         name="sulfate", ishape=1, ienconc=0,
         is_ice=False, is_cloud=False, is_sulfate=True,
         do_vtran=False, do_drydep=False,
         ifallrtn=1, irhswell=3, rmrat=rmrat, eshape=1.0, rmin=rmin,
-        r=jnp.asarray(r), rmass=jnp.asarray(rmass),
-        vol=jnp.asarray(rmass / rho),
-        dr=jnp.asarray(r * 0.1), dm=jnp.asarray(rmass * 0.1),
-        rmassup=jnp.asarray(rmassup),
-        rup=jnp.asarray(r * 1.2), rlow=jnp.asarray(r * 0.8),
+        r=r, rmass=rmass, vol=vol,
+        dr=dr, dm=dm,
+        rmassup=rmassup,
+        rup=rup, rlow=rlow,
         rrat=jnp.ones(nbin), rprat=jnp.ones(nbin), arat=jnp.ones(nbin),
     )
     element = ElementConfig(
         name="sulfate_num", rho=jnp.full((nbin,), rho), igroup=0,
         itype=2, icomposition=0, isolute=0, kappa=0.65,
     )
+    # Thresholds match Fortran sulfatetest_ensemble's CARMAGAS_Create calls
+    # (0.1 / 0.1 for both H2O and H2SO4).
     gas_h2o = GasConfig(name="H2O", wtmol=18.016, ivaprtn=2, icomposition=1,
-                         dgc_threshold=0.0, ds_threshold=0.0)
+                         dgc_threshold=0.1, ds_threshold=0.1)
     gas_h2so4 = GasConfig(name="H2SO4", wtmol=_GWTMOL_H2SO4, ivaprtn=4,
                            icomposition=2,
-                           dgc_threshold=0.0, ds_threshold=0.0)
+                           dgc_threshold=0.1, ds_threshold=0.1)
     solute = SoluteConfig(name="sulfate", ions=3, wtmol=_GWTMOL_H2SO4, rho=rho)
 
     # Build coagulation tables (sulfate ⊕ sulfate → sulfate, source=number).
@@ -111,12 +121,12 @@ def _fortran_matching_config():
         gases=(gas_h2o, gas_h2so4), solutes=(solute,),
         coag=coag_cfg,
         do_coag=True, do_grow=True, do_vtran=False, do_vdiff=False,
-        do_thermo=False, do_substep=False, do_explised=False,
+        do_thermo=True, do_substep=True, do_explised=False,
         do_incloud=False, do_clearsky=True, do_detrain=False,
         do_pheat=False, do_pheatatm=False, do_cnst_rlh=False,
         itbnd_pc=1, ibbnd_pc=1,
-        maxsubsteps=32, minsubsteps=1, maxretries=4, conmax=1e-4,
-        cstick=1.0, gsticki=1.0, gstickl=1.0, tstick=1.0, dt_threshold=0.0,
+        maxsubsteps=32, minsubsteps=1, maxretries=16, conmax=1e-4,
+        cstick=1.0, gsticki=1.0, gstickl=1.0, tstick=1.0, dt_threshold=1.0,
         igash2o=0, igash2so4=1, igasso2=-1,
     )
 
@@ -225,15 +235,50 @@ def _env_for_scenario(T_K, p_hPa, rh, h2so4_pptv, mu_nm, sigma_g, cfg,
         ngas=ngas, do_cnst_rlh=False,
     )
 
-    # Wet radii. For sulfate without hygroscopic swelling yet, approximate
-    # r_wet = r_dry (rup_wet = rup_dry, rlow_wet = rlow_dry).
-    r_dry = jnp.asarray(cfg.groups[0].r)
-    rup_dry = jnp.asarray(cfg.groups[0].rup)
-    rlow_dry = jnp.asarray(cfg.groups[0].rlow)
-    r_wet = r_dry[None, :, None]                    # (nz, nbin, ngroup)
-    rup_wet = rup_dry[None, :, None]
-    rlow_wet = rlow_dry[None, :, None]
-    re = jnp.zeros((nz, nbin, ngroup), dtype=DTYPE)   # Reynolds # ~0 for small particles
+    # H2SO4 gas mmr (g/g) and gas mass density (g/cm³) — used both for
+    # the gc tensor and for the wet-radius hygroscopic-growth call.
+    h2so4_mmr = h2so4_pptv * 1.0e-12 * (98.0 / 29.0)        # g/g
+    # Initial H2O mmr seed: match Fortran's `carma_sulfatetest_ensemble.F90`
+    # line 173-175 which uses the simplified Murphy-Koop analytic. (The
+    # exact Murphy-Koop formula gets re-applied inside microfast.)
+    pvapl_Pa = jnp.exp(54.842763 - 6763.22 / T_K
+                        - 4.210 * jnp.log(T_K) + 0.000367 * T_K)
+    h2o_mmr = rh * float(pvapl_Pa) * 18.0 / (29.0 * p_hPa * 100.0)
+    rhoa_pure = float(rhoa[0]) / float(zmet[0])      # g/cm³ pure-air density
+    h2o_mass_cgs = h2o_mmr * rhoa_pure                # g/cm³
+    # h2o_vp for wet-radius / wtpct: must use the EXACT Murphy-Koop
+    # (vaporp_h2o_murphy2005), not the seed analytic. Fortran's wetr and
+    # setupgkern use cstate%pvapl which is set by vaporp_h2o_murphy2005
+    # inside microfast — using the analytic here biases pvapl 1.7% high
+    # at stratospheric temps and ripples into Kelvin / wtpct / rwet.
+    pvapl_h2o_arr, _ = vaporp_h2o_murphy2005(T)
+    h2o_vp_cgs = float(pvapl_h2o_arr[0])              # already dyne/cm²
+
+    # Wet radii via Fortran's I_WTPCT_H2SO4 path (sulfate group's irhswell).
+    # Recomputed once per scenario at initial T/RH/H2O — Fortran would refresh
+    # each Step call, but for this single-cell test T is constant and H2O
+    # drifts negligibly, so a static approximation tracks closely.
+    from carma.wetr import get_wetr
+    from carma.enums import SwellMethod
+    grp = cfg.groups[0]
+    r_dry = jnp.asarray(grp.r, dtype=DTYPE)
+    rup_dry = jnp.asarray(grp.rup, dtype=DTYPE)
+    rlow_dry = jnp.asarray(grp.rlow, dtype=DTYPE)
+    rho_dry_per_bin = jnp.full(r_dry.shape, _FORTRAN_RHO_SULF, dtype=DTYPE)
+    swell = int(SwellMethod.I_WTPCT_H2SO4)
+    r_wet_1d, rho_wet = get_wetr(r_dry, rho_dry_per_bin, rh, T_K, swell,
+        h2o_mass=h2o_mass_cgs, h2o_vp=h2o_vp_cgs,
+        gwtmol_h2so4=DTYPE(_GWTMOL_H2SO4))
+    rup_wet_1d, _ = get_wetr(rup_dry, rho_dry_per_bin, rh, T_K, swell,
+        h2o_mass=h2o_mass_cgs, h2o_vp=h2o_vp_cgs,
+        gwtmol_h2so4=DTYPE(_GWTMOL_H2SO4))
+    rlow_wet_1d, _ = get_wetr(rlow_dry, rho_dry_per_bin, rh, T_K, swell,
+        h2o_mass=h2o_mass_cgs, h2o_vp=h2o_vp_cgs,
+        gwtmol_h2so4=DTYPE(_GWTMOL_H2SO4))
+    r_wet = r_wet_1d[None, :, None]                 # (nz, nbin, ngroup)
+    rup_wet = rup_wet_1d[None, :, None]
+    rlow_wet = rlow_wet_1d[None, :, None]
+    re = jnp.zeros((nz, nbin, ngroup), dtype=DTYPE)
     rrat = jnp.ones((nbin, ngroup), dtype=DTYPE)
     eshape_arr = jnp.asarray([float(g.eshape) for g in cfg.groups], dtype=DTYPE)
     is_ice_arr = np.asarray([bool(g.is_ice) for g in cfg.groups])
@@ -242,17 +287,21 @@ def _env_for_scenario(T_K, p_hPa, rh, h2so4_pptv, mu_nm, sigma_g, cfg,
         [cfg.igash2so4 for _ in cfg.elements], dtype=np.int32)
 
     # Fall velocity, Reynolds number, slip correction (needed for coag kernel
-    # AND for setup_gkern — re is the real Reynolds, not zeros).
+    # AND for setup_gkern — re is the real Reynolds, not zeros). Uses wet
+    # radii and per-bin wet density from get_wetr above.
     from carma.setup_vf import setup_vf_jit
     rmass_2d = jnp.asarray(cfg.groups[0].rmass)[:, None]              # (nbin, ngroup)
-    rho_p_2d = jnp.full((nbin, ngroup), float(cfg.groups[0].rmass[0]
-                                                / cfg.groups[0].vol[0]),
-                         dtype=DTYPE)                                  # (nbin, ngroup)
+    rho_p_2d = rho_wet[:, None]                                        # (nbin, ngroup)
     rrat_2d = jnp.ones((nbin, ngroup), dtype=DTYPE)
     rprat_2d = jnp.ones((nbin, ngroup), dtype=DTYPE)
     vf, re_real, bpm = setup_vf_jit(
         T, rhoa, zmet, rmu, r_wet, rho_p_2d, rrat_2d, rprat_2d,
     )
+
+    # wtpct (sulfate weight percent) for setup_gkern's H2SO4 Kelvin
+    # override. Same Tabazadeh1997 formula sulfnuc uses internally.
+    from carma.sulfate_utils import wtpct_tabaz
+    wtpct_arr = wtpct_tabaz(T, jnp.asarray([h2o_mass_cgs]), jnp.asarray([h2o_vp_cgs]))
 
     _, akelvin, akelvini, gro, gro1, gro2, _, _ = setup_gkern(
         T, p_cgs, rhoa, zmet, rmu, thcond, diffus, rlhe, rlhm,
@@ -260,30 +309,34 @@ def _env_for_scenario(T_K, p_hPa, rh, h2so4_pptv, mu_nm, sigma_g, cfg,
         gwtmol_arr, igrowgas_arr,
         cfg.gstickl, cfg.gsticki, cfg.tstick,
         nbin, ngroup, ngas,
+        igash2o=cfg.igash2o, igash2so4=cfg.igash2so4, wtpct=wtpct_arr,
     )
 
-    # Coagulation kernel (Brownian + gravitational, all bin pairs).
+    # Coagulation kernel (Brownian + Van der Waals + Fuchs + grav).
+    # use_vw mask is (NGROUP, NGROUP) bool: True where BOTH colliding
+    # groups are is_sulfate (Chan & Mozurkewich 2001 VdW enhancement).
+    # Sulfate test has a single sulfate group → use_vw = [[True]].
     from carma.setup_ckern import setup_ckern_jit
+    is_sulfate = np.asarray([bool(g.is_sulfate) for g in cfg.groups])
+    use_vw = jnp.asarray(is_sulfate[:, None] & is_sulfate[None, :])
     ckernel = setup_ckern_jit(
         T, rhoa, zmet, rmu, r_wet, rrat_2d, rprat_2d, bpm, rmass_2d,
         re_real, vf, cfg.cstick,
+        use_vw=use_vw,
     )
-
-    # H2SO4 gas mmr from scenario ppbv
-    h2so4_mmr = h2so4_pptv * 1.0e-12 * (98.0 / 29.0)        # g/g
-    # H2O mmr from RH × saturation (Murphy-Koop analytic estimate)
-    pvapl_Pa = jnp.exp(54.842763 - 6763.22 / T_K
-                        - 4.210 * jnp.log(T_K) + 0.000367 * T_K)
-    h2o_mmr = rh * float(pvapl_Pa) * 18.0 / (29.0 * p_hPa * 100.0)
 
     # gc in CGS: mmr × rhoa (rhoa already includes zmet factor)
     gc = jnp.asarray([[h2o_mmr * float(rhoa[0]),
                         h2so4_mmr * float(rhoa[0])]], dtype=DTYPE)
 
-    # Initial lognormal aerosol: seeded with 1e-18 g/g total mass
+    # Initial lognormal aerosol seed. Fortran's
+    # `carma_sulfatetest_ensemble.F90` normalises so Σ mmr = 1e-18 g/g.
+    # In JAX-internal CGS, pc is #/cm³/z and the equivalent mass-density
+    # constraint is Σ pc·rmass = 1e-18 · rhoa, so we multiply by rhoa
+    # here for apples-to-apples parity with Fortran.
     r_bins_np = np.asarray(r_dry)
     pc_sulf = _init_lognormal_pc(r_bins_np, mu_nm, sigma_g,
-                                   total_mass_g_per_cm3=1e-18)
+                                   total_mass_g_per_cm3=1.0e-18 * float(rhoa[0]))
     pc = jnp.zeros((nz, nbin, cfg.nelem), dtype=DTYPE)
     pc = pc.at[0, :, 0].set(pc_sulf)
 
@@ -308,21 +361,31 @@ def _env_for_scenario(T_K, p_hPa, rh, h2so4_pptv, mu_nm, sigma_g, cfg,
 
 
 def run_jax_ensemble(scenarios, dtime_s=1800.0, nstep=100):
-    """Run every scenario through make_step_full end-to-end.
+    """Run every scenario through ``make_step_full_faithful`` end-to-end.
 
-    Loops in Python for simplicity (not vmap) since each scenario
-    runs a sequential time loop; batching in vmap would require
-    scan over time within vmap over scenarios. That's a future
-    optimisation — the per-call 92 μs warm time × 1000 × 100
-    steps ≈ 9 s, fast enough."""
+    The faithful chain bundles microslow (coag) + microfast_full inside
+    one step closure and runs the adaptive substep retry per Fortran's
+    ``newstate_calc.F90``. ``prestep`` is invoked between steps to
+    refresh ``(pcl, gcl, told, d_gc, d_t, pconmax)`` exactly as Fortran
+    does.
+
+    Loops in Python over scenarios (not vmap); per-scenario warm time
+    is small enough that 1000 × 100 = 100k inner steps complete in a
+    few minutes."""
     cfg = _minimal_config()
     print(f"  bin grid: nbin={cfg.nbin}, rmin={float(cfg.groups[0].r[0])*1e7:.1f} nm, "
           f"rmrat={cfg.groups[0].rmrat}, rmax={float(cfg.groups[0].r[-1])*1e4:.2f} μm",
           flush=True)
     ppm_coefs = _compute_ppm_coefs(cfg)
-    step = make_step_full(cfg)
-    from carma.step import make_step_coag
-    step_coag = make_step_coag(cfg)
+    step = make_step_full_faithful(cfg, ppm_coefs=ppm_coefs)
+
+    # Static element/group descriptors for prestep.
+    itype_arr = jnp.asarray([e.itype for e in cfg.elements])
+    ienconc_arr = jnp.asarray([g.ienconc for g in cfg.groups])
+    igelem_arr = jnp.asarray([e.igroup for e in cfg.elements])
+    rmass_2d = jnp.stack(
+        [jnp.asarray(g.rmass, dtype=DTYPE) for g in cfg.groups], axis=1,
+    )
 
     n = int(scenarios["_n"])
     T_final = np.zeros(n, dtype=np.float64)
@@ -340,40 +403,41 @@ def run_jax_ensemble(scenarios, dtime_s=1800.0, nstep=100):
         pc = env["pc"]
         gc = env["gc"]
         t = env["t"]
-        ckernel = env["ckernel"]
-        # State carried through prestep:
-        pcl = pc
-        gcl = gc
-        told = t
-        env_no_state = {k: v for k, v in env.items()
-                        if k not in ("pc", "gc", "t", "ckernel")}
 
-        try:
-            for _ in range(nstep):
-                # Coagulation step (Phase 10.4b composition)
-                pc, gc, t, pcl, gcl, _ = step_coag(
-                    pc, gc, t, pcl, gcl, told, env["zmet"], ckernel,
-                    dtime_s,
-                )
-                told = t
-                # Growth + sulfate-nucleation step
-                pc, gc, t, _ = step(pc=pc, gc=gc, t=t, dtime=dtime_s,
-                                    **env_no_state)
-        except Exception as exc:            # noqa: BLE001
-            status[i] = f"error: {exc.__class__.__name__}: {str(exc)[:200]}"
-            continue
+        for _step_idx in range(nstep):
+            # No external advection / transport in this single-cell test, so
+            # the "saved" state at the start of each outer step is exactly
+            # the current state. Pass it as both (pc, gc, t) and
+            # (pcl, gcl, told); prestep then computes d_gc=d_t=0 and
+            # produces pconmax for microfast.
+            pc, gc, t, pcl, gcl, d_gc, d_t, pconmax = prestep(
+                pc, gc, t, pc, gc, t, env["zmet"],
+                itype_arr, ienconc_arr, igelem_arr, rmass_2d,
+                do_substep=True, do_coag=cfg.do_coag,
+            )
 
-        # Convert JAX internal-CGS outputs to Fortran's MMR convention
-        # to enable apples-to-apples parity:
+            pc, gc, t, _diag = step(
+                pc=pc, gc=gc, t=t, dtime=dtime_s,
+                rhoa=env["rhoa"], zmet=env["zmet"],
+                akelvin=env["akelvin"], akelvini=env["akelvini"],
+                gro=env["gro"], gro1=env["gro1"], rup_wet=env["rup_wet"],
+                rlhe=env["rlhe"], rlhm=env["rlhm"],
+                ckernel=env["ckernel"], pconmax=pconmax,
+                ds_threshold_arr=env["ds_threshold_arr"],
+                pcl=pcl, gcl=gcl, told=t, d_gc=d_gc, d_t=d_t,
+                dt_threshold=DTYPE(cfg.dt_threshold),
+            )
+
+        # Convert JAX internal-CGS outputs to Fortran's MMR convention:
         #   gc [g/cm³/z] / rhoa [g/cm³/z]  →  mmr [g/g]
         #   pc [#/cm³/z] × rmass [g] / rhoa → mmr_per_bin [g/g]
-        rhoa = float(env["rhoa"][0])          # g/cm³/z
+        rhoa = float(env["rhoa"][0])              # g/cm³/z
         rmass = np.asarray(cfg.groups[0].rmass)     # g per particle per bin
         T_final[i] = float(t[0])
         gc_final[i] = float(gc[0, 1]) / rhoa                    # g/g
         pc_final[i] = np.asarray(pc[0, :, 0]) * rmass / rhoa   # g/g per bin
 
-        if i % 100 == 0:
+        if i % 50 == 0:
             print(f"  scenario {i:4d}/{n}: T={T_final[i]:.1f}K, "
                   f"gc_H2SO4={gc_final[i]:.3e}", flush=True)
 
