@@ -24,24 +24,40 @@ r = (3.0 * rmass / (4.0 * math.pi * rho)) ** (1.0 / 3.0)    # cm
 r_nm = r * 1e7
 dlogr = np.log10(rmrat) / 3.0           # constant per bin
 
+def init_mmr_per_bin(mu_nm, sigma_g, total_mmr=1.0e-18):
+    """Initial sulfate aerosol mmr per bin (Fortran's seed convention,
+    `carma_sulfatetest_ensemble.F90:194-200`): mass-weighted lognormal
+    in r, normalised so Σ_bin mmr = total_mmr."""
+    log_mu = math.log(mu_nm * 1e-7)
+    log_sig = math.log(sigma_g)
+    shape = (np.exp(-0.5 * ((np.log(r) - log_mu) / log_sig) ** 2)
+             / (r * log_sig * math.sqrt(2 * math.pi)) * rmass)
+    return shape * (total_mmr / shape.sum())
+
+
 n = 5
 fig, axes = plt.subplots(n, 2, figsize=(12, 14), sharex=True)
 for i in range(n):
     pcJ = J["pc_final"][i]            # mmr per bin (g/g)
     pcF = F["pc_final"][i]
+    pc0 = init_mmr_per_bin(scens["aerosol_mu_nm"][i],
+                           scens["aerosol_sigma_g"][i])
     # mass per bin: dM/dlogr in g/g per decade
     mass_J = pcJ / dlogr
     mass_F = pcF / dlogr
+    mass_0 = pc0 / dlogr
     # number per bin: pc_mmr / rmass × rhoa_air, but we don't have rhoa in
     # the saved output. Fortran outputs are MMR per bin so we plot
     # MMR/rmass which is proportional to number; up to a constant rhoa
     # factor the *shape* is what matters.
     num_J = pcJ / rmass / dlogr
     num_F = pcF / rmass / dlogr
+    num_0 = pc0 / rmass / dlogr
 
     ax = axes[i, 0]
-    ax.loglog(r_nm, mass_F, "k-", lw=2, label="Fortran")
-    ax.loglog(r_nm, mass_J, "r--", lw=2, label="JAX")
+    ax.loglog(r_nm, mass_0, color="0.6", ls=":", lw=1.5, label="initial (t=0)")
+    ax.loglog(r_nm, mass_F, "k-", lw=2, label="Fortran (t=50h)")
+    ax.loglog(r_nm, mass_J, "r--", lw=2, label="JAX (t=50h)")
     ax.set_ylabel("dM/dlogr (g/g)")
     ax.grid(True, alpha=0.3, which="both")
     ax.set_title(f"scen {i}: T={scens['T'][i]:.1f}K, RH={scens['rh'][i]:.2f}, "
@@ -50,8 +66,9 @@ for i in range(n):
         ax.legend()
 
     ax2 = axes[i, 1]
-    ax2.loglog(r_nm, num_F, "k-", lw=2, label="Fortran")
-    ax2.loglog(r_nm, num_J, "r--", lw=2, label="JAX")
+    ax2.loglog(r_nm, num_0, color="0.6", ls=":", lw=1.5, label="initial (t=0)")
+    ax2.loglog(r_nm, num_F, "k-", lw=2, label="Fortran (t=50h)")
+    ax2.loglog(r_nm, num_J, "r--", lw=2, label="JAX (t=50h)")
     ax2.set_ylabel("dN/dlogr  ∝  pc_mmr/rmass")
     ax2.grid(True, alpha=0.3, which="both")
     ax2.set_title(f"scen {i} (number)")
