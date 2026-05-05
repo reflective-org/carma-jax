@@ -73,9 +73,14 @@ def setup_grow(t, p, rhoa, zmet, igash2o, igash2so4, ngas, do_cnst_rlh,
         diffus_h2so4 = DTYPE(1.76575e17) * jnp.sqrt(t) / aden
         diffus = diffus.at[:, igash2so4].set(diffus_h2so4)
 
-        # H2SO4 latent heats (same as H2O)
+        # H2SO4 latent heats. Fortran's setupgrow.F90:91-92 carries a
+        # commented "HACK": both rlhe AND rlhm of H2SO4 are set to
+        # rlhe(igash2o) — the second line uses rlhe, not rlhm. Mirror
+        # this exactly; the previous JAX port used rlhm[igash2o] for the
+        # second line which under-predicts rlhm[H2SO4] by ~12× at
+        # stratospheric temps and breaks tsolve parity downstream.
         if igash2o >= 0:
             rlhe = rlhe.at[:, igash2so4].set(rlhe[:, igash2o])
-            rlhm = rlhm.at[:, igash2so4].set(rlhm[:, igash2o])
+            rlhm = rlhm.at[:, igash2so4].set(rlhe[:, igash2o])
 
     return diffus, rlhe, rlhm

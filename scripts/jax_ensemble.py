@@ -67,25 +67,30 @@ def _fortran_matching_config():
     )
     import jax.numpy as jnp
 
+    # Use carma.bins.setup_bins for the bin geometry — it already
+    # implements Fortran's setupbins.F90:140-164 formulas correctly.
+    # The previous open-coded geometry here used rmassup = rmass·√rmrat
+    # and rlow = rup-derived, but Fortran uses
+    # rmassup = 2·rmrat/(rmrat+1)·rmass and dr = vrfact·(rmass/rho)^(1/3),
+    # which give rup/r ≈ 1.10 (not 1.122) for rmrat=2. The mismatch
+    # biased setup_gkern's Knudsen → gro by ~4% and rup_wet by ~2%.
+    from carma.bins import setup_bins
     nbin = _FORTRAN_NBIN
     rho = _FORTRAN_RHO_SULF
     rmin = _FORTRAN_RMIN_CM
     rmrat = _FORTRAN_RMRAT
-    vmin = (4.0 / 3.0) * np.pi * rmin**3 * rho
-    rmass = vmin * rmrat ** np.arange(nbin)
-    rmassup = rmass * rmrat**0.5
-    r = (3.0 * rmass / (4.0 * np.pi * rho)) ** (1.0 / 3.0)
+    r, rmass, vol, dr, dm, rup, rlow, rmassup = setup_bins(rmin, rmrat, nbin, rho)
+    r_np = np.asarray(r)
 
     group = GroupConfig(
         name="sulfate", ishape=1, ienconc=0,
         is_ice=False, is_cloud=False, is_sulfate=True,
         do_vtran=False, do_drydep=False,
         ifallrtn=1, irhswell=3, rmrat=rmrat, eshape=1.0, rmin=rmin,
-        r=jnp.asarray(r), rmass=jnp.asarray(rmass),
-        vol=jnp.asarray(rmass / rho),
-        dr=jnp.asarray(r * 0.1), dm=jnp.asarray(rmass * 0.1),
-        rmassup=jnp.asarray(rmassup),
-        rup=jnp.asarray(r * 1.2), rlow=jnp.asarray(r * 0.8),
+        r=r, rmass=rmass, vol=vol,
+        dr=dr, dm=dm,
+        rmassup=rmassup,
+        rup=rup, rlow=rlow,
         rrat=jnp.ones(nbin), rprat=jnp.ones(nbin), arat=jnp.ones(nbin),
     )
     element = ElementConfig(
@@ -233,12 +238,21 @@ def _env_for_scenario(T_K, p_hPa, rh, h2so4_pptv, mu_nm, sigma_g, cfg,
     # H2SO4 gas mmr (g/g) and gas mass density (g/cm³) — used both for
     # the gc tensor and for the wet-radius hygroscopic-growth call.
     h2so4_mmr = h2so4_pptv * 1.0e-12 * (98.0 / 29.0)        # g/g
+    # Initial H2O mmr seed: match Fortran's `carma_sulfatetest_ensemble.F90`
+    # line 173-175 which uses the simplified Murphy-Koop analytic. (The
+    # exact Murphy-Koop formula gets re-applied inside microfast.)
     pvapl_Pa = jnp.exp(54.842763 - 6763.22 / T_K
                         - 4.210 * jnp.log(T_K) + 0.000367 * T_K)
     h2o_mmr = rh * float(pvapl_Pa) * 18.0 / (29.0 * p_hPa * 100.0)
     rhoa_pure = float(rhoa[0]) / float(zmet[0])      # g/cm³ pure-air density
     h2o_mass_cgs = h2o_mmr * rhoa_pure                # g/cm³
-    h2o_vp_cgs = float(pvapl_Pa) * 10.0               # Pa → dyne/cm²
+    # h2o_vp for wet-radius / wtpct: must use the EXACT Murphy-Koop
+    # (vaporp_h2o_murphy2005), not the seed analytic. Fortran's wetr and
+    # setupgkern use cstate%pvapl which is set by vaporp_h2o_murphy2005
+    # inside microfast — using the analytic here biases pvapl 1.7% high
+    # at stratospheric temps and ripples into Kelvin / wtpct / rwet.
+    pvapl_h2o_arr, _ = vaporp_h2o_murphy2005(T)
+    h2o_vp_cgs = float(pvapl_h2o_arr[0])              # already dyne/cm²
 
     # Wet radii via Fortran's I_WTPCT_H2SO4 path (sulfate group's irhswell).
     # Recomputed once per scenario at initial T/RH/H2O — Fortran would refresh
@@ -284,19 +298,31 @@ def _env_for_scenario(T_K, p_hPa, rh, h2so4_pptv, mu_nm, sigma_g, cfg,
         T, rhoa, zmet, rmu, r_wet, rho_p_2d, rrat_2d, rprat_2d,
     )
 
+    # wtpct (sulfate weight percent) for setup_gkern's H2SO4 Kelvin
+    # override. Same Tabazadeh1997 formula sulfnuc uses internally.
+    from carma.sulfate_utils import wtpct_tabaz
+    wtpct_arr = wtpct_tabaz(T, jnp.asarray([h2o_mass_cgs]), jnp.asarray([h2o_vp_cgs]))
+
     _, akelvin, akelvini, gro, gro1, gro2, _, _ = setup_gkern(
         T, p_cgs, rhoa, zmet, rmu, thcond, diffus, rlhe, rlhm,
         re_real, r_wet, rlow_wet, rrat, eshape_arr, is_ice_arr,
         gwtmol_arr, igrowgas_arr,
         cfg.gstickl, cfg.gsticki, cfg.tstick,
         nbin, ngroup, ngas,
+        igash2o=cfg.igash2o, igash2so4=cfg.igash2so4, wtpct=wtpct_arr,
     )
 
-    # Coagulation kernel (Brownian + gravitational, all bin pairs).
+    # Coagulation kernel (Brownian + Van der Waals + Fuchs + grav).
+    # use_vw mask is (NGROUP, NGROUP) bool: True where BOTH colliding
+    # groups are is_sulfate (Chan & Mozurkewich 2001 VdW enhancement).
+    # Sulfate test has a single sulfate group → use_vw = [[True]].
     from carma.setup_ckern import setup_ckern_jit
+    is_sulfate = np.asarray([bool(g.is_sulfate) for g in cfg.groups])
+    use_vw = jnp.asarray(is_sulfate[:, None] & is_sulfate[None, :])
     ckernel = setup_ckern_jit(
         T, rhoa, zmet, rmu, r_wet, rrat_2d, rprat_2d, bpm, rmass_2d,
         re_real, vf, cfg.cstick,
+        use_vw=use_vw,
     )
 
     # gc in CGS: mmr × rhoa (rhoa already includes zmet factor)

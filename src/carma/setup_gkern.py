@@ -17,7 +17,8 @@ from carma.precision import DTYPE
 def setup_gkern(t, p, rhoa, zmet, rmu, thcond, diffus, rlhe, rlhm,
                 re, r_wet, rlow_wet, rrat, eshape_arr, is_ice_arr,
                 gwtmol_arr, igrowgas_arr, gstickl, gsticki, tstick,
-                nbin, ngroup, ngas):
+                nbin, ngroup, ngas,
+                igash2o=-1, igash2so4=-1, wtpct=None):
     """Compute growth kernel coefficients.
 
     Args:
@@ -66,6 +67,24 @@ def setup_gkern(t, p, rhoa, zmet, rmu, thcond, diffus, rlhe, rlhm,
         akelvini = akelvini.at[:, igas].set(
             DTYPE(2.0) * gwtmol * surfctia / (t * RHO_W * RGAS)
         )
+
+    # H2SO4 Kelvin overrides — Fortran setupgkern.F90:115-126.
+    # akelvin uses sulfate-specific surface tension and density (depend
+    # on wtpct = sulfate weight percent in the binary H2SO4/H2O solution);
+    # akelvini falls back to the H2O ice-Kelvin value because Fortran
+    # does not condense H2SO4 onto ice.
+    if igash2so4 >= 0 and wtpct is not None:
+        from carma.sulfate_utils import sulfate_density, sulfate_surf_tens
+        wtpct_arr = jnp.asarray(wtpct, dtype=DTYPE)
+        gwtmol_h2so4 = DTYPE(gwtmol_arr[igash2so4])
+        surf_tens_h2so4 = sulfate_surf_tens(wtpct_arr, t)
+        rho_h2so4 = sulfate_density(wtpct_arr, t)
+        akelvin = akelvin.at[:, igash2so4].set(
+            DTYPE(2.0) * gwtmol_h2so4 * surf_tens_h2so4
+            / (t * rho_h2so4 * RGAS)
+        )
+        if igash2o >= 0:
+            akelvini = akelvini.at[:, igash2so4].set(akelvini[:, igash2o])
 
     # --- Free paths ---
     freep = jnp.zeros((nz, ngas), dtype=DTYPE)
