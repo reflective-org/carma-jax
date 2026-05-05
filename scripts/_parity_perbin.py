@@ -40,29 +40,34 @@ rel_per_bin = np.abs(pc_J - pc_F) / denom    # (n_scen, NBIN)
 floor = 1e-16
 rel_for_plot = np.where(rel_per_bin > floor, rel_per_bin, floor)
 
-# Box-plot positions and widths on log-x; width is a multiplicative
-# factor of the position so all boxes look the same on log scale.
+# Box-plot widths on log-x: a multiplicative factor of the position so
+# every box has the same visual width on the log scale.
 log_width_factor = 0.18
 widths = d_nm * log_width_factor
 
+# Horizontal jitter (multiplicative on log axis) so the n_scen dots per
+# bin don't sit on top of each other. Std is ~7% of the position which
+# is well inside the box width.
+rng = np.random.default_rng(0)
+jitter = rng.normal(loc=0.0, scale=0.07, size=(n_scen, nbin))
+jittered_x = d_nm[None, :] * np.exp(jitter)
+
 fig, axes = plt.subplots(2, 1, figsize=(14, 9), sharex=True)
 for ax, label in zip(axes, ["Mass concentration", "Number concentration"]):
-    # Scatter every scenario's rel err per bin (n_scen × NBIN dots)
-    for b in range(nbin):
-        ys = rel_for_plot[:, b]
-        xs = np.full_like(ys, d_nm[b])
-        ax.scatter(xs, ys, s=4, alpha=0.10, color="steelblue",
-                   edgecolors="none", zorder=1)
+    # Scatter every scenario's rel err per bin (n_scen × NBIN dots, jittered)
+    ax.scatter(jittered_x.ravel(), rel_for_plot.ravel(),
+               s=3, alpha=0.18, color="steelblue", edgecolors="none",
+               zorder=1)
 
-    # Box plot per bin (5/25/50/75/95 percentiles by default; whiskers 1.5×IQR)
-    bp = ax.boxplot(
+    # Box plot per bin (P25/median/P75 boxes; whiskers 1.5×IQR)
+    ax.boxplot(
         [rel_for_plot[:, b] for b in range(nbin)],
         positions=d_nm, widths=widths,
         showfliers=False, patch_artist=True,
         medianprops=dict(color="crimson", lw=1.8),
-        boxprops=dict(facecolor="lightyellow", alpha=0.7, edgecolor="black"),
-        whiskerprops=dict(color="black"),
-        capprops=dict(color="black"),
+        boxprops=dict(facecolor="white", alpha=0.6, edgecolor="black", lw=1.0),
+        whiskerprops=dict(color="black", lw=0.9),
+        capprops=dict(color="black", lw=0.9),
         zorder=3,
     )
 
@@ -71,6 +76,7 @@ for ax, label in zip(axes, ["Mass concentration", "Number concentration"]):
 
     ax.set_xscale("log")
     ax.set_yscale("log")
+    ax.set_xlim(d_nm[0] * 0.6, d_nm[-1] * 1.6)
     ax.set_ylim(1e-7, 2.0)
     ax.set_ylabel(f"{label}\nper-bin rel err  (J vs F)")
     ax.grid(True, alpha=0.3, which="both")
@@ -80,11 +86,18 @@ for ax, label in zip(axes, ["Mass concentration", "Number concentration"]):
     )
     ax.legend(loc="lower right", fontsize=9)
 
+# X-axis tick labels in nm. Use FuncFormatter to render cleanly: ints
+# without decimal, sub-nm with one decimal. ScalarFormatter rounded
+# 0.5 → "0" on the previous render which read as a meaningless "zero"
+# tick on a log axis.
+from matplotlib.ticker import FuncFormatter, NullLocator
 axes[-1].set_xlabel("Bin median diameter (nm)")
-# Force xticks on log scale
-xtick_d = [0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000]
-axes[-1].set_xticks([d for d in xtick_d if d_nm.min() / 2 < d < d_nm.max() * 2])
-axes[-1].get_xaxis().set_major_formatter(plt.ScalarFormatter())
+xtick_d = [d for d in (1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000)
+           if d_nm[0] * 0.6 <= d <= d_nm[-1] * 1.6]
+axes[-1].set_xticks(xtick_d)
+axes[-1].xaxis.set_major_formatter(
+    FuncFormatter(lambda x, pos: f"{int(x)}" if x >= 1 else f"{x:g}"))
+axes[-1].xaxis.set_minor_locator(NullLocator())
 
 plt.tight_layout()
 out_dir = ROOT / "plots" / "diff" / "phase10"
