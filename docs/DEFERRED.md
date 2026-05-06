@@ -60,9 +60,13 @@ non‑fused path, so the boundary trips at different substep counts.
 
 **Effect on parity:** Total mass remains bit‑perfect (mass conservation
 is symbolic, not boundary‑sensitive). Peak bin position matches in
-99% of scenarios. Per‑bin amplitudes drift modestly in tail bins of
-high‑H₂SO₄ scenarios — this is the residual after Phase 10.5
-(per‑step env refresh) lands.
+99% of scenarios. The remaining 33% gap on the strict per‑bin gate
+(per‑scenario median ≤ 1 %, max ≤ 5 %) is essentially this effect —
+**Phase 10.5 (per‑step env refresh) confirmed it: even though Fortran
+rebuilds wet radii / Kelvin / kernels every Step, in the sulfate test
+the gas concentrations and temperature drift so little that this
+refresh changes the JAX result by < 10⁻¹³ relative**. The 33% gap
+isn't env staleness; it is the retry‑boundary drift.
 
 **Why deferred:** The natural fixes (disabling FMA fusion via
 `XLA_FLAGS=--xla_cpu_enable_fast_math=false`, manually re‑ordering the
@@ -74,7 +78,7 @@ of the port.
 
 **Pointer:** `src/carma/solvers/gsolve.py:66`,
 `docs/decisions/0021-adaptive-retry-nested-while-loop.md`,
-Phase 10.4 commit `085e697` parity stats.
+Phase 10.4 commit `085e697`, Phase 10.5 confirmation commit (TBD).
 
 ## Scope
 
