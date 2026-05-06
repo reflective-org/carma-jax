@@ -78,6 +78,14 @@ subroutine test_sulfate_ensemble()
   real(kind=f)          :: rmin, rmrat, RHO_SULFATE
   real(kind=f)          :: log_r, log_mu_cm, log_sigma, norm, r_cm
 
+  ! Phase 10.6: track substep schedule per outer step for prescribed-
+  ! substep parity test. Each entry is the ntsubsteps Fortran's
+  ! adaptive retry settled on for that outer step.
+  integer(kind=8), allocatable :: nsubsteps_history(:)
+  integer(kind=8), allocatable :: nretries_history(:)
+  character(len=512)           :: schedule_path
+  integer                      :: unit_sched
+
   if (command_argument_count() < 2) then
     write(0, '(A)') 'usage: <scenario_file> <output_file>'
     call exit(2)
@@ -197,6 +205,11 @@ subroutine test_sulfate_ensemble()
   end if
 
   lastsub = 0
+  ! Phase 10.6 schedule history: one entry per outer step.
+  allocate(nsubsteps_history(nstep), nretries_history(nstep))
+  nsubsteps_history(:) = 0
+  nretries_history(:) = 0
+
   do istep = 1, nstep
     time = (istep - 1) * dtime
     call CARMASTATE_Create(cstate, carma_ptr, time, dtime, NZ, &
@@ -217,6 +230,8 @@ subroutine test_sulfate_ensemble()
     call CARMASTATE_Step(cstate, rc)
     if (rc /= 0) stop '*** CARMASTATE_Step FAILED ***'
     call CARMASTATE_Get(cstate, rc, nsubstep=nsubsteps, nretry=nretries)
+    nsubsteps_history(istep) = int(nsubsteps, kind=8)
+    nretries_history(istep)  = int(nretries, kind=8)
     call CARMASTATE_GetState(cstate, rc, t=t(:))
     do ielem = 1, NELEM
       do ibin = 1, NBIN
@@ -228,6 +243,21 @@ subroutine test_sulfate_ensemble()
           satliq=satliq(:,igas), satice=satice(:,igas))
     end do
   end do
+
+  ! Phase 10.6: write substep schedule to a sidecar binary file
+  ! "<output_path>.schedule.bin" — 2 × nstep int64 (column-major):
+  !   nsubsteps_history[1..nstep], nretries_history[1..nstep].
+  schedule_path = trim(output_path) // '.schedule.bin'
+  open(newunit=unit_sched, file=trim(schedule_path), &
+       access='stream', form='unformatted', &
+       action='write', status='replace', iostat=ios)
+  if (ios /= 0) then
+    write(0, '(A, A)') 'cannot write schedule: ', trim(schedule_path)
+    call exit(6)
+  end if
+  write(unit_sched) nsubsteps_history
+  write(unit_sched) nretries_history
+  close(unit_sched)
 
   open(newunit=unit_out, file=trim(output_path), action='write', &
        status='replace', iostat=ios)
@@ -254,5 +284,6 @@ subroutine test_sulfate_ensemble()
 
   deallocate(zc, zl, p, pl, t, rho, mmr, mmr_gas, new_gas)
   deallocate(satliq, satice, r, rmass)
+  deallocate(nsubsteps_history, nretries_history)
 
 end subroutine test_sulfate_ensemble

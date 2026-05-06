@@ -48,6 +48,7 @@ def newstate_calc_full(
     iz=0,
     dt_threshold=DTYPE(1.0),
     scale_threshold=DTYPE(1.0),
+    prescribed_ntsubsteps=None,
 ):
     """Adaptive-substep retry around ``microfast_full_jit``.
 
@@ -72,6 +73,34 @@ def newstate_calc_full(
     Returns:
         Tuple ``(pc, gc, t, rlheat_total, ntsubsteps_used, nretries_used)``.
     """
+    # Phase 10.6 prescribed-substep mode: bypass adaptive retry and run
+    # exactly `prescribed_ntsubsteps` substeps (rc ignored). Used to
+    # quantify how much of the JAX↔Fortran residual is retry-boundary
+    # drift vs. something else.
+    if prescribed_ntsubsteps is not None:
+        ntsubsteps = int(prescribed_ntsubsteps)
+        pc = pc_init
+        gc = gc_init
+        t = t_init
+        rlheat_total = jnp.float64(0.0)
+        dtime_sub = dtime_orig / ntsubsteps
+        fraction = jnp.float64(1.0) / ntsubsteps
+        for _isubstep in range(ntsubsteps):
+            gc = gc + d_gc * fraction
+            t = t + d_t * fraction
+            pc, gc, t, rlheat_val, _rc = microfast_full_jit(
+                pc, gc, t, dtime_sub,
+                rhoa, zmet,
+                akelvin, akelvini, gro, gro1, rup_wet,
+                rmass_2d, dm_2d, rmassup, r_bins, rmrat_val,
+                pratt, prat, pden1, palr,
+                rlhe, rlhm,
+                ds_threshold_arr,
+                dt_threshold, scale_threshold, iz,
+            )
+            rlheat_total = rlheat_total + rlheat_val
+        return pc, gc, t, rlheat_total, ntsubsteps, 0
+
     ntsubsteps = max(int(initial_ntsubsteps), int(minsubsteps))
     nretries = 0
 

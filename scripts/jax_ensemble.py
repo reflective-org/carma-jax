@@ -375,7 +375,8 @@ def _env_for_scenario(T_K, p_hPa, rh, h2so4_pptv, mu_nm, sigma_g, cfg,
     return env
 
 
-def run_jax_ensemble(scenarios, dtime_s=1800.0, nstep=100):
+def run_jax_ensemble(scenarios, dtime_s=1800.0, nstep=100,
+                       prescribed_schedules=None):
     """Run every scenario through ``make_step_full_faithful`` end-to-end.
 
     The faithful chain bundles microslow (coag) + microfast_full inside
@@ -384,9 +385,15 @@ def run_jax_ensemble(scenarios, dtime_s=1800.0, nstep=100):
     refresh ``(pcl, gcl, told, d_gc, d_t, pconmax)`` exactly as Fortran
     does.
 
-    Loops in Python over scenarios (not vmap); per-scenario warm time
-    is small enough that 1000 × 100 = 100k inner steps complete in a
-    few minutes."""
+    Args:
+        scenarios: dict from generate_sulfate_scenarios.load_scenarios.
+        dtime_s: outer timestep [s].
+        nstep: number of outer timesteps per scenario.
+        prescribed_schedules: optional ``(n_scen, nstep)`` int array of
+            ntsubsteps per outer step, per scenario. When provided, the
+            adaptive retry is bypassed and JAX runs exactly that many
+            substeps for each outer step (Phase 10.6 diagnostic).
+    """
     cfg = _minimal_config()
     print(f"  bin grid: nbin={cfg.nbin}, rmin={float(cfg.groups[0].r[0])*1e7:.1f} nm, "
           f"rmrat={cfg.groups[0].rmrat}, rmax={float(cfg.groups[0].r[-1])*1e4:.2f} μm",
@@ -441,6 +448,11 @@ def run_jax_ensemble(scenarios, dtime_s=1800.0, nstep=100):
                 do_substep=True, do_coag=cfg.do_coag,
             )
 
+            # Phase 10.6: optionally prescribe Fortran's ntsubsteps for
+            # this scenario / step.
+            prescribed = (None if prescribed_schedules is None
+                          else int(prescribed_schedules[i, _step_idx]))
+
             pc, gc, t, _diag = step(
                 pc=pc, gc=gc, t=t, dtime=dtime_s,
                 rhoa=env["rhoa"], zmet=env["zmet"],
@@ -451,6 +463,7 @@ def run_jax_ensemble(scenarios, dtime_s=1800.0, nstep=100):
                 ds_threshold_arr=env["ds_threshold_arr"],
                 pcl=pcl, gcl=gcl, told=t, d_gc=d_gc, d_t=d_t,
                 dt_threshold=DTYPE(cfg.dt_threshold),
+                prescribed_ntsubsteps=prescribed,
             )
 
         # Convert JAX internal-CGS outputs to Fortran's MMR convention:
@@ -482,6 +495,10 @@ def main():
     parser.add_argument("--nstep", type=int, default=100)
     parser.add_argument("--n", type=int, default=None,
                         help="Override scenario count (for smoke tests)")
+    parser.add_argument("--substep-schedule", type=Path, default=None,
+                        help="Phase 10.6: NPZ with key 'nsubsteps' "
+                             "shape (n_scen, nstep) — use Fortran's exact "
+                             "substep counts instead of adaptive retry.")
     args = parser.parse_args()
 
     scenarios = load_scenarios(args.scenarios)
@@ -493,12 +510,21 @@ def main():
         scenarios["_n"] = args.n
 
     n = int(scenarios["_n"])
+    prescribed = None
+    if args.substep_schedule is not None:
+        sched_npz = np.load(args.substep_schedule)
+        prescribed = sched_npz["nsubsteps"][:n, :args.nstep]
+        print(f"Phase 10.6: using prescribed substep schedule from "
+              f"{args.substep_schedule} — shape {prescribed.shape}, "
+              f"total inner substeps {int(prescribed.sum()):,}")
+
     print(f"Running JAX ensemble over {n} scenarios "
           f"(dtime={args.dtime}s × {args.nstep} steps)...")
 
     t0 = time.perf_counter()
     results = run_jax_ensemble(scenarios,
-                                dtime_s=args.dtime, nstep=args.nstep)
+                                dtime_s=args.dtime, nstep=args.nstep,
+                                prescribed_schedules=prescribed)
     wall = time.perf_counter() - t0
 
     n_ok = sum(1 for s in results["status"] if s == "ok")
