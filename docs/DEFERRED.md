@@ -60,21 +60,41 @@ non‑fused path, so the boundary trips at different substep counts.
 
 **Effect on parity:** Total mass remains bit‑perfect (mass conservation
 is symbolic, not boundary‑sensitive). Peak bin position matches in
-99% of scenarios. Per‑bin amplitudes drift modestly in tail bins of
-high‑H₂SO₄ scenarios — this is the residual after Phase 10.5
-(per‑step env refresh) lands.
+99% of scenarios. The remaining 33% gap on the strict per‑bin gate
+(per‑scenario median ≤ 1 %, max ≤ 5 %) is essentially this effect —
+**Phase 10.5 (per‑step env refresh) and Phase 10.6 (prescribed‑substep
+diagnostic) together confirmed it**:
+
+- Phase 10.5: rebuilding wet radii / Kelvin / kernels every Step (as
+  Fortran does) shifts the JAX result by < 10⁻¹³ relative — the env
+  drift is not the cause.
+- Phase 10.6: feeding JAX Fortran's exact ntsubsteps for every outer
+  step (bypassing JAX's adaptive retry) drops the strict‑gate pass
+  rate from 66.8 % to **95.2 %**, total mass P95 from 2.4×10⁻³ to
+  4.6×10⁻⁶, and per‑bin median P95 from 2.0×10⁻² to 2.9×10⁻⁵
+  (3 orders of magnitude across the board). 284 scenarios moved from
+  fail → pass; 0 moved the other way.
+
+So the gap is essentially all retry‑boundary drift, with a small
+residual (~5% scenarios) where 65 536 substeps × 100 outer steps =
+6.5 M FP ops still accumulate beyond machine ε for the highest‑H₂SO₄
+scenarios.
 
 **Why deferred:** The natural fixes (disabling FMA fusion via
 `XLA_FLAGS=--xla_cpu_enable_fast_math=false`, manually re‑ordering the
 gsolve `gc < 0` test) all sacrifice JIT performance for marginal
 parity gain. Phase 9.2 already validated that *given Fortran's
-ntsubsteps* JAX matches at machine ε — so the math is right; only the
-adaptive‑retry boundary differs. Acceptable as a documented FP property
-of the port.
+ntsubsteps* JAX matches at machine ε per substep — so the math is
+right; only the adaptive‑retry boundary differs. Phase 10.6 quantifies
+this: with prescribed schedule, JAX is faithful to Fortran across the
+full ensemble; the adaptive variant differs in tail‑bin amplitudes
+because retries trigger at different points. Acceptable as a documented
+FP property of the port.
 
 **Pointer:** `src/carma/solvers/gsolve.py:66`,
 `docs/decisions/0021-adaptive-retry-nested-while-loop.md`,
-Phase 10.4 commit `085e697` parity stats.
+Phase 10.4 commit `085e697`, Phase 10.5 commit `992d18e`,
+Phase 10.6 commit (TBD).
 
 ## Scope
 

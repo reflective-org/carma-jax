@@ -195,90 +195,85 @@ def _compute_ppm_coefs(cfg):
             jnp.asarray(pden1), jnp.asarray(palr))
 
 
-def _env_for_scenario(T_K, p_hPa, rh, h2so4_pptv, mu_nm, sigma_g, cfg,
-                        ppm_coefs):
-    """Produce a populated env dict for one scenario, matching the
-    make_step_full call signature. Growth kernels come from
-    setup_atm + setup_grow + setup_gkern per scenario (Option A-lite)."""
-    import jax.numpy as jnp
+def _refresh_env(T, p_cgs, gc, cfg, ppm_coefs):
+    """Rebuild every state-dependent env array from current ``(T, p_cgs, gc)``.
+
+    Fortran rebuilds the full env each ``CARMASTATE_Step`` call (see
+    ``carma_sulfatetest_ensemble.F90:204-234``: ``CARMASTATE_Create`` +
+    ``SetGas`` + ``Step`` per outer iteration). Doing the same in JAX
+    closes the bias that creeps in once H₂SO₄ has been consumed and
+    H₂O has redistributed — wet radii / Kelvin / growth & coag kernels
+    all depend on current gc[H₂O], not initial RH.
+
+    Static inputs (bin geometry, group/element flags, PPM coefs) come
+    from ``cfg`` and ``ppm_coefs`` and don't need rebuilding.
+
+    Returns:
+        env dict matching the ``make_step_full_faithful`` step closure
+        signature (plus ``rmu`` etc. for callers that want them).
+    """
     from carma.setup_atm import setup_atm
     from carma.setup_grow import setup_grow
     from carma.setup_gkern import setup_gkern
-    from carma.constants import GRAV, R_AIR, RPA2CGS
+    from carma.setup_vf import setup_vf_jit
+    from carma.setup_ckern import setup_ckern_jit
+    from carma.wetr import get_wetr
+    from carma.sulfate_utils import wtpct_tabaz
+    from carma.enums import GridType, SwellMethod
+    from carma.constants import GRAV, R_AIR
 
-    nz = 1
     nbin = cfg.nbin
     ngroup = cfg.ngroup
     ngas = cfg.ngas
+    nz = 1
 
-    # Build a single-layer atmosphere column at the scenario's T, p
-    T = jnp.asarray([T_K], dtype=DTYPE)
-    p_cgs = jnp.asarray([p_hPa * 100.0 * float(RPA2CGS)], dtype=DTYPE)   # hPa → Pa → dyne/cm²
-    rho_approx = float(p_cgs[0]) / (float(R_AIR) * T_K)
-    # Build thin (10 m) column so setup_atm is well-defined; results are
-    # per-layer anyway.
-    deltaz = 1.0e3    # cm
-    zc = jnp.asarray([1.0e5])     # 1 km above the virtual ground
+    # Single thin-layer atmosphere column at current (T, p_cgs).
+    rho_approx = float(p_cgs[0]) / (float(R_AIR) * float(T[0]))
+    deltaz = 1.0e3                          # cm
+    zc = jnp.asarray([1.0e5])               # 1 km above the virtual ground
     zl = jnp.asarray([zc[0] - deltaz / 2, zc[0] + deltaz / 2])
     pl = jnp.asarray([p_cgs[0] + 0.5 * deltaz * rho_approx * float(GRAV),
                        p_cgs[0] - 0.5 * deltaz * rho_approx * float(GRAV)])
-
-    from carma.enums import GridType
     rhoa, dz, zmet, zmetl, rmu, thcond, rhoa_wet = setup_atm(
         T, p_cgs, pl, zc, zl, GridType.I_CART,
     )
 
-    # setup_grow: gas diffusivity + latent heats. igash2o=0, igash2so4=1 from cfg.
     diffus, rlhe, rlhm = setup_grow(
         T, p_cgs, rhoa, zmet,
         igash2o=cfg.igash2o, igash2so4=cfg.igash2so4,
         ngas=ngas, do_cnst_rlh=False,
     )
 
-    # H2SO4 gas mmr (g/g) and gas mass density (g/cm³) — used both for
-    # the gc tensor and for the wet-radius hygroscopic-growth call.
-    h2so4_mmr = h2so4_pptv * 1.0e-12 * (98.0 / 29.0)        # g/g
-    # Initial H2O mmr seed: match Fortran's `carma_sulfatetest_ensemble.F90`
-    # line 173-175 which uses the simplified Murphy-Koop analytic. (The
-    # exact Murphy-Koop formula gets re-applied inside microfast.)
-    pvapl_Pa = jnp.exp(54.842763 - 6763.22 / T_K
-                        - 4.210 * jnp.log(T_K) + 0.000367 * T_K)
-    h2o_mmr = rh * float(pvapl_Pa) * 18.0 / (29.0 * p_hPa * 100.0)
-    rhoa_pure = float(rhoa[0]) / float(zmet[0])      # g/cm³ pure-air density
-    h2o_mass_cgs = h2o_mmr * rhoa_pure                # g/cm³
-    # h2o_vp for wet-radius / wtpct: must use the EXACT Murphy-Koop
-    # (vaporp_h2o_murphy2005), not the seed analytic. Fortran's wetr and
-    # setupgkern use cstate%pvapl which is set by vaporp_h2o_murphy2005
-    # inside microfast — using the analytic here biases pvapl 1.7% high
-    # at stratospheric temps and ripples into Kelvin / wtpct / rwet.
+    # H2O state from current gc — gc is in JAX CGS = mmr × rhoa, so
+    # h2o_mass [g/cm³] = gc[H2O] / zmet (since rhoa already has the
+    # zmet factor folded in for non-cartesian grids; here zmet=1).
+    h2o_mass_cgs = gc[0, cfg.igash2o] / zmet[0]
     pvapl_h2o_arr, _ = vaporp_h2o_murphy2005(T)
-    h2o_vp_cgs = float(pvapl_h2o_arr[0])              # already dyne/cm²
+    h2o_vp_cgs = pvapl_h2o_arr[0]                  # dyne/cm² (CGS already)
 
-    # Wet radii via Fortran's I_WTPCT_H2SO4 path (sulfate group's irhswell).
-    # Recomputed once per scenario at initial T/RH/H2O — Fortran would refresh
-    # each Step call, but for this single-cell test T is constant and H2O
-    # drifts negligibly, so a static approximation tracks closely.
-    from carma.wetr import get_wetr
-    from carma.enums import SwellMethod
+    # Wet radii via I_WTPCT_H2SO4 (sulfate group's irhswell). Use
+    # Fortran's actual relhum = h2o_vp / pvapl ratio, not the scenario
+    # rh, since gc evolves over the run.
+    relhum = h2o_mass_cgs / (h2o_vp_cgs * 18.016 / (8.314e7 * T[0]))
     grp = cfg.groups[0]
     r_dry = jnp.asarray(grp.r, dtype=DTYPE)
     rup_dry = jnp.asarray(grp.rup, dtype=DTYPE)
     rlow_dry = jnp.asarray(grp.rlow, dtype=DTYPE)
     rho_dry_per_bin = jnp.full(r_dry.shape, _FORTRAN_RHO_SULF, dtype=DTYPE)
     swell = int(SwellMethod.I_WTPCT_H2SO4)
-    r_wet_1d, rho_wet = get_wetr(r_dry, rho_dry_per_bin, rh, T_K, swell,
+    r_wet_1d, rho_wet = get_wetr(r_dry, rho_dry_per_bin, relhum, T[0], swell,
         h2o_mass=h2o_mass_cgs, h2o_vp=h2o_vp_cgs,
         gwtmol_h2so4=DTYPE(_GWTMOL_H2SO4))
-    rup_wet_1d, _ = get_wetr(rup_dry, rho_dry_per_bin, rh, T_K, swell,
+    rup_wet_1d, _ = get_wetr(rup_dry, rho_dry_per_bin, relhum, T[0], swell,
         h2o_mass=h2o_mass_cgs, h2o_vp=h2o_vp_cgs,
         gwtmol_h2so4=DTYPE(_GWTMOL_H2SO4))
-    rlow_wet_1d, _ = get_wetr(rlow_dry, rho_dry_per_bin, rh, T_K, swell,
+    rlow_wet_1d, _ = get_wetr(rlow_dry, rho_dry_per_bin, relhum, T[0], swell,
         h2o_mass=h2o_mass_cgs, h2o_vp=h2o_vp_cgs,
         gwtmol_h2so4=DTYPE(_GWTMOL_H2SO4))
-    r_wet = r_wet_1d[None, :, None]                 # (nz, nbin, ngroup)
+    r_wet = r_wet_1d[None, :, None]
     rup_wet = rup_wet_1d[None, :, None]
     rlow_wet = rlow_wet_1d[None, :, None]
-    re = jnp.zeros((nz, nbin, ngroup), dtype=DTYPE)
+
     rrat = jnp.ones((nbin, ngroup), dtype=DTYPE)
     eshape_arr = jnp.asarray([float(g.eshape) for g in cfg.groups], dtype=DTYPE)
     is_ice_arr = np.asarray([bool(g.is_ice) for g in cfg.groups])
@@ -286,22 +281,16 @@ def _env_for_scenario(T_K, p_hPa, rh, h2so4_pptv, mu_nm, sigma_g, cfg,
     igrowgas_arr = np.asarray(
         [cfg.igash2so4 for _ in cfg.elements], dtype=np.int32)
 
-    # Fall velocity, Reynolds number, slip correction (needed for coag kernel
-    # AND for setup_gkern — re is the real Reynolds, not zeros). Uses wet
-    # radii and per-bin wet density from get_wetr above.
-    from carma.setup_vf import setup_vf_jit
-    rmass_2d = jnp.asarray(cfg.groups[0].rmass)[:, None]              # (nbin, ngroup)
-    rho_p_2d = rho_wet[:, None]                                        # (nbin, ngroup)
+    rmass_2d = jnp.asarray(cfg.groups[0].rmass)[:, None]
+    rho_p_2d = rho_wet[:, None]
     rrat_2d = jnp.ones((nbin, ngroup), dtype=DTYPE)
     rprat_2d = jnp.ones((nbin, ngroup), dtype=DTYPE)
     vf, re_real, bpm = setup_vf_jit(
         T, rhoa, zmet, rmu, r_wet, rho_p_2d, rrat_2d, rprat_2d,
     )
 
-    # wtpct (sulfate weight percent) for setup_gkern's H2SO4 Kelvin
-    # override. Same Tabazadeh1997 formula sulfnuc uses internally.
-    from carma.sulfate_utils import wtpct_tabaz
-    wtpct_arr = wtpct_tabaz(T, jnp.asarray([h2o_mass_cgs]), jnp.asarray([h2o_vp_cgs]))
+    wtpct_arr = wtpct_tabaz(T, jnp.atleast_1d(h2o_mass_cgs),
+                             jnp.atleast_1d(h2o_vp_cgs))
 
     _, akelvin, akelvini, gro, gro1, gro2, _, _ = setup_gkern(
         T, p_cgs, rhoa, zmet, rmu, thcond, diffus, rlhe, rlhm,
@@ -312,11 +301,6 @@ def _env_for_scenario(T_K, p_hPa, rh, h2so4_pptv, mu_nm, sigma_g, cfg,
         igash2o=cfg.igash2o, igash2so4=cfg.igash2so4, wtpct=wtpct_arr,
     )
 
-    # Coagulation kernel (Brownian + Van der Waals + Fuchs + grav).
-    # use_vw mask is (NGROUP, NGROUP) bool: True where BOTH colliding
-    # groups are is_sulfate (Chan & Mozurkewich 2001 VdW enhancement).
-    # Sulfate test has a single sulfate group → use_vw = [[True]].
-    from carma.setup_ckern import setup_ckern_jit
     is_sulfate = np.asarray([bool(g.is_sulfate) for g in cfg.groups])
     use_vw = jnp.asarray(is_sulfate[:, None] & is_sulfate[None, :])
     ckernel = setup_ckern_jit(
@@ -325,42 +309,74 @@ def _env_for_scenario(T_K, p_hPa, rh, h2so4_pptv, mu_nm, sigma_g, cfg,
         use_vw=use_vw,
     )
 
-    # gc in CGS: mmr × rhoa (rhoa already includes zmet factor)
-    gc = jnp.asarray([[h2o_mmr * float(rhoa[0]),
-                        h2so4_mmr * float(rhoa[0])]], dtype=DTYPE)
-
-    # Initial lognormal aerosol seed. Fortran's
-    # `carma_sulfatetest_ensemble.F90` normalises so Σ mmr = 1e-18 g/g.
-    # In JAX-internal CGS, pc is #/cm³/z and the equivalent mass-density
-    # constraint is Σ pc·rmass = 1e-18 · rhoa, so we multiply by rhoa
-    # here for apples-to-apples parity with Fortran.
-    r_bins_np = np.asarray(r_dry)
-    pc_sulf = _init_lognormal_pc(r_bins_np, mu_nm, sigma_g,
-                                   total_mass_g_per_cm3=1.0e-18 * float(rhoa[0]))
-    pc = jnp.zeros((nz, nbin, cfg.nelem), dtype=DTYPE)
-    pc = pc.at[0, :, 0].set(pc_sulf)
-
-    pvapl_arr = pvapl_Pa * float(RPA2CGS)   # Pa → dyne/cm²; used only as scalar hint
-
     pratt, prat, pden1, palr = ppm_coefs
-
     ds_threshold_arr = jnp.zeros((ngas,), dtype=DTYPE)
 
     return dict(
-        pc=pc, gc=gc, t=T,
         rhoa=rhoa, zmet=zmet, rlhe=rlhe, rlhm=rlhm, diffus=diffus,
         akelvin=akelvin, akelvini=akelvini,
         gro=gro, gro1=gro1, gro2=gro2,
         rup_wet=rup_wet, rlow_wet=rlow_wet,
         pratt=pratt, prat=prat, pden1=pden1, palr=palr,
-        pvapl=float(pvapl_arr),
         ds_threshold_arr=ds_threshold_arr,
-        # Coag-side inputs (Phase 10.4b):
         ckernel=ckernel,
+        rmu=rmu, thcond=thcond,
     )
 
 
-def run_jax_ensemble(scenarios, dtime_s=1800.0, nstep=100):
+def _env_for_scenario(T_K, p_hPa, rh, h2so4_pptv, mu_nm, sigma_g, cfg,
+                        ppm_coefs):
+    """Build initial state + env for one scenario.
+
+    Initial pc/gc/T/p_cgs are scenario-only; the env arrays come from
+    ``_refresh_env`` so that subsequent outer steps can re-call it with
+    the evolved (T, gc).
+    """
+    from carma.constants import RPA2CGS
+
+    nbin = cfg.nbin
+    nz = 1
+
+    T = jnp.asarray([T_K], dtype=DTYPE)
+    p_cgs = jnp.asarray([p_hPa * 100.0 * float(RPA2CGS)], dtype=DTYPE)
+
+    # Initial gas mmrs (Fortran ensemble line 173-176)
+    h2so4_mmr = h2so4_pptv * 1.0e-12 * (98.0 / 29.0)
+    pvapl_Pa = jnp.exp(54.842763 - 6763.22 / T_K
+                        - 4.210 * jnp.log(T_K) + 0.000367 * T_K)
+    h2o_mmr = rh * float(pvapl_Pa) * 18.0 / (29.0 * p_hPa * 100.0)
+
+    # First env build to get rhoa for the gas-density and seed-mass
+    # conversions; gc is rebuilt below from the same rhoa.
+    gc_seed = jnp.asarray([[0.0, 0.0]], dtype=DTYPE)
+    env0 = _refresh_env(T, p_cgs, gc_seed, cfg, ppm_coefs)
+    rhoa_init = env0["rhoa"]
+
+    # gc in CGS = mmr × rhoa
+    gc = jnp.asarray([[h2o_mmr * float(rhoa_init[0]),
+                        h2so4_mmr * float(rhoa_init[0])]], dtype=DTYPE)
+
+    # Initial lognormal aerosol seed. Σ mmr = 1e-18 g/g (Fortran
+    # convention) → Σ pc·rmass = 1e-18 × rhoa for JAX CGS.
+    r_dry = jnp.asarray(cfg.groups[0].r, dtype=DTYPE)
+    pc_sulf = _init_lognormal_pc(np.asarray(r_dry), mu_nm, sigma_g,
+                                   total_mass_g_per_cm3=1.0e-18 * float(rhoa_init[0]))
+    pc = jnp.zeros((nz, nbin, cfg.nelem), dtype=DTYPE)
+    pc = pc.at[0, :, 0].set(pc_sulf)
+
+    # Now rebuild env with the actual gc so wetr/akelvin/etc. reflect
+    # initial gas state (not zeros). Caller will _refresh_env again at
+    # each outer step.
+    env = _refresh_env(T, p_cgs, gc, cfg, ppm_coefs)
+    env["pc"] = pc
+    env["gc"] = gc
+    env["t"] = T
+    env["p_cgs"] = p_cgs
+    return env
+
+
+def run_jax_ensemble(scenarios, dtime_s=1800.0, nstep=100,
+                       prescribed_schedules=None):
     """Run every scenario through ``make_step_full_faithful`` end-to-end.
 
     The faithful chain bundles microslow (coag) + microfast_full inside
@@ -369,9 +385,15 @@ def run_jax_ensemble(scenarios, dtime_s=1800.0, nstep=100):
     refresh ``(pcl, gcl, told, d_gc, d_t, pconmax)`` exactly as Fortran
     does.
 
-    Loops in Python over scenarios (not vmap); per-scenario warm time
-    is small enough that 1000 × 100 = 100k inner steps complete in a
-    few minutes."""
+    Args:
+        scenarios: dict from generate_sulfate_scenarios.load_scenarios.
+        dtime_s: outer timestep [s].
+        nstep: number of outer timesteps per scenario.
+        prescribed_schedules: optional ``(n_scen, nstep)`` int array of
+            ntsubsteps per outer step, per scenario. When provided, the
+            adaptive retry is bypassed and JAX runs exactly that many
+            substeps for each outer step (Phase 10.6 diagnostic).
+    """
     cfg = _minimal_config()
     print(f"  bin grid: nbin={cfg.nbin}, rmin={float(cfg.groups[0].r[0])*1e7:.1f} nm, "
           f"rmrat={cfg.groups[0].rmrat}, rmax={float(cfg.groups[0].r[-1])*1e4:.2f} μm",
@@ -403,8 +425,18 @@ def run_jax_ensemble(scenarios, dtime_s=1800.0, nstep=100):
         pc = env["pc"]
         gc = env["gc"]
         t = env["t"]
+        p_cgs = env["p_cgs"]   # constant over the run (no compression)
 
         for _step_idx in range(nstep):
+            # Phase 10.5: rebuild the env from current (T, gc) at the
+            # start of each outer step. Mirrors Fortran's
+            # CARMASTATE_Create + SetGas + Step pattern, where wet
+            # radii / Kelvin / growth-coag kernels are recomputed each
+            # outer iteration. p stays constant in this single-cell
+            # test (no compression / advection), so we keep the
+            # initial p_cgs.
+            env = _refresh_env(t, p_cgs, gc, cfg, ppm_coefs)
+
             # No external advection / transport in this single-cell test, so
             # the "saved" state at the start of each outer step is exactly
             # the current state. Pass it as both (pc, gc, t) and
@@ -416,6 +448,11 @@ def run_jax_ensemble(scenarios, dtime_s=1800.0, nstep=100):
                 do_substep=True, do_coag=cfg.do_coag,
             )
 
+            # Phase 10.6: optionally prescribe Fortran's ntsubsteps for
+            # this scenario / step.
+            prescribed = (None if prescribed_schedules is None
+                          else int(prescribed_schedules[i, _step_idx]))
+
             pc, gc, t, _diag = step(
                 pc=pc, gc=gc, t=t, dtime=dtime_s,
                 rhoa=env["rhoa"], zmet=env["zmet"],
@@ -426,6 +463,7 @@ def run_jax_ensemble(scenarios, dtime_s=1800.0, nstep=100):
                 ds_threshold_arr=env["ds_threshold_arr"],
                 pcl=pcl, gcl=gcl, told=t, d_gc=d_gc, d_t=d_t,
                 dt_threshold=DTYPE(cfg.dt_threshold),
+                prescribed_ntsubsteps=prescribed,
             )
 
         # Convert JAX internal-CGS outputs to Fortran's MMR convention:
@@ -457,6 +495,10 @@ def main():
     parser.add_argument("--nstep", type=int, default=100)
     parser.add_argument("--n", type=int, default=None,
                         help="Override scenario count (for smoke tests)")
+    parser.add_argument("--substep-schedule", type=Path, default=None,
+                        help="Phase 10.6: NPZ with key 'nsubsteps' "
+                             "shape (n_scen, nstep) — use Fortran's exact "
+                             "substep counts instead of adaptive retry.")
     args = parser.parse_args()
 
     scenarios = load_scenarios(args.scenarios)
@@ -468,12 +510,21 @@ def main():
         scenarios["_n"] = args.n
 
     n = int(scenarios["_n"])
+    prescribed = None
+    if args.substep_schedule is not None:
+        sched_npz = np.load(args.substep_schedule)
+        prescribed = sched_npz["nsubsteps"][:n, :args.nstep]
+        print(f"Phase 10.6: using prescribed substep schedule from "
+              f"{args.substep_schedule} — shape {prescribed.shape}, "
+              f"total inner substeps {int(prescribed.sum()):,}")
+
     print(f"Running JAX ensemble over {n} scenarios "
           f"(dtime={args.dtime}s × {args.nstep} steps)...")
 
     t0 = time.perf_counter()
     results = run_jax_ensemble(scenarios,
-                                dtime_s=args.dtime, nstep=args.nstep)
+                                dtime_s=args.dtime, nstep=args.nstep,
+                                prescribed_schedules=prescribed)
     wall = time.perf_counter() - t0
 
     n_ok = sum(1 for s in results["status"] if s == "ok")

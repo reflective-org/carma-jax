@@ -151,6 +151,7 @@ def make_step_full_faithful(
         iz=0,
         dt_threshold=DTYPE(1.0),
         scale_threshold=DTYPE(1.0),
+        prescribed_ntsubsteps=None,
     ):
         """Advance single-column state faithfully.
 
@@ -174,7 +175,9 @@ def make_step_full_faithful(
             pc = microslow_jit(pc, pcl, ckernel, pconmax, zmet, dtime)
             pcl = pc
 
-        # Adaptive substep retry.
+        # Adaptive substep retry — or, if prescribed_ntsubsteps is given,
+        # bypass adaptive retry and run exactly that many substeps
+        # (Phase 10.6 prescribed-substep diagnostic).
         pc, gc, t, rlheat, nts_used, nret_used = newstate_calc_full(
             pcl, gcl, told,    # saved state for retry — start of outer step
             d_gc, d_t,
@@ -192,6 +195,7 @@ def make_step_full_faithful(
             iz=iz,
             dt_threshold=dt_threshold,
             scale_threshold=scale_threshold,
+            prescribed_ntsubsteps=prescribed_ntsubsteps,
         )
         diag["nts_used"] = nts_used
         diag["nretries"] = nret_used
