@@ -218,7 +218,7 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
 - [ ] `hetnucl`
 
 ### `src/carma/nucleation/freezaerl_mohler2010.py`  ↔  `freezaerl_mohler2010.F90`
-- [ ] `freezaerl_mohler2010`
+- [/] `freezaerl_mohler2010` — JAX port done (Phase 11.1 stage 1). 10 unit tests pass against a numpy reference that transcribes the Fortran kernel line-for-line (rtol 1e-12, machine ε on the eight algorithmically active scenarios + three gate cases + JIT roundtrip). Stage 2 follow-up: integrated Fortran-binary diff bench against `carma_nuc2test`. Requires building a multi-element / mixed-phase diagnostic patch parallel to `carma_sulfatetest_diagnostic.F90` — substantial scaffolding (3-element / 2-group cstate setup), worth its own PR.
 
 ### `src/carma/nucleation/freezaerl_tabazadeh2000.py`  ↔  `freezaerl_tabazadeh2000.F90`
 - [ ] `freezaerl_tabazadeh2000`
