@@ -18,7 +18,7 @@
 | 5e: microfast_growth JITs + make_step_microfast | COMPLETE | PR #11 |
 | growtest cliff fix | COMPLETE | PR #14 |
 | 6a: fp64 precision-comparison harness | COMPLETE | PR #13 |
-| 6b: fp32 overlay — float32 evaluated, parked | COMPLETE | PR #15 |
+| 6b: fp32 overlay — float32 evaluated and dropped | COMPLETE | PR #15 (fp32 path subsequently removed) |
 | 6c: CPU benchmark JAX vs Fortran | COMPLETE | PR #16 — JAX 1.2× / 0.5× / 2.1× of Fortran |
 | 7.1: sulfate_utils (wtpct, density, surf_tens) | COMPLETE | 14 unit tests, 5 figures |
 | 7.2: wetr (κ-Köhler + WTPCT) + hygroscopicity | COMPLETE | 15 unit tests, 4 figures |
@@ -283,7 +283,7 @@ These are tracked here explicitly so we don't lose them:
 
 6. **Size distribution shape at large radii** — the nuctest at t=100s shows Fortran's ice distribution extending to ~500 μm vs JAX's ~200 μm. Totals match within 1% and mass conservation is machine-precision, but the tail shape is under-resolved. Fortran's adaptive substepping catches it — our fixed-ntsubsteps drivers don't yet. Expected to resolve once the adaptive retry in item 1 is JIT'd.
 
-7. **Float32 path** — evaluated in Phase 6b (PR #15) and *parked*. `precision.py` already parameterises the dtype via `CARMA_DTYPE=fp32`, and `scripts/compare_precision.py` + `scripts/plot_precision_overlay.py` measure the cost. Findings: coagtest and vdiftest run cleanly in fp32 (precision cost < 0.1%); falltest / drydeptest / growtest blow up because `SMALL_PC = 1e-50` underflows in fp32 (min subnormal ~1.4e-45), turning the `jnp.maximum(pc, SMALL_PC)` denominator-floor into a true zero. Fixable with dtype-aware constants + a few `.astype(float64)` islands (vapor pressure is the strongest candidate), but not worth the maintenance cost while Fortran-parity precision is the reference and CPU throughput isn't a bottleneck. Revisit only if (a) CPU fp64 becomes a throughput blocker, or (b) we target GPU batched runs where the 2× memory / ~2–3× throughput benefit justifies the mixed-precision plumbing. The harness stays in-tree as measurement infrastructure for that future decision.
+7. **Float32 path — DROPPED.** Evaluated in Phase 6b (PR #15) and ultimately removed. Findings at the time: coagtest and vdiftest ran cleanly in fp32 (precision cost < 0.1 %), but falltest / drydeptest / growtest blew up because `SMALL_PC = 1e-50` underflows below float32's minimum subnormal (~1.4×10⁻⁴⁵), turning the `jnp.maximum(pc, SMALL_PC)` denominator-floor into a true zero. Fixable with dtype-aware constants and a few `.astype(float64)` islands, but not worth the maintenance cost — Fortran-parity precision is the reference, CPU fp64 is competitive (item 8 below), and no plan exists to target GPU batched runs where fp32 might pay off. `precision.py` is now hard-locked to float64; the comparison harness (`scripts/compare_precision.py`, `scripts/plot_precision_overlay.py`) was deleted along with the `CARMA_DTYPE` env-var plumbing. Evidence preserved in PR #15 history.
 
 8. **CPU throughput benchmark vs Fortran** — ran Phase 6c (`scripts/benchmark_cpu.py`, `plots/cpu_benchmark/benchmark.png`). JAX fp64 vs Fortran wall time, median of 3 steady-state runs after a warm-up call that drains the JIT cache into the hot path. `.block_until_ready()` on both sides so we're timing actual compute, not async dispatch.
 
@@ -293,7 +293,7 @@ These are tracked here explicitly so we don't lose them:
     | falltest | 61 ms | 31 ms | **0.5×** (JAX faster) |
     | growtest | 5 ms | 10 ms | 2.1× |
 
-    Implication: **JAX fp64 is competitive with Fortran on CPU.** No case for pursuing fp32 on performance grounds. Item 7 (fp32) stays parked.
+    Implication: **JAX fp64 is competitive with Fortran on CPU.** No case for pursuing fp32 on performance grounds — see item 7 (fp32 path dropped).
 
     Earlier draft numbers in PR #16 initially reported a 319× gap on growtest. That was a measurement bug — growtest's `loop_s` was timing the entire `run_jax_growtest()` function (atmosphere setup, growth-kernel setup, config build, JIT compile, *and* the stepping loop), while the other runners measured only the stepping loop. Fixed by adding explicit warm-up + `.block_until_ready()` and reporting `step_loop_s` separately.
 
