@@ -218,7 +218,9 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
 - [ ] `hetnucl`
 
 ### `src/carma/nucleation/freezaerl_mohler2010.py`  ↔  `freezaerl_mohler2010.F90`
-- [/] `freezaerl_mohler2010` — JAX port done (Phase 11.1 stage 1). 10 unit tests pass against a numpy reference that transcribes the Fortran kernel line-for-line (rtol 1e-12, machine ε on the eight algorithmically active scenarios + three gate cases + JIT roundtrip). Stage 2 follow-up: integrated Fortran-binary diff bench against `carma_nuc2test`. Requires building a multi-element / mixed-phase diagnostic patch parallel to `carma_sulfatetest_diagnostic.F90` — substantial scaffolding (3-element / 2-group cstate setup), worth its own PR.
+- [x] `freezaerl_mohler2010` — Phase 11.1, two complementary benches:
+  1. **Numpy reference** (`tests/unit/test_freezaerl_mohler2010.py`) — 10 tests pass at rtol 1e-12 across 8 algorithmically active scenarios + 3 polynomial regimes + 3 gate cases + JIT roundtrip.
+  2. **Standalone Fortran-compiled-by-gfortran** (`scripts/_bench_freezaerl_mohler2010.py` + `scripts/fortran_patch/freezaerl_mohler2010_standalone.F90`) — 1000 random scenarios × 16 bins, 13,035 non-zero (scen, bin) pairs. P50 = 4.1e-14, P95 = 1.7e-13, max = 2.9e-13 — every active point under 1e-12 (unit-test gate), 1:1 scatter spans 60 orders of magnitude on `y = x`. Plot at `plots/diff/phase11/freezaerl_mohler2010_jax_vs_fortran.png`. The standalone Fortran inlines the kernel formula verbatim (lines 79-180 of upstream); the carma-state dispatch around the kernel is the caller's job and not part of this comparison — that arrives with the integrated `carma_nuc2test` diagnostic in a later PR.
 
 ### `src/carma/nucleation/freezaerl_tabazadeh2000.py`  ↔  `freezaerl_tabazadeh2000.F90`
 - [ ] `freezaerl_tabazadeh2000`
