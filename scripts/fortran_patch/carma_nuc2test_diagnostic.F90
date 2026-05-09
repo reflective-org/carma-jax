@@ -11,6 +11,10 @@
 !! standalone formula bench).
 !!
 !! Reads ONE scenario from argv[1], writes per-step dumps into argv[2].
+!! Optional argv[3]: nstep_max (default 1000).
+!! Optional argv[4]: kernel selector — "mohler" (default), "tabazadeh", or "koop".
+!! Selects which freezaerl_* subroutine the AddNucleation flag wires
+!! up and which the probe calls.
 !!
 !! Scenario line (whitespace-separated):
 !!   T_K  p_hPa  rh_fraction  n_concentration_cm3  mu_radius_cm  sigma_g
@@ -104,11 +108,14 @@ subroutine test_nuc2_diagnostic()
   integer :: nstep, nstep_max
   integer :: istep, ielem, ibin, igas, igroup
   integer :: ios, n_dumped, nsubsteps
+  integer :: kernel_flag    ! I_AF_MOHLER_2010 / I_AF_TABAZADEH_2000 / I_AF_KOOP_2000
   real(kind=f) :: nretries
   character(len=512) :: scen_path, out_dir, prefix, arg_buf
+  character(len=32)  :: kernel_name
 
   if (command_argument_count() < 2) then
-    write(0, '(A)') 'usage: <scenario_file> <output_dir> [nstep_max]'
+    write(0, '(A)') 'usage: <scenario_file> <output_dir> [nstep_max] [kernel]'
+    write(0, '(A)') '  kernel: "mohler" (default), "tabazadeh", or "koop"'
     call exit(1)
   end if
   call get_command_argument(1, scen_path)
@@ -119,6 +126,21 @@ subroutine test_nuc2_diagnostic()
     read(arg_buf, *, iostat=ios) nstep_max
     if (ios /= 0) nstep_max = 0
   end if
+  kernel_name = "mohler"
+  if (command_argument_count() >= 4) then
+    call get_command_argument(4, kernel_name)
+  end if
+  select case (trim(kernel_name))
+    case ("mohler", "MOHLER")
+      kernel_flag = I_AF_MOHLER_2010
+    case ("tabazadeh", "TABAZADEH")
+      kernel_flag = I_AF_TABAZADEH_2000
+    case ("koop", "KOOP")
+      kernel_flag = I_AF_KOOP_2000
+    case default
+      write(0, '(A, A)') 'unknown kernel: ', trim(kernel_name)
+      call exit(1)
+  end select
 
   ! Read scenario (whitespace, free-form): T p rh n mu_cm sigma_g
   ! followed by the 6 override fields for the Möhler probe.
@@ -178,7 +200,7 @@ subroutine test_nuc2_diagnostic()
   ! Growth + nucleation: Möhler 2010 only.
   call CARMA_AddGrowth(carma, 2, 1, rc)
   if (rc /= 0) call exit(10)
-  call CARMA_AddNucleation(carma, 1, 3, I_AERFREEZE + I_AF_MOHLER_2010, &
+  call CARMA_AddNucleation(carma, 1, 3, I_AERFREEZE + kernel_flag, &
                            0._f, rc, igas=1, ievp2elem=1)
   if (rc /= 0) call exit(11)
   call CARMA_Initialize(carma, rc, do_grow=.true.)
@@ -324,10 +346,10 @@ contains
     if (allocated(cs%f_r_wet))     call dump_alloc_3d(prefix, 'r_wet',    cs%f_r_wet)
     if (allocated(cs%f_pconmax))   call dump_alloc_2d(prefix, 'pconmax',  cs%f_pconmax)
 
-    ! Möhler probe: inject scenario overrides into cstate (so the
-    ! kernel runs with controlled inputs through the full dispatch
-    ! wrapper, rather than whatever post-Step state remains), zero
-    ! rnuclg, call freezaerl_mohler2010, dump.
+    ! Probe: inject scenario overrides into cstate (so the kernel runs
+    ! with controlled inputs through the full dispatch wrapper, rather
+    ! than whatever post-Step state remains), zero rnuclg, call the
+    ! selected freezaerl_*, dump.
     if (allocated(cs%f_rnuclg) .and. allocated(cs%f_supsati) .and. &
         allocated(cs%f_supsatl) .and. allocated(cs%f_akelvin) .and. &
         allocated(cs%f_akelvini) .and. allocated(cs%f_pconmax) .and. &
@@ -337,13 +359,19 @@ contains
       cs%f_supsatl(1, 1)    = ssl_over
       cs%f_akelvin(1, 1)    = akelvin_over
       cs%f_akelvini(1, 1)   = akelvini_over
-      ! Apply pconmax to the Sulfate IN group (igroup=1) — the only
-      ! group with I_AERFREEZE configured. Group 2 (Ice Crystal) stays
-      ! whatever the Step left.
       cs%f_pconmax(1, 1)    = pconmax_over
       cs%f_rnuclg(:,:,:) = 0._f
-      call freezaerl_mohler2010(carma, cs, 1, rc_loc)
-      call dump_alloc_3d(prefix, 'freezaerl_mohler_probe', cs%f_rnuclg)
+      select case (trim(kernel_name))
+        case ("mohler", "MOHLER")
+          call freezaerl_mohler2010(carma, cs, 1, rc_loc)
+          call dump_alloc_3d(prefix, 'freezaerl_mohler_probe', cs%f_rnuclg)
+        case ("tabazadeh", "TABAZADEH")
+          call freezaerl_tabazadeh2000(carma, cs, 1, rc_loc)
+          call dump_alloc_3d(prefix, 'freezaerl_tabazadeh_probe', cs%f_rnuclg)
+        case ("koop", "KOOP")
+          call freezaerl_koop2000(carma, cs, 1, rc_loc)
+          call dump_alloc_3d(prefix, 'freezaerl_koop_probe', cs%f_rnuclg)
+      end select
     end if
 
     ! Step-1 statics: bin radii / masses / volumes / solute densities.
