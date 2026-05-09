@@ -1,17 +1,11 @@
-"""Bench JAX freezaerl_mohler2010 against the standalone Fortran kernel.
+"""Bench JAX freezaerl_tabazadeh2000 against the standalone Fortran kernel.
 
-Generates random scenarios spanning the parameter regime where the
-Möhler 2010 dust ice nucleation rate is non-trivial, calls both the
-JAX port and the compiled Fortran driver, and produces:
-
-  data/freezaerl_mohler2010_bench.npz       — raw inputs / outputs
-  plots/diff/phase11/freezaerl_mohler2010_jax_vs_fortran.png
-                                             — 1:1 scatter + per-bin
-                                               rel-err CDF / box plot
+Same pattern as scripts/_bench_freezaerl_mohler2010.py.
+Output: data/freezaerl_tabazadeh2000_bench.npz +
+        plots/diff/phase11/freezaerl_tabazadeh2000_jax_vs_fortran.png
 """
 import argparse
 import math
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -26,14 +20,13 @@ import numpy as np
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from carma.nucleation.freezaerl_mohler2010 import freezaerl_mohler2010
+from carma.nucleation.freezaerl_tabazadeh2000 import freezaerl_tabazadeh2000
 
 DEFAULT_BIN = (ROOT.parent / "original-carma" / "CARMA" / "build_standalone"
-               / "freezaerl_mohler2010_standalone")
+               / "freezaerl_tabazadeh2000_standalone")
 
 
 def bin_grid(nbin=16, rmin_cm=1e-7, rmrat=4.0, rho=1.78):
-    """carma_nuc2test 'Sulfate IN' geometry: rmin = 0.1 µm, rmrat = 4."""
     vmin = (4.0 / 3.0) * math.pi * rmin_cm**3 * rho
     rmass = vmin * rmrat ** np.arange(nbin)
     vol = rmass / rho
@@ -42,27 +35,32 @@ def bin_grid(nbin=16, rmin_cm=1e-7, rmrat=4.0, rho=1.78):
 
 
 def sample_scenarios(n, rng):
-    """Random sample over the parameter regime where the kernel is active."""
+    """Random sample where the kernel is active.
+
+    Tabazadeh 2000 has no T ≤ 240 K gate (unlike Mohler), so we sample
+    the broader range that Tabazadeh's polynomials are stable over.
+    Avoid t = T0 = 273.16 (rhoibar / rlhbar are 0/0 there).
+    """
     return dict(
-        T          = rng.uniform(180.0,  240.0,  n),
-        ssi        = rng.uniform(0.30,    1.00,  n),
+        T          = rng.uniform(180.0,  270.0,  n),     # avoid T0
+        ssi        = rng.uniform(0.31,    1.20,  n),     # > 0.3 gate
         ssl        = rng.uniform(-0.99,   0.05,  n),
         akelvin    = rng.uniform(1.0e-7,  3.0e-7, n),
-        akelvini   = rng.uniform(1.0e-7,  3.0e-7, n),
         rhosol     = rng.uniform(1.50,    2.00,  n),
-        pconmax    = 10.0 ** rng.uniform(-2.0,    4.0,  n),  # log-uniform 1e-2..1e4
+        gwtmol     = np.full(n, 18.016),                  # H2O
+        pconmax    = 10.0 ** rng.uniform(-2.0,    4.0,  n),
     )
 
 
 def run_fortran(binary, scen, r_bins, vol_bins, work_dir):
-    """Invoke the standalone Fortran binary on one scenario, return rnuclg."""
     nbin = r_bins.shape[0]
     in_path = work_dir / "in.txt"
     out_path = work_dir / "out.bin"
     with open(in_path, "w") as f:
         f.write(f"{scen['T']!r}  {scen['ssi']!r}  {scen['ssl']!r}  "
-                f"{scen['akelvin']!r}  {scen['akelvini']!r}  "
-                f"{scen['rhosol']!r}  {scen['pconmax']!r}  {nbin}\n")
+                f"{scen['akelvin']!r}  "
+                f"{scen['rhosol']!r}  {scen['gwtmol']!r}  "
+                f"{scen['pconmax']!r}  {nbin}\n")
         f.write(" ".join(repr(float(x)) for x in r_bins) + "\n")
         f.write(" ".join(repr(float(x)) for x in vol_bins) + "\n")
     subprocess.run([str(binary), str(in_path), str(out_path)], check=True)
@@ -70,31 +68,28 @@ def run_fortran(binary, scen, r_bins, vol_bins, work_dir):
 
 
 def run_jax(scen, r_bins, vol_bins):
-    return np.asarray(freezaerl_mohler2010(
+    return np.asarray(freezaerl_tabazadeh2000(
         t_val=jnp.float64(scen['T']),
         supsati_val=jnp.float64(scen['ssi']),
         supsatl_val=jnp.float64(scen['ssl']),
         akelvin_val=jnp.float64(scen['akelvin']),
-        akelvini_val=jnp.float64(scen['akelvini']),
-        r_bins=jnp.asarray(r_bins),
-        vol_bins=jnp.asarray(vol_bins),
+        r_bins=jnp.asarray(r_bins), vol_bins=jnp.asarray(vol_bins),
         rhosol_val=jnp.float64(scen['rhosol']),
+        gwtmol_val=jnp.float64(scen['gwtmol']),
         pconmax_val=jnp.float64(scen['pconmax']),
     ))
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--n", type=int, default=1000, help="number of scenarios")
+    p.add_argument("--n", type=int, default=1000)
     p.add_argument("--binary", type=Path, default=DEFAULT_BIN)
     p.add_argument("--seed", type=int, default=42)
     args = p.parse_args()
 
     if not args.binary.exists():
-        print(f"ERROR: Fortran binary not found at {args.binary}\n"
-              f"Build with scripts/fortran_patch/build_freezaerl_mohler2010_standalone.sh",
-              file=sys.stderr)
-        sys.exit(1)
+        print(f"ERROR: build with build_freezaerl_tabazadeh2000_standalone.sh first",
+              file=sys.stderr); sys.exit(1)
 
     rng = np.random.default_rng(args.seed)
     r_bins, vol_bins = bin_grid()
@@ -111,19 +106,17 @@ def main():
             rnuclg_F[i] = run_fortran(args.binary, scen, r_bins, vol_bins, work)
             rnuclg_J[i] = run_jax(scen, r_bins, vol_bins)
             if (i + 1) % 100 == 0:
-                print(f"  {i + 1}/{args.n}", flush=True)
+                print(f"  {i+1}/{args.n}", flush=True)
 
-    # Save raw outputs
     np.savez_compressed(
-        ROOT / "data" / "freezaerl_mohler2010_bench.npz",
+        ROOT / "data" / "freezaerl_tabazadeh2000_bench.npz",
         rnuclg_F=rnuclg_F, rnuclg_J=rnuclg_J,
         r_bins=r_bins, vol_bins=vol_bins, **scens)
 
-    # Stats
     denom = np.maximum(np.abs(rnuclg_F), np.abs(rnuclg_J))
     denom = np.where(denom > 1e-300, denom, 1.0)
     rel = np.abs(rnuclg_F - rnuclg_J) / denom
-    nonzero = rnuclg_F > 0  # restrict stats to bins where the kernel actually fires
+    nonzero = rnuclg_F > 0
     print(f"\nrel err over {args.n} scenarios × {nbin} bins"
           f" ({nonzero.sum()} non-zero entries):")
     if nonzero.any():
@@ -131,25 +124,17 @@ def main():
         for q in (50, 90, 95, 99, 100):
             print(f"  P{q}: {np.percentile(nz, q):.3e}")
 
-    # Plot: 1:1 scatter + per-bin rel-err box
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
     ax = axes[0]
-    F_flat = rnuclg_F[nonzero]
-    J_flat = rnuclg_J[nonzero]
+    F_flat = rnuclg_F[nonzero]; J_flat = rnuclg_J[nonzero]
     ax.loglog(F_flat, J_flat, "k.", ms=2, alpha=0.4)
     if F_flat.size:
-        lo = max(F_flat.min(), 1e-30)
-        hi = F_flat.max()
-        xx = np.geomspace(lo, hi, 5)
+        xx = np.geomspace(max(F_flat.min(), 1e-30), F_flat.max(), 5)
         ax.loglog(xx, xx, "r--", lw=1, label="y = x")
-    ax.set_xlabel("Fortran rnuclg [s⁻¹]")
-    ax.set_ylabel("JAX rnuclg [s⁻¹]")
-    ax.set_title(f"Phase 11.1: freezaerl_mohler2010 — JAX vs Fortran "
-                 f"({args.n} scenarios × {nbin} bins, "
-                 f"{int(nonzero.sum())} non-zero pts)")
-    ax.grid(True, alpha=0.3, which="both")
-    ax.legend()
+    ax.set_xlabel("Fortran rnuclg [s⁻¹]"); ax.set_ylabel("JAX rnuclg [s⁻¹]")
+    ax.set_title(f"Phase 11.2: freezaerl_tabazadeh2000 — JAX vs Fortran "
+                 f"({args.n} scenarios × {nbin} bins, {int(nonzero.sum())} nonzero)")
+    ax.grid(True, alpha=0.3, which="both"); ax.legend()
 
     ax2 = axes[1]
     d_nm = 2.0 * r_bins * 1e7
@@ -160,6 +145,8 @@ def main():
     ]
 
     # Jittered scatter dots behind the boxes — one dot per scenario per bin.
+    # Multiplicative log-space jitter (σ = 7% of position) so the dots fan
+    # out within each box without crossing into neighbours.
     rng_jitter = np.random.default_rng(0)
     for b in range(nbin):
         ys = nz_for_plot[b]
@@ -170,28 +157,24 @@ def main():
         ax2.scatter(xs, ys, s=3, alpha=0.18, color="steelblue",
                     edgecolors="none", zorder=1)
 
-    ax2.boxplot(
-        nz_for_plot,
-        positions=d_nm, widths=d_nm * 0.18,
-        showfliers=False, patch_artist=True,
-        medianprops=dict(color="crimson", lw=1.5),
-        boxprops=dict(facecolor="white", alpha=0.7, edgecolor="black", lw=1.0),
-        whiskerprops=dict(color="black", lw=0.9), zorder=3,
-    )
-    ax2.set_xscale("log")
-    ax2.set_yscale("log")
+    ax2.boxplot(nz_for_plot,
+                positions=d_nm, widths=d_nm * 0.18,
+                showfliers=False, patch_artist=True,
+                medianprops=dict(color="crimson", lw=1.5),
+                boxprops=dict(facecolor="white", alpha=0.7, edgecolor="black"),
+                whiskerprops=dict(color="black", lw=0.9), zorder=3)
+    ax2.set_xscale("log"); ax2.set_yscale("log")
     ax2.axhline(1e-12, color="green", ls="--", lw=1, alpha=0.7,
                 label="rtol = 1e-12 (unit-test gate)")
     ax2.set_xlabel("Bin median diameter [nm]")
     ax2.set_ylabel("|J - F| / max(|J|, |F|)  per bin")
     ax2.set_title(f"Per-bin rel-err — dot = one of {args.n} scenarios, "
                   f"box = cross-scenario P25/median/P75")
-    ax2.grid(True, alpha=0.3, which="both")
-    ax2.legend(loc="lower left", fontsize=9)
+    ax2.grid(True, alpha=0.3, which="both"); ax2.legend(loc="lower left", fontsize=9)
 
     out_dir = ROOT / "plots" / "diff" / "phase11"
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "freezaerl_mohler2010_jax_vs_fortran.png"
+    out_path = out_dir / "freezaerl_tabazadeh2000_jax_vs_fortran.png"
     plt.tight_layout()
     plt.savefig(out_path, dpi=110, bbox_inches="tight")
     print(f"\nsaved {out_path}")

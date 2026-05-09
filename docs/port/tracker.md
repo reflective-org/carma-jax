@@ -223,7 +223,7 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
   2. **Standalone Fortran-compiled-by-gfortran** (`scripts/_bench_freezaerl_mohler2010.py` + `scripts/fortran_patch/freezaerl_mohler2010_standalone.F90`) — 1000 random scenarios × 16 bins, 13,035 non-zero (scen, bin) pairs. P50 = 4.1e-14, P95 = 1.7e-13, max = 2.9e-13 — every active point under 1e-12 (unit-test gate), 1:1 scatter spans 60 orders of magnitude on `y = x`. Plot at `plots/diff/phase11/freezaerl_mohler2010_jax_vs_fortran.png`. The standalone Fortran inlines the kernel formula verbatim (lines 79-180 of upstream); the carma-state dispatch around the kernel is the caller's job and not part of this comparison — that arrives with the integrated `carma_nuc2test` diagnostic in a later PR.
 
 ### `src/carma/nucleation/freezaerl_tabazadeh2000.py`  ↔  `freezaerl_tabazadeh2000.F90`
-- [ ] `freezaerl_tabazadeh2000`
+- [x] `freezaerl_tabazadeh2000` — Phase 11.2. Standalone Fortran-bench (`scripts/_bench_freezaerl_tabazadeh2000.py` + `freezaerl_tabazadeh2000_standalone.F90`) over 1000 scenarios × 16 bins (16,000 non-zero pts — Tabazadeh has no T-gate so every point is active): P50 = 8.1e-16 (machine ε), P95 = 7.6e-11, max = 2.4e-10. Larger residual than Möhler because of the Myhre 1998 wtfrac^10 polynomial + 3-regime surface-tension polynomials (more accumulated FMA drift). 9 unit tests pass at rtol < 1e-9. Plot at `plots/diff/phase11/freezaerl_tabazadeh2000_jax_vs_fortran.png`.
 
 ### `src/carma/rhoice_heymsfield2010.py`  ↔  `rhoice_heymsfield2010.F90`
 - [ ] `rhoice_heymsfield2010`
