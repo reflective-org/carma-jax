@@ -137,23 +137,39 @@ def main():
     ax.grid(True, alpha=0.3, which="both"); ax.legend()
 
     ax2 = axes[1]
+    d_nm = 2.0 * r_bins * 1e7
     nz_per_bin = [rel[:, b][nonzero[:, b]] for b in range(nbin)]
     nz_for_plot = [
         np.where(x > 1e-16, x, 1e-16) if x.size else np.array([1e-16])
         for x in nz_per_bin
     ]
+
+    # Jittered scatter dots behind the boxes — one dot per scenario per bin.
+    # Multiplicative log-space jitter (σ = 7% of position) so the dots fan
+    # out within each box without crossing into neighbours.
+    rng_jitter = np.random.default_rng(0)
+    for b in range(nbin):
+        ys = nz_for_plot[b]
+        if ys.size == 0:
+            continue
+        jitter = rng_jitter.normal(loc=0.0, scale=0.07, size=ys.shape)
+        xs = d_nm[b] * np.exp(jitter)
+        ax2.scatter(xs, ys, s=3, alpha=0.18, color="steelblue",
+                    edgecolors="none", zorder=1)
+
     ax2.boxplot(nz_for_plot,
-                positions=2.0 * r_bins * 1e7, widths=2.0 * r_bins * 1e7 * 0.18,
+                positions=d_nm, widths=d_nm * 0.18,
                 showfliers=False, patch_artist=True,
                 medianprops=dict(color="crimson", lw=1.5),
                 boxprops=dict(facecolor="white", alpha=0.7, edgecolor="black"),
-                whiskerprops=dict(color="black", lw=0.9))
+                whiskerprops=dict(color="black", lw=0.9), zorder=3)
     ax2.set_xscale("log"); ax2.set_yscale("log")
     ax2.axhline(1e-12, color="green", ls="--", lw=1, alpha=0.7,
                 label="rtol = 1e-12 (unit-test gate)")
     ax2.set_xlabel("Bin median diameter [nm]")
     ax2.set_ylabel("|J - F| / max(|J|, |F|)  per bin")
-    ax2.set_title("Per-bin rel-err (cross-scenario P25/median/P75)")
+    ax2.set_title(f"Per-bin rel-err — dot = one of {args.n} scenarios, "
+                  f"box = cross-scenario P25/median/P75")
     ax2.grid(True, alpha=0.3, which="both"); ax2.legend(loc="lower left", fontsize=9)
 
     out_dir = ROOT / "plots" / "diff" / "phase11"
