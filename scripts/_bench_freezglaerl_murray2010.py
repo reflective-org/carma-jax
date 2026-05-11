@@ -126,20 +126,48 @@ def main():
                  f"JAX vs Fortran  ({int(nonzero.sum())} of {args.n} active)")
     ax.grid(True, alpha=0.3, which="both"); ax.legend()
 
-    # Activity vs (T, ssi) — show gate boundary
+    # Activity diagnostic: dfice (gate-dependent fraction nucleated)
+    # rather than rate. The rate carries an extra 1 / dtime factor that
+    # obscures the physics when dtime is randomized — colouring by dfice
+    # isolates the formula's (T, ssi, ssi_old) gate behaviour.
+    KICE1 = 7.7211e-5; KICE2 = 9.2688e-3
+    SSMIN = 0.21; SSMAX = 0.70; TGLASS = 212.0; FGLASS = 0.5
+    ssi_arr  = np.asarray(scens['ssi'])
+    sso_arr  = np.asarray(scens['ssi_old'])
+    T_arr    = np.asarray(scens['T'])
+    pcm_arr  = np.asarray(scens['pconmax'])
+    active = ((T_arr <= TGLASS)
+              & (pcm_arr > 1e-44)             # FEW_PC
+              & (ssi_arr >= SSMIN)
+              & (ssi_arr > sso_arr))
+    ssi_c = np.minimum(ssi_arr, SSMAX)
+    sso_c = np.minimum(sso_arr, SSMAX)
+    dfice = KICE1 * (1.0 + ssi_c) * 100.0 - KICE2
+    dfice -= np.where(sso_arr >= SSMIN,
+                       KICE1 * (1.0 + sso_c) * 100.0 - KICE2, 0.0)
+    dfice_active = np.where(active, FGLASS * dfice, 0.0)
+
     ax2 = axes[1]
-    sc = ax2.scatter(scens['T'], scens['ssi'], c=rate_J,
-                      cmap='viridis', s=8, norm=None)
-    ax2.axhline(0.21, color='red', ls='--', lw=1, alpha=0.7,
-                label='ssmin = 0.21')
-    ax2.axhline(0.70, color='orange', ls='--', lw=1, alpha=0.7,
-                label='ssmax = 0.70')
-    ax2.axvline(212, color='blue', ls='--', lw=1, alpha=0.7,
-                label='tglass = 212 K')
+    # Inactive scenarios: small gray dots in the background.
+    ax2.scatter(T_arr[~active], ssi_arr[~active],
+                 c="0.85", s=6, alpha=0.5, edgecolors="none",
+                 zorder=1, label=f"gated off ({(~active).sum()})")
+    # Active scenarios: coloured by Murray 2010 fraction (dimensionless).
+    sc = ax2.scatter(T_arr[active], ssi_arr[active],
+                     c=dfice_active[active], cmap="viridis",
+                     s=18, edgecolors="black", linewidths=0.3,
+                     zorder=3, label=f"active ({active.sum()})")
+    ax2.axhline(SSMIN, color='red',    ls='--', lw=1.5, alpha=0.7,
+                label=f"ssmin = {SSMIN}")
+    ax2.axhline(SSMAX, color='orange', ls='--', lw=1.5, alpha=0.7,
+                label=f"ssmax = {SSMAX}")
+    ax2.axvline(TGLASS, color='blue',  ls='--', lw=1.5, alpha=0.7,
+                label=f"tglass = {TGLASS:.0f} K")
     ax2.set_xlabel("T [K]"); ax2.set_ylabel("ssi")
-    ax2.set_title(f"Activity map — color = JAX rate (scenarios with ssi_old < ssi)")
-    plt.colorbar(sc, ax=ax2, label="rnuclg [s⁻¹]")
-    ax2.legend(loc="upper right", fontsize=9)
+    ax2.set_title("Gate activity — colour = f_glass · dfice (rate × dtime, "
+                  "dtime-independent fraction)")
+    plt.colorbar(sc, ax=ax2, label="0.5 · dfice  [dimensionless]")
+    ax2.legend(loc="upper right", fontsize=8)
 
     out_dir = ROOT / "plots" / "diff" / "phase11"
     out_dir.mkdir(parents=True, exist_ok=True)
