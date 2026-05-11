@@ -106,10 +106,12 @@ sulfate cores are explicit Phase 11 work.
 
 **Pointer:** `docs/ROADMAP.md` Phase 11, `microfast_full.py:34‑42`.
 
-### Vertical transport
-Sedimentation, vertical advection (PPM), vertical diffusion, dry
-deposition all have Phase 4 unit tests but are not wired into
-`step_full_faithful` (single‑cell test). Phase 12+ work.
+### Vertical transport — RESOLVED in Phase 12
+``make_column_step_full`` (``src/carma/column_step.py``) composes
+``vertical()`` + per-level ``step_full_faithful`` into a single column-step
+factory. Three unit tests cover NZ=1 identity, sedimentation of a seeded
+column, and multi-level H₂SO₄ mass conservation. The per-level chemistry
+loop is a Python ``for`` over static NZ; see vmap / lax.while_loop item
+above for the full-JIT follow-up.
 
-**Pointer:** `docs/ROADMAP.md` Phase 4 (modules complete) + Phase 12
-(integration deferred).
+**Pointer:** ``src/carma/column_step.py``, Phase 12 PR.
