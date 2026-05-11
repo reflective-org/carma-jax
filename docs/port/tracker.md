@@ -206,7 +206,7 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
 ## Phase 11 — Cloud / ice
 
 ### `src/carma/nucleation/actdropl.py`  ↔  `actdropl.F90`
-- [ ] `actdropl`
+- [x] `actdropl` — Phase 11.9. Cloud droplet activation — turned out to be another constant-rate kludge like freezdropl/melticel (rate = 1000/s when 5 gates fire: T ≥ T₀-40, pconmax > FEW_PC, supsatl > scrit[bin], pc[bin] > SMALL_PC, target droplet not evaporating). The richer Köhler activation parameterizations (Twomey, Abdul-Razzak via `adgaquad_mod`) live in the CAM coupling layer, not in this in-source subroutine. Standalone bench + 10 unit tests pass; rate is exactly 0.0 or 1000.0 so JAX bit-matches gfortran. Activation map at `plots/diff/phase11/actdropl_activation.png` shows the bin/supsatl gate boundary tracking the Köhler `scrit` curve — bigger bins activate at lower supsatl. Standalone source: `scripts/fortran_patch/actdropl_standalone.F90`.
 
 ### `src/carma/nucleation/freezdropl.py`  ↔  `freezdropl.F90`
 - [x] `freezdropl` — Phase 11.6. Trivial placeholder "constant-rate gate" kernel: rate = 100/s where T < T₀-40 K AND pc > FEW_PC, zero otherwise (F90 self-identifies as "temporary simple kludge"). JAX port + 7 tests pass (gate behavior + bit-exact vs gfortran-compiled standalone). Gate diagram at `plots/diff/phase11/freezdropl_melticel_gates.png`. Standalone Fortran source: `scripts/fortran_patch/freezdropl_standalone.F90`.
