@@ -102,20 +102,26 @@ subroutine test_nuc2_diagnostic()
   real(kind=f) :: n_scen, mu_scen_cm, rsig_scen
   real(kind=f) :: r_cm, log_r, log_mu_cm, log_sigma, norm
 
-  ! Scenario overrides for the Möhler probe (injected post-Step).
+  ! Scenario overrides injected into cstate post-Step. The first 6 are
+  ! used by all kernel selectors; the last 3 are extras for Phase 11.11
+  ! (murray needs ssi_old; hetnucl reads pressure + gas conc from cstate).
+  ! Setting p_over <= 0 means "leave cstate%f_p unchanged"; setting
+  ! gc_h2o_over < 0 means "leave cstate%f_gc unchanged".
   real(kind=f) :: T_over, ssi_over, ssl_over, akelvin_over, akelvini_over, pconmax_over
+  real(kind=f) :: ssi_old_over, p_over, gc_h2o_over
 
   integer :: nstep, nstep_max
   integer :: istep, ielem, ibin, igas, igroup
   integer :: ios, n_dumped, nsubsteps
-  integer :: kernel_flag    ! I_AF_MOHLER_2010 / I_AF_TABAZADEH_2000 / I_AF_KOOP_2000
+  integer :: kernel_flag, nuc_from_group, nuc_to_elem
   real(kind=f) :: nretries
   character(len=512) :: scen_path, out_dir, prefix, arg_buf
   character(len=32)  :: kernel_name
 
   if (command_argument_count() < 2) then
     write(0, '(A)') 'usage: <scenario_file> <output_dir> [nstep_max] [kernel]'
-    write(0, '(A)') '  kernel: "mohler" (default), "tabazadeh", or "koop"'
+    write(0, '(A)') '  kernel: "mohler" (default), "tabazadeh", "koop",'
+    write(0, '(A)') '          "murray", "hetnucl", or "melticel"'
     call exit(1)
   end if
   call get_command_argument(1, scen_path)
@@ -130,23 +136,41 @@ subroutine test_nuc2_diagnostic()
   if (command_argument_count() >= 4) then
     call get_command_argument(4, kernel_name)
   end if
+  ! Default AddNucleation source/target (sulfate → ice). melticel below
+  ! flips this to ice → sulfate.
+  nuc_from_group = 1
+  nuc_to_elem    = 3
   select case (trim(kernel_name))
     case ("mohler", "MOHLER")
-      kernel_flag = I_AF_MOHLER_2010
+      kernel_flag = I_AERFREEZE + I_AF_MOHLER_2010
     case ("tabazadeh", "TABAZADEH")
-      kernel_flag = I_AF_TABAZADEH_2000
+      kernel_flag = I_AERFREEZE + I_AF_TABAZADEH_2000
     case ("koop", "KOOP")
-      kernel_flag = I_AF_KOOP_2000
+      kernel_flag = I_AERFREEZE + I_AF_KOOP_2000
+    case ("murray", "MURRAY")
+      kernel_flag = I_AERFREEZE + I_AF_MURRAY_2010
+    case ("hetnucl", "HETNUCL")
+      kernel_flag = I_HETNUC
+    case ("melticel", "MELTICEL")
+      kernel_flag = I_ICEMELT
+      nuc_from_group = 2
+      nuc_to_elem    = 1
     case default
       write(0, '(A, A)') 'unknown kernel: ', trim(kernel_name)
       call exit(1)
   end select
 
-  ! Read scenario (whitespace, free-form): T p rh n mu_cm sigma_g
-  ! followed by the 6 override fields for the Möhler probe.
+  ! Read scenario (whitespace, free-form): T p rh n mu_cm sigma_g  (six)
+  ! followed by 6 main overrides + 3 extras for Phase 11.11 (ssi_old, p, gc_h2o).
+  ! The extras may be sentinel-disabled per scenario: p_over <= 0 keeps cstate p,
+  ! gc_h2o_over < 0 keeps cstate gc.
+  ssi_old_over = 0._f
+  p_over       = -1._f
+  gc_h2o_over  = -1._f
   open(newunit=ios, file=trim(scen_path), action='read', status='old')
   read(ios, *) T_scen, p_scen_hPa, rh_scen, n_scen, mu_scen_cm, rsig_scen, &
-               T_over, ssi_over, ssl_over, akelvin_over, akelvini_over, pconmax_over
+               T_over, ssi_over, ssl_over, akelvin_over, akelvini_over, pconmax_over, &
+               ssi_old_over, p_over, gc_h2o_over
   close(ios)
 
   ! Atmosphere setup mirrors carma_nuc2test.F90.
@@ -197,10 +221,11 @@ subroutine test_nuc2_diagnostic()
                        I_VAPRTN_H2O_MURPHY2005, I_GCOMP_H2O, rc, shortname='Q')
   if (rc /= 0) call exit(9)
 
-  ! Growth + nucleation: Möhler 2010 only.
+  ! Growth + nucleation: kernel-selectable single-process registration.
+  ! (kernel_flag, nuc_from_group, nuc_to_elem already set above per kernel.)
   call CARMA_AddGrowth(carma, 2, 1, rc)
   if (rc /= 0) call exit(10)
-  call CARMA_AddNucleation(carma, 1, 3, I_AERFREEZE + kernel_flag, &
+  call CARMA_AddNucleation(carma, nuc_from_group, nuc_to_elem, kernel_flag, &
                            0._f, rc, igas=1, ievp2elem=1)
   if (rc /= 0) call exit(11)
   call CARMA_Initialize(carma, rc, do_grow=.true.)
@@ -322,7 +347,32 @@ contains
 
     if (.not. allocated(cs%f_pc) .or. .not. allocated(cs%f_gc)) return
 
-    ! State arrays.
+    ! Inject scenario overrides BEFORE dumping so all dumped state
+    ! reflects the exact inputs each kernel will see (including the
+    ! Phase 11.11 hetnucl-specific p / gc / surfctia routing).
+    if (allocated(cs%f_supsati) .and. allocated(cs%f_supsatl) .and. &
+        allocated(cs%f_akelvin) .and. allocated(cs%f_akelvini) .and. &
+        allocated(cs%f_pconmax) .and. allocated(cs%f_t)) then
+      cs%f_t(1)             = T_over
+      cs%f_supsati(1, 1)    = ssi_over
+      cs%f_supsatl(1, 1)    = ssl_over
+      cs%f_akelvin(1, 1)    = akelvin_over
+      cs%f_akelvini(1, 1)   = akelvini_over
+      ! Set pconmax for ALL groups so melticel (gates on ice group 2's
+      ! pconmax) and the other kernels (gate on group 1) both fire.
+      cs%f_pconmax(1, :)    = pconmax_over
+      if (allocated(cs%f_supsatiold)) then
+        cs%f_supsatiold(1, 1) = ssi_old_over
+      end if
+      if (p_over > 0._f .and. allocated(cs%f_p)) then
+        cs%f_p(1) = p_over
+      end if
+      if (gc_h2o_over >= 0._f .and. allocated(cs%f_gc)) then
+        cs%f_gc(1, 1) = gc_h2o_over
+      end if
+    end if
+
+    ! State arrays (now reflect post-inject values).
     nbin_l   = NBIN
     ngroup_l = NGROUP
     allocate(pc_2d(nbin_l, NELEM))
@@ -339,27 +389,17 @@ contains
     call dump_alloc_1d(prefix, 'rhoa', cs%f_rhoa)
     call dump_alloc_1d(prefix, 'zmet', cs%f_zmet)
 
-    if (allocated(cs%f_supsati))   call dump_alloc_2d(prefix, 'supsati',  cs%f_supsati)
-    if (allocated(cs%f_supsatl))   call dump_alloc_2d(prefix, 'supsatl',  cs%f_supsatl)
-    if (allocated(cs%f_akelvin))   call dump_alloc_2d(prefix, 'akelvin',  cs%f_akelvin)
-    if (allocated(cs%f_akelvini))  call dump_alloc_2d(prefix, 'akelvini', cs%f_akelvini)
-    if (allocated(cs%f_r_wet))     call dump_alloc_3d(prefix, 'r_wet',    cs%f_r_wet)
-    if (allocated(cs%f_pconmax))   call dump_alloc_2d(prefix, 'pconmax',  cs%f_pconmax)
+    if (allocated(cs%f_supsati))    call dump_alloc_2d(prefix, 'supsati',    cs%f_supsati)
+    if (allocated(cs%f_supsatl))    call dump_alloc_2d(prefix, 'supsatl',    cs%f_supsatl)
+    if (allocated(cs%f_supsatiold)) call dump_alloc_2d(prefix, 'supsatiold', cs%f_supsatiold)
+    if (allocated(cs%f_akelvin))    call dump_alloc_2d(prefix, 'akelvin',    cs%f_akelvin)
+    if (allocated(cs%f_akelvini))   call dump_alloc_2d(prefix, 'akelvini',   cs%f_akelvini)
+    if (allocated(cs%f_r_wet))      call dump_alloc_3d(prefix, 'r_wet',      cs%f_r_wet)
+    if (allocated(cs%f_pconmax))    call dump_alloc_2d(prefix, 'pconmax',    cs%f_pconmax)
+    if (allocated(cs%f_surfctia))   call dump_alloc_1d(prefix, 'surfctia',   cs%f_surfctia)
 
-    ! Probe: inject scenario overrides into cstate (so the kernel runs
-    ! with controlled inputs through the full dispatch wrapper, rather
-    ! than whatever post-Step state remains), zero rnuclg, call the
-    ! selected freezaerl_*, dump.
-    if (allocated(cs%f_rnuclg) .and. allocated(cs%f_supsati) .and. &
-        allocated(cs%f_supsatl) .and. allocated(cs%f_akelvin) .and. &
-        allocated(cs%f_akelvini) .and. allocated(cs%f_pconmax) .and. &
-        allocated(cs%f_t)) then
-      cs%f_t(1)             = T_over
-      cs%f_supsati(1, 1)    = ssi_over
-      cs%f_supsatl(1, 1)    = ssl_over
-      cs%f_akelvin(1, 1)    = akelvin_over
-      cs%f_akelvini(1, 1)   = akelvini_over
-      cs%f_pconmax(1, 1)    = pconmax_over
+    ! Probe: zero rnuclg, call the selected kernel, dump rnuclg.
+    if (allocated(cs%f_rnuclg)) then
       cs%f_rnuclg(:,:,:) = 0._f
       select case (trim(kernel_name))
         case ("mohler", "MOHLER")
@@ -371,6 +411,15 @@ contains
         case ("koop", "KOOP")
           call freezaerl_koop2000(carma, cs, 1, rc_loc)
           call dump_alloc_3d(prefix, 'freezaerl_koop_probe', cs%f_rnuclg)
+        case ("murray", "MURRAY")
+          call freezglaerl_murray2010(carma, cs, 1, rc_loc)
+          call dump_alloc_3d(prefix, 'freezglaerl_murray_probe', cs%f_rnuclg)
+        case ("hetnucl", "HETNUCL")
+          call hetnucl(carma, cs, 1, rc_loc)
+          call dump_alloc_3d(prefix, 'hetnucl_probe', cs%f_rnuclg)
+        case ("melticel", "MELTICEL")
+          call melticel(carma, cs, 1, rc_loc)
+          call dump_alloc_3d(prefix, 'melticel_probe', cs%f_rnuclg)
       end select
     end if
 
