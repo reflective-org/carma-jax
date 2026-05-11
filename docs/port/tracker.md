@@ -209,10 +209,10 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
 - [ ] `actdropl`
 
 ### `src/carma/nucleation/freezdropl.py`  ↔  `freezdropl.F90`
-- [ ] `freezdropl`
+- [x] `freezdropl` — Phase 11.6. Trivial placeholder "constant-rate gate" kernel: rate = 100/s where T < T₀-40 K AND pc > FEW_PC, zero otherwise (F90 self-identifies as "temporary simple kludge"). JAX port + 7 tests pass (gate behavior + bit-exact vs gfortran-compiled standalone). Gate diagram at `plots/diff/phase11/freezdropl_melticel_gates.png`. Standalone Fortran source: `scripts/fortran_patch/freezdropl_standalone.F90`.
 
 ### `src/carma/nucleation/melticel.py`  ↔  `melticel.F90`
-- [ ] `melticel`
+- [x] `melticel` — Phase 11.6. Mirror of freezdropl: rate = 100/s where T > T₀ K AND pconmax > FEW_PC, zero otherwise (also F90-flagged "temporary simple kludge"). JAX port + 7 tests pass (gate behavior + bit-exact vs gfortran standalone). Same gate diagram + standalone source under Phase 11.6.
 
 ### `src/carma/nucleation/hetnucl.py`  ↔  `hetnucl.F90`
 - [ ] `hetnucl`
