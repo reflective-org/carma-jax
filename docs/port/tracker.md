@@ -215,7 +215,7 @@ A function is "done" only when the bench gate passes against `data/diff/scen_<NN
 - [x] `melticel` — Phase 11.6. Mirror of freezdropl: rate = 100/s where T > T₀ K AND pconmax > FEW_PC, zero otherwise (also F90-flagged "temporary simple kludge"). JAX port + 7 tests pass (gate behavior + bit-exact vs gfortran standalone). Same gate diagram + standalone source under Phase 11.6.
 
 ### `src/carma/nucleation/hetnucl.py`  ↔  `hetnucl.F90`
-- [ ] `hetnucl`
+- [x] `hetnucl` — Phase 11.7. Heterogeneous deposition ice nucleation (Keesee 1989 / Rapp-Thomas 2006 / Pruppacher-Klett 9-22), specifically for PMC (polar mesospheric cloud) regime — gated to p < 1 hPa. Standalone bench (`scripts/_bench_hetnucl.py` + `hetnucl_standalone.F90`) over 1000 scenarios × 16 bins (7,822 non-zero): P50 = 8.1e-10, P95 = 2.3e-6, max = 1.1e-4. 9 unit tests pass; PMC-relevant bin sizes (≤200 nm) tested at rtol < 1e-7. **Per-bin rel err rises monotonically with bin diameter** — `phih = √(1 - 2m·x + x²)` has catastrophic cancellation at large `x = r/ag`, well-conditioned at small x. PMC particles physically live at 20-200 nm (smallest 9 bins), where the parameterization is in spec; the apparent residual at 2 µm is in a regime that's not physically meaningful for PMC. Plot at `plots/diff/phase11/hetnucl_jax_vs_fortran.png`.
 
 ### `src/carma/nucleation/freezaerl_mohler2010.py`  ↔  `freezaerl_mohler2010.F90`
 - [x] `freezaerl_mohler2010` — Phase 11.1 + 11.4, three complementary benches:
