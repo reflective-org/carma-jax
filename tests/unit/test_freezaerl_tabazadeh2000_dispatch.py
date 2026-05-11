@@ -49,7 +49,8 @@ def _run_fortran(scen, work):
         f.write(
             "210.0 200.0 0.95 100.0 2.5e-6 1.5  "
             f"{scen['T']!r} {scen['ssi']!r} {scen['ssl']!r}  "
-            f"{scen['akelvin']!r} {scen['akelvini']!r} {scen['pconmax']!r}\n"
+            f"{scen['akelvin']!r} {scen['akelvini']!r} {scen['pconmax']!r}  "
+            "0.0 -1.0 -1.0\n"      # Phase 11.11: sentinels for ssi_old/p/gc_h2o
         )
     subprocess.run([str(DIAG_BIN), str(scen_path), str(out_dir),
                     "1", "tabazadeh"], check=True, capture_output=True)
