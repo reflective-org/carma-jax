@@ -130,16 +130,18 @@ def main():
     # rather than rate. The rate carries an extra 1 / dtime factor that
     # obscures the physics when dtime is randomized — colouring by dfice
     # isolates the formula's (T, ssi, ssi_old) gate behaviour.
+    #
+    # "active" here = same set as the left panel uses (rate_F ≠ 0).
+    # Note this is *not* the same as "all four gates pass": when both
+    # ssi and ssi_old are ≥ ssmax = 0.7, the formula clips both to ssmax
+    # so dfice = 0 even though every gate fires. Reconciling both panels
+    # to the rate-nonzero set avoids a confusing count mismatch.
     KICE1 = 7.7211e-5; KICE2 = 9.2688e-3
     SSMIN = 0.21; SSMAX = 0.70; TGLASS = 212.0; FGLASS = 0.5
-    ssi_arr  = np.asarray(scens['ssi'])
-    sso_arr  = np.asarray(scens['ssi_old'])
-    T_arr    = np.asarray(scens['T'])
-    pcm_arr  = np.asarray(scens['pconmax'])
-    active = ((T_arr <= TGLASS)
-              & (pcm_arr > 1e-44)             # FEW_PC
-              & (ssi_arr >= SSMIN)
-              & (ssi_arr > sso_arr))
+    ssi_arr = np.asarray(scens['ssi'])
+    sso_arr = np.asarray(scens['ssi_old'])
+    T_arr   = np.asarray(scens['T'])
+    active  = nonzero                                # rate_F ≠ 0
     ssi_c = np.minimum(ssi_arr, SSMAX)
     sso_c = np.minimum(sso_arr, SSMAX)
     dfice = KICE1 * (1.0 + ssi_c) * 100.0 - KICE2
