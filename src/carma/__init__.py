@@ -28,6 +28,7 @@ from carma.config import (
 )
 from carma.state import CarmaState
 from carma.prestep import prestep
+from carma.column_step import make_column_step_full
 from carma.step import (
     make_step_coag,
     make_step_microfast,
@@ -39,6 +40,7 @@ from carma.utils.smallconc import maxconc, smallconc
 __all__ = [
     "CarmaConfig",
     "CarmaState",
+    "make_column_step_full",
     "CoagConfig",
     "ElementConfig",
     "GasConfig",
