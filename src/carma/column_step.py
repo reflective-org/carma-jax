@@ -8,15 +8,15 @@ Mirrors the Fortran ``CARMASTATE_Step → newstate`` ordering exactly:
 
 Ported from: ``newstate.F90:52-109``
 
-The per-level chemistry loop uses a Python ``for`` over the static NZ
+The per-level microphysics loop uses a Python ``for`` over the static NZ
 dimension (which unrolls at JAX trace time). This is safe and correct
 because:
 
-- ``step_full_faithful`` takes ``pc[iz]`` (per-level, shape ``(NBIN, NELEM)``)
-  but ``gc`` / ``t`` as full-column arrays ``(NZ, NGAS)`` / ``(NZ,)`` with an
-  explicit ``iz`` kwarg that selects the level inside ``microfast_full_jit``.
-- Levels are independent in CARMA's chemistry (no horizontal/vertical
-  coupling within the chemistry step), so the sequential loop is equivalent
+- ``step_full_faithful`` takes the full-column ``pc`` ``(NZ, NBIN, NELEM)``
+  plus ``gc`` / ``t`` as ``(NZ, NGAS)`` / ``(NZ,)`` with an explicit ``iz``
+  kwarg that selects the level inside ``microfast_full_jit``.
+- Levels are independent in CARMA's microphysics (no horizontal/vertical
+  coupling within the microphysics step), so the sequential loop is equivalent
   to an embarrassingly-parallel vmap.
 - The Python loop bounds are over static NZ, so unrolling is fine.
 
@@ -53,7 +53,7 @@ def make_column_step_full(
     ibbnd_pc: int = int(BoundaryCondition.I_FIXED_CONC),
     igridv: int = int(GridType.I_CART),
 ):
-    """Build a column step: vertical transport + per-level faithful chemistry.
+    """Build a column step: vertical transport + per-level faithful microphysics.
 
     The returned closure has the signature::
 
@@ -78,7 +78,7 @@ def make_column_step_full(
     - ``dz``:   ``(NZ,)`` layer thicknesses [cm]
     - ``zc``, ``zl``: layer centres and edges [cm]
     - ``rhoa``, ``zmet``:  ``(NZ,)``
-    - ``env``:  dict of per-column chemistry env arrays (``rhoa``,
+    - ``env``:  dict of per-column microphysics env arrays (``rhoa``,
                 ``zmet``, ``akelvin``, ``akelvini``, ``gro``, ``gro1``,
                 ``rup_wet``, ``rlhe``, ``rlhm``, ``ckernel``, ``pconmax``,
                 ``ds_threshold_arr``) matching the ``step_full_faithful``
@@ -141,7 +141,7 @@ def make_column_step_full(
             told_col:     ``(NZ,)`` prestep T snapshot
             d_gc_col:     ``(NZ, NGAS)`` per-step gas drift
             d_t_col:      ``(NZ,)`` per-step T drift
-            env:          dict of chemistry environment arrays — keys
+            env:          dict of microphysics environment arrays — keys
                           ``rhoa, zmet, akelvin, akelvini, gro, gro1,
                           rup_wet, rlhe, rlhm, ckernel, pconmax,
                           ds_threshold_arr``
@@ -166,7 +166,7 @@ def make_column_step_full(
             sedflux = jnp.zeros((nbin, nelem), dtype=DTYPE)
 
         # 2. Post-transport pcl snapshot (Fortran newstate.F90:59).
-        #    Overrides the prestep pcl for the chemistry retry restart so
+        #    Overrides the prestep pcl for the microphysics retry restart so
         #    that sedimentation-induced concentration changes are included
         #    in the starting point for the adaptive retry.
         pcl_after_transport = pc_col
@@ -178,8 +178,8 @@ def make_column_step_full(
         # select the level inside ``microfast_full_jit``. It returns an
         # updated full-column tuple where only level ``iz`` is modified.
         #
-        # Levels are chemistry-independent in CARMA (no vertical coupling
-        # within the chemistry step), so the sequential loop is physically
+        # Levels are microphysics-independent in CARMA (no vertical coupling
+        # within the microphysics step), so the sequential loop is physically
         # equivalent to an embarrassingly-parallel vmap over levels.
         diags = []
         for iz in range(nz):
