@@ -1,0 +1,122 @@
+"""Run the patched Fortran realistic-ensemble binary over all scenarios.
+
+Drives ../original-carma/CARMA/build/test_sulfate_realistic, in parallel.
+Writes aggregated outputs (T_final, gc_h2so4_final, pc_final, nstep_ran)
+into benchmark_final/outputs/fortran_outputs.npz and prints total wall time.
+"""
+import argparse
+import concurrent.futures as cf
+import json
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+
+import numpy as np
+
+
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_BIN = (ROOT.parent.parent / "original-carma" / "CARMA" / "build"
+                / "test_sulfate_realistic")
+SCENARIO_PATH = ROOT / "scenarios" / "realistic_scenarios_100.npz"
+DEFAULT_OUT = ROOT / "outputs" / "fortran_outputs.npz"
+
+
+def scenario_line(scen, i):
+    return (f"{float(scen['T'][i])!r} {float(scen['p'][i])!r} "
+            f"{float(scen['rh'][i])!r} "
+            f"{float(scen['h2so4_prod_rate'][i])!r} "
+            f"{float(scen['M_total_ug_m3'][i])!r} "
+            f"{float(scen['aerosol_mu_nm'][i])!r} "
+            f"{float(scen['aerosol_sigma_g'][i])!r}\n")
+
+
+def run_one(binary, scenario_line_text, work_dir, idx):
+    scen_path = work_dir / f"scen_{idx:04d}.txt"
+    out_path = work_dir / f"out_{idx:04d}.json"
+    scen_path.write_text(scenario_line_text)
+    result = subprocess.run(
+        [str(binary), str(scen_path), str(out_path)],
+        capture_output=True, text=True, timeout=300,
+    )
+    if result.returncode != 0:
+        return idx, None, result.stderr
+    try:
+        return idx, json.loads(out_path.read_text()), None
+    except json.JSONDecodeError as e:
+        return idx, None, f"JSON parse: {e}"
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--binary", type=Path, default=DEFAULT_BIN)
+    p.add_argument("--scenarios", type=Path, default=SCENARIO_PATH)
+    p.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    p.add_argument("--workers", type=int, default=8)
+    args = p.parse_args()
+
+    if not args.binary.exists():
+        print(f"ERROR: binary not found at {args.binary}\n"
+              f"Run benchmark_final/fortran/build_realistic.sh first.")
+        return
+
+    scens = np.load(args.scenarios)
+    n = int(scens["_n"])
+    print(f"Running Fortran realistic ensemble over {n} scenarios "
+          f"({args.workers} workers)…")
+
+    t_start = time.perf_counter()
+    results = [None] * n
+    errors = []
+    with tempfile.TemporaryDirectory(prefix="bench_realistic_") as work_dir:
+        work_dir = Path(work_dir)
+        with cf.ThreadPoolExecutor(max_workers=args.workers) as ex:
+            futs = [
+                ex.submit(run_one, args.binary, scenario_line(scens, i),
+                          work_dir, i)
+                for i in range(n)
+            ]
+            for fut in cf.as_completed(futs):
+                idx, out, err = fut.result()
+                if out is None:
+                    errors.append((idx, err))
+                else:
+                    results[idx] = out
+    elapsed = time.perf_counter() - t_start
+
+    print(f"\nFortran wall time: {elapsed:.1f} s  "
+          f"({elapsed/n*1000:.0f} ms/scenario)")
+    if errors:
+        print(f"Errors in {len(errors)} scenarios:")
+        for idx, err in errors[:5]:
+            print(f"  scen {idx}: {err[:200]}")
+
+    nbin = 38
+    T_final = np.zeros(n)
+    gc_final = np.zeros(n)
+    pc_final = np.zeros((n, nbin))
+    nstep_ran = np.zeros(n, dtype=np.int64)
+    status = []
+    for i, r in enumerate(results):
+        if r is None:
+            status.append("error")
+            continue
+        T_final[i] = r["T_final"]
+        gc_final[i] = r["gc_h2so4_final"]
+        pc_final[i] = r["pc_final"]
+        nstep_ran[i] = r["nstep_ran"]
+        status.append(r.get("status", "ok"))
+
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        args.out,
+        T_final=T_final, gc_h2so4_final=gc_final, pc_final=pc_final,
+        nstep_ran=nstep_ran,
+        wall_time_s=np.array([elapsed]),
+        n_scenarios=np.array([n]),
+    )
+    print(f"\nSaved: {args.out}")
+
+
+if __name__ == "__main__":
+    main()
