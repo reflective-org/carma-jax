@@ -152,6 +152,7 @@ def make_step_full_faithful(
         dt_threshold=DTYPE(1.0),
         scale_threshold=DTYPE(1.0),
         prescribed_ntsubsteps=None,
+        initial_ntsubsteps=1,
     ):
         """Advance single-column state faithfully.
 
@@ -188,7 +189,7 @@ def make_step_full_faithful(
             rlhe, rlhm,
             ds_threshold_arr,
             microfast_full_jit=mf_jit,
-            initial_ntsubsteps=1,
+            initial_ntsubsteps=int(initial_ntsubsteps),
             minsubsteps=minsubsteps,
             maxsubsteps=maxsubsteps,
             maxretries=maxretries,

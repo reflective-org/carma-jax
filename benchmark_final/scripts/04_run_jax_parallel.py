@@ -97,7 +97,7 @@ def _worker_run(args):
             itype_arr, ienconc_arr, igelem_arr, rmass_2d,
             do_substep=True, do_coag=cfg.do_coag,
         )
-        pc, gc, t, _ = step(
+        pc, gc, t, _diag = step(
             pc=pc, gc=gc, t=t, dtime=float(dtime),
             rhoa=env_s["rhoa"], zmet=env_s["zmet"],
             akelvin=env_s["akelvin"], akelvini=env_s["akelvini"],

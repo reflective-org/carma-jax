@@ -104,6 +104,13 @@ def newstate_calc_full(
     ntsubsteps = max(int(initial_ntsubsteps), int(minsubsteps))
     nretries = 0
 
+    # Sync only every CHECK_EVERY substeps instead of after every one.
+    # This lets JAX pipeline several microfast calls between Python checks,
+    # cutting the per-step sync overhead. The trade-off is some wasted work
+    # when failure happens in the middle of a chunk, but this is dwarfed by
+    # the dispatch savings for hard scenarios.
+    CHECK_EVERY = 32
+
     while True:
         # Reset to saved state.
         pc = pc_init
@@ -114,12 +121,11 @@ def newstate_calc_full(
         dtime_sub = dtime_orig / ntsubsteps
         fraction = jnp.float64(1.0) / ntsubsteps
         retried = False
+        any_failed = jnp.bool_(False)
 
         for _isubstep in range(int(ntsubsteps)):
-            # Linear gas / temperature drift over substep.
             gc = gc + d_gc * fraction
             t = t + d_t * fraction
-
             pc, gc, t, rlheat_val, rc = microfast_full_jit(
                 pc, gc, t, dtime_sub,
                 rhoa, zmet,
@@ -131,11 +137,16 @@ def newstate_calc_full(
                 dt_threshold, scale_threshold, iz,
             )
             rlheat_total = rlheat_total + rlheat_val
+            any_failed = any_failed | (rc == RC_WARNING_RETRY)
+            # Sync periodically — JAX pipelines CHECK_EVERY ops in between.
+            if (_isubstep + 1) % CHECK_EVERY == 0:
+                if bool(any_failed):
+                    retried = True
+                    break
 
-            # rc is traced but we can pull a Python-int via int()/jnp.asarray
-            if int(rc) == RC_WARNING_RETRY:
-                retried = True
-                break
+        # Final sync at loop end for the last partial chunk.
+        if not retried and bool(any_failed):
+            retried = True
 
         if not retried:
             break  # success — converged at this ntsubsteps
