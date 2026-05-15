@@ -1,16 +1,20 @@
-"""Bin-by-bin parity plot: JAX vs Fortran sulfate ensemble.
+"""Bin-by-bin relative error: JAX vs Fortran sulfate ensemble.
 
-Produces three panels:
-1. Per-bin box plot of relative error across active scenarios
-2. Per-scenario median rel-err CDF (the Phase 10 gate metric)
-3. Timing + summary statistics table
+Two panels — mass and number — with a threshold to separate physically
+meaningful bins from near-empty ones:
+
+  Active (colored):   mass  > 1e-20 g/m²   OR   number > 1e-2 #/m²
+  Empty  (gray):      below threshold — shown but de-emphasized
+
+Column densities are computed as:
+    mass_g_per_m2   = pc_mmr [g/g] × (p [hPa] × 100 / 9.81 × 1000) [g/m²]
+    number_per_m2   = (pc_mmr / rmass_bin) × air_col_g_per_m2
 
 Usage:
     python scripts/plot_binbybin_parity.py \
         --fortran data/sulfate_fortran_outputs_fresh.npz \
         --jax     data/sulfate_jax_outputs_fresh.npz \
-        --timing-fortran 17.3 \
-        --timing-jax     2262.5
+        --scenarios data/sulfate_scenarios_1000.npz
 """
 import argparse
 import math
@@ -23,6 +27,7 @@ from matplotlib.ticker import LogLocator
 
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "scripts"))
 
 
 def bin_diameters_nm(nbin=38, rmin_cm=2e-8, rmrat=2.0, rho=1.78):
@@ -32,155 +37,164 @@ def bin_diameters_nm(nbin=38, rmin_cm=2e-8, rmrat=2.0, rho=1.78):
     return 2.0 * r * 1e7   # cm → nm
 
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--fortran", type=Path,
-                   default=ROOT / "data" / "sulfate_fortran_outputs_fresh.npz")
-    p.add_argument("--jax", type=Path,
-                   default=ROOT / "data" / "sulfate_jax_outputs_fresh.npz")
-    p.add_argument("--timing-fortran", type=float, default=None)
-    p.add_argument("--timing-jax",     type=float, default=None)
-    args = p.parse_args()
+def plot_panel(ax, d_nm, rel_F, rel_J, active_F,
+               ylabel, title, threshold_label):
+    """Draw one relative-error panel (mass or number)."""
+    rng = np.random.default_rng(0)
+    n, nbin = rel_F.shape
 
-    F = np.load(args.fortran)
-    J = np.load(args.jax)
-    pc_F = F["pc_final"]   # (N, NBIN) g/g per bin
-    pc_J = J["pc_final"]
-    n, nbin = pc_F.shape
-    d_nm = bin_diameters_nm(nbin)
+    # active = F is above threshold for a given (scenario, bin)
+    active = active_F   # use Fortran as reference for "populated"
+    inactive = ~active
 
-    denom = np.maximum(np.abs(pc_F), np.abs(pc_J))
-    denom = np.where(denom > 1e-300, denom, 1.0)
-    rel = np.abs(pc_F - pc_J) / denom   # (N, NBIN)
-
-    # "Active" = bin where Fortran has meaningful signal
-    active_floor = 1e-50   # g/g — below this Fortran considers bin empty
-    active = pc_F > active_floor   # (N, NBIN)
-
-    # Per-scenario median rel err across all 38 bins (Phase 10 gate metric)
-    per_scen_med = np.median(rel, axis=1)   # (N,)
-    pass1  = (per_scen_med < 0.01).mean() * 100
-    pass5  = (per_scen_med < 0.05).mean() * 100
-    pass10 = (per_scen_med < 0.10).mean() * 100
-
-    print(f"N={n}, NBIN={nbin}")
-    print(f"Per-scenario median rel err P50={np.percentile(per_scen_med,50):.3e}  "
-          f"P90={np.percentile(per_scen_med,90):.3e}")
-    print(f"Pass rates: <1%={pass1:.1f}%  <5%={pass5:.1f}%  <10%={pass10:.1f}%")
-
-    # ------------------------------------------------------------------ #
-    fig, axes = plt.subplots(1, 3, figsize=(20, 6))
-
-    # --- Panel 1: per-bin box plot (active scenarios only per bin) ---
-    ax = axes[0]
-    rng = np.random.default_rng(42)
-    data_for_box = []
+    # Scatter: inactive (gray) first, active (blue) on top
     for b in range(nbin):
-        mask = active[:, b]
-        vals = rel[mask, b] if mask.any() else np.array([1e-16])
-        vals = np.where(vals > 1e-16, vals, 1e-16)
-        data_for_box.append(vals)
-        # jitter scatter
-        jitter = rng.normal(0, 0.06, size=vals.shape)
-        xs = d_nm[b] * np.exp(jitter)
-        ax.scatter(xs, vals, s=2, alpha=0.10, color="steelblue",
-                   edgecolors="none", zorder=1)
+        # Relative error for each scenario at this bin
+        denom = np.maximum(np.abs(rel_F[:, b]), np.abs(rel_J[:, b]))
+        denom = np.where(denom > 1e-300, denom, 1.0)
+        err = np.abs(rel_F[:, b] - rel_J[:, b]) / denom
 
-    ax.boxplot(data_for_box, positions=d_nm, widths=d_nm * 0.14,
-               showfliers=False, patch_artist=True,
-               medianprops=dict(color="crimson", lw=1.5),
-               boxprops=dict(facecolor="white", alpha=0.8, edgecolor="black"),
-               whiskerprops=dict(color="black", lw=0.9), zorder=3)
+        jitter = rng.normal(0, 0.07, size=n)
+        xs = d_nm[b] * np.exp(jitter)
+
+        # Inactive scenarios
+        if inactive[:, b].any():
+            ax.scatter(xs[inactive[:, b]], np.clip(err[inactive[:, b]], 1e-16, 1),
+                       s=2, alpha=0.15, color="0.75", edgecolors="none", zorder=1)
+
+        # Active scenarios
+        if active[:, b].any():
+            ax.scatter(xs[active[:, b]], np.clip(err[active[:, b]], 1e-16, 1),
+                       s=3, alpha=0.25, color="steelblue", edgecolors="none", zorder=2)
+
+    # Box plot — active pairs only
+    box_data = []
+    for b in range(nbin):
+        denom = np.maximum(np.abs(rel_F[:, b]), np.abs(rel_J[:, b]))
+        denom = np.where(denom > 1e-300, denom, 1.0)
+        err = np.abs(rel_F[:, b] - rel_J[:, b]) / denom
+        vals = err[active[:, b]]
+        box_data.append(np.clip(vals, 1e-16, 1) if vals.size else np.array([1e-16]))
+
+    bp = ax.boxplot(box_data, positions=d_nm, widths=d_nm * 0.13,
+                    showfliers=False, patch_artist=True,
+                    medianprops=dict(color="crimson", lw=1.5),
+                    boxprops=dict(facecolor="white", alpha=0.85, edgecolor="black"),
+                    whiskerprops=dict(color="black", lw=0.8),
+                    capprops=dict(color="black", lw=0.8),
+                    zorder=3)
 
     ax.axhline(0.01, color="green",  ls="--", lw=1.2, alpha=0.8, label="1% threshold")
     ax.axhline(0.05, color="orange", ls="--", lw=1.2, alpha=0.8, label="5% threshold")
+
+    # Dummy handles for legend
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+    handles = [
+        Line2D([0], [0], color="green",  ls="--", lw=1.2, label="1%"),
+        Line2D([0], [0], color="orange", ls="--", lw=1.2, label="5%"),
+        ax.scatter([], [], s=8, color="steelblue", alpha=0.6,
+                   label=f"active (≥ {threshold_label})"),
+        ax.scatter([], [], s=8, color="0.75", alpha=0.6,
+                   label=f"empty  (< {threshold_label})"),
+    ]
+    ax.legend(handles=handles, fontsize=8, loc="lower right")
+
     ax.set_xscale("log"); ax.set_yscale("log")
+    ax.set_ylim(5e-17, 2.0)
     ax.xaxis.set_minor_locator(LogLocator(numticks=15))
     ax.yaxis.set_minor_locator(LogLocator(numticks=15))
-    ax.grid(True, alpha=0.25, which="both")
+    ax.grid(True, alpha=0.2, which="both")
     ax.set_xlabel("Bin median diameter [nm]", fontsize=11)
-    ax.set_ylabel("|JAX − Fortran| / max(|JAX|, |Fortran|)", fontsize=11)
-    active_counts = active.sum(axis=0)
-    ax.set_title(f"Per-bin relative error  (box = P25/median/P75)\n"
-                 f"n per bin = {active_counts.min()}–{active_counts.max()} "
-                 f"active scenarios of {n} total", fontsize=10)
-    ax.legend(fontsize=9, loc="upper left")
+    ax.set_ylabel(ylabel, fontsize=11)
+    ax.set_title(title, fontsize=10)
 
-    # --- Panel 2: per-scenario median CDF ---
-    ax2 = axes[1]
-    sorted_med = np.sort(per_scen_med)
-    cdf = np.arange(1, n + 1) / n * 100
-    ax2.semilogx(sorted_med, cdf, "b-", lw=2, label="CDF")
-    ax2.axvline(0.01, color="green",  ls="--", lw=1.2,
-                label=f"1%  → {pass1:.0f}% scen pass")
-    ax2.axvline(0.05, color="orange", ls="--", lw=1.2,
-                label=f"5%  → {pass5:.0f}% scen pass")
-    ax2.axvline(0.10, color="red",    ls=":",  lw=1.2,
-                label=f"10% → {pass10:.0f}% scen pass")
-    ax2.set_xlabel("Per-scenario median rel err (all 38 bins)", fontsize=11)
-    ax2.set_ylabel("Scenarios ≤ threshold [%]", fontsize=11)
-    ax2.set_title("Per-scenario parity CDF\n"
-                  "(Phase 10 gate metric: fraction with median < 1%)", fontsize=10)
-    ax2.set_ylim(0, 105); ax2.grid(True, alpha=0.3, which="both")
-    ax2.xaxis.set_minor_locator(LogLocator(numticks=15))
-    ax2.legend(fontsize=9, loc="upper left")
+    # Summary stats on active pairs
+    all_err_active = []
+    for b in range(nbin):
+        denom = np.maximum(np.abs(rel_F[:, b]), np.abs(rel_J[:, b]))
+        denom = np.where(denom > 1e-300, denom, 1.0)
+        err = np.abs(rel_F[:, b] - rel_J[:, b]) / denom
+        all_err_active.extend(err[active[:, b]].tolist())
+    all_err_active = np.array(all_err_active)
+    n_active = active.sum()
+    pct_pass = (all_err_active < 0.01).mean() * 100
 
-    # Annotate Phase 10 baseline
-    ax2.annotate("Phase 10 baseline\n(adaptive): 66.8%",
-                 xy=(0.01, 66.8), xytext=(0.001, 50),
-                 arrowprops=dict(arrowstyle="->", color="gray"),
-                 fontsize=8, color="gray")
+    ax.text(0.02, 0.97,
+            f"Active pairs: {n_active:,} / {n*nbin:,}\n"
+            f"Median err: {np.median(all_err_active):.1e}\n"
+            f"< 1% : {pct_pass:.0f}%",
+            transform=ax.transAxes, va="top", ha="left",
+            fontsize=8, family="monospace",
+            bbox=dict(facecolor="white", alpha=0.8, edgecolor="0.8"))
 
-    # --- Panel 3: summary table ---
-    ax3 = axes[2]
-    ax3.axis("off")
-    rows = [
-        ["Metric", "Value"],
-        ["N scenarios", f"{n:,}"],
-        ["NBIN", f"{nbin}"],
-        ["Outer steps", "100"],
-        ["dtime", "1800 s"],
-        ["", ""],
-        ["Per-scenario median", ""],
-        ["  P50", f"{np.percentile(per_scen_med,50):.2e}"],
-        ["  P90", f"{np.percentile(per_scen_med,90):.2e}"],
-        ["  P95", f"{np.percentile(per_scen_med,95):.2e}"],
-        ["  P99", f"{np.percentile(per_scen_med,99):.2e}"],
-        ["", ""],
-        ["Pass rate", ""],
-        ["  < 1% rel err",  f"{pass1:.1f}%"],
-        ["  < 5% rel err",  f"{pass5:.1f}%"],
-        ["  < 10% rel err", f"{pass10:.1f}%"],
-    ]
-    if args.timing_fortran is not None and args.timing_jax is not None:
-        t_F, t_J = args.timing_fortran, args.timing_jax
-        rows += [
-            ["", ""],
-            ["Timing (1000 scenarios)", ""],
-            ["  Fortran", f"{t_F:.0f} s  ({t_F/n*1000:.0f} ms/scen)"],
-            ["  JAX (CPU, float64)", f"{t_J:.0f} s  ({t_J/n*1000:.0f} ms/scen)"],
-            ["  Ratio (JAX/F)", f"{t_J/t_F:.0f}×"],
-        ]
 
-    table = ax3.table(cellText=rows, loc="center", cellLoc="left")
-    table.auto_set_font_size(False)
-    table.set_fontsize(10)
-    table.scale(1.1, 1.55)
-    for (r, c), cell in table.get_celld().items():
-        cell.set_edgecolor("white")
-        if r == 0:
-            cell.set_facecolor("#2c3e50")
-            cell.set_text_props(color="white", fontweight="bold")
-        elif r % 2 == 0:
-            cell.set_facecolor("#eef2f7")
-        else:
-            cell.set_facecolor("white")
-    ax3.set_title("Summary", fontsize=10)
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--fortran",   type=Path, default=ROOT/"data"/"sulfate_fortran_outputs_fresh.npz")
+    p.add_argument("--jax",       type=Path, default=ROOT/"data"/"sulfate_jax_outputs_fresh.npz")
+    p.add_argument("--scenarios", type=Path, default=ROOT/"data"/"sulfate_scenarios_1000.npz")
+    args = p.parse_args()
+
+    F    = np.load(args.fortran)
+    J    = np.load(args.jax)
+    scen = np.load(args.scenarios)
+
+    pc_F = F["pc_final"]   # (N, NBIN) g/g per bin
+    pc_J = J["pc_final"]
+    n, nbin = pc_F.shape
+
+    # Load bin geometry from config
+    from jax_ensemble import _minimal_config
+    cfg = _minimal_config()
+    rmass = np.asarray(cfg.groups[0].rmass)   # g per particle
+    d_nm = bin_diameters_nm(nbin)
+
+    # Air column mass per scenario [g/m²]
+    g_accel = 9.81   # m/s²
+    air_col = scen["p"] * 100.0 / g_accel * 1000.0   # (N,) g/m²
+
+    # Column mass [g/m²] and number [#/m²] per (scenario, bin)
+    mass_F = pc_F * air_col[:, None]                   # (N, NBIN)
+    mass_J = pc_J * air_col[:, None]
+    num_F  = pc_F / rmass[None, :] * air_col[:, None]  # (N, NBIN)
+    num_J  = pc_J / rmass[None, :] * air_col[:, None]
+
+    MASS_FLOOR = 1e-20   # g/m²
+    NUM_FLOOR  = 1e-2    # #/m²
+
+    active_mass = mass_F > MASS_FLOOR
+    active_num  = num_F  > NUM_FLOOR
+
+    print(f"N={n}, NBIN={nbin}")
+    print(f"Active pairs — mass > {MASS_FLOOR:.0e} g/m²:   {active_mass.sum():,} / {n*nbin}")
+    print(f"Active pairs — num  > {NUM_FLOOR:.0e} #/m²:  {active_num.sum():,} / {n*nbin}")
+
+    fig, axes = plt.subplots(1, 2, figsize=(18, 6))
+
+    plot_panel(
+        axes[0], d_nm,
+        mass_F, mass_J, active_mass,
+        ylabel="|JAX − Fortran| / max(|JAX|, |Fortran|)",
+        title=f"Mass per bin — relative error\n"
+              f"(active = column mass > {MASS_FLOOR:.0e} g/m²)",
+        threshold_label=f"{MASS_FLOOR:.0e} g/m²",
+    )
+
+    plot_panel(
+        axes[1], d_nm,
+        num_F, num_J, active_num,
+        ylabel="|JAX − Fortran| / max(|JAX|, |Fortran|)",
+        title=f"Number per bin — relative error\n"
+              f"(active = column number > {NUM_FLOOR:.0e} #/m²)",
+        threshold_label=f"{NUM_FLOOR:.0e} #/m²",
+    )
 
     plt.suptitle(
-        "CARMA-JAX sulfate ensemble parity: JAX vs Fortran\n"
-        "(1800 s × 100 steps, NBIN=38, rmin=0.2 nm, rmrat=2.0 — 1000 scenarios)",
-        fontsize=12, fontweight="bold", y=1.02,
+        "CARMA-JAX sulfate ensemble: JAX vs Fortran — bin-by-bin relative error\n"
+        "(1800 s × 100 steps, NBIN=38, rmin=0.2 nm, rmrat=2.0, N=1000 scenarios)\n"
+        "Box = P25/median/P75 over active scenarios  |  steelblue = active  |  gray = empty",
+        fontsize=11, fontweight="bold", y=1.03,
     )
 
     out_dir = ROOT / "plots" / "diff" / "benchmark"
