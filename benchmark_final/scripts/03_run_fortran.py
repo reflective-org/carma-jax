@@ -31,20 +31,23 @@ def scenario_line(scen, i):
             f"{float(scen['aerosol_sigma_g'][i])!r}\n")
 
 
-def run_one(binary, scenario_line_text, work_dir, idx):
+def run_one(binary, scenario_line_text, work_dir, idx, timeout_s):
     scen_path = work_dir / f"scen_{idx:04d}.txt"
     out_path = work_dir / f"out_{idx:04d}.json"
     scen_path.write_text(scenario_line_text)
-    result = subprocess.run(
-        [str(binary), str(scen_path), str(out_path)],
-        capture_output=True, text=True, timeout=300,
-    )
+    try:
+        result = subprocess.run(
+            [str(binary), str(scen_path), str(out_path)],
+            capture_output=True, text=True, timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        return idx, None, f"timeout (>{timeout_s}s)"
     if result.returncode != 0:
-        return idx, None, result.stderr
+        return idx, None, result.stderr[:300]
     try:
         return idx, json.loads(out_path.read_text()), None
-    except json.JSONDecodeError as e:
-        return idx, None, f"JSON parse: {e}"
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        return idx, None, f"read: {e}"
 
 
 def main():
@@ -53,6 +56,8 @@ def main():
     p.add_argument("--scenarios", type=Path, default=SCENARIO_PATH)
     p.add_argument("--out", type=Path, default=DEFAULT_OUT)
     p.add_argument("--workers", type=int, default=8)
+    p.add_argument("--timeout", type=int, default=1800,
+                   help="per-scenario timeout in seconds (default 1800 = 30 min)")
     args = p.parse_args()
 
     if not args.binary.exists():
@@ -73,15 +78,20 @@ def main():
         with cf.ThreadPoolExecutor(max_workers=args.workers) as ex:
             futs = [
                 ex.submit(run_one, args.binary, scenario_line(scens, i),
-                          work_dir, i)
+                          work_dir, i, args.timeout)
                 for i in range(n)
             ]
+            done = 0
             for fut in cf.as_completed(futs):
                 idx, out, err = fut.result()
+                done += 1
                 if out is None:
                     errors.append((idx, err))
+                    print(f"  [{done:3d}/{n}] scen {idx} FAILED: {err}", flush=True)
                 else:
                     results[idx] = out
+                    if done % 10 == 0:
+                        print(f"  [{done:3d}/{n}] done", flush=True)
     elapsed = time.perf_counter() - t_start
 
     print(f"\nFortran wall time: {elapsed:.1f} s  "
