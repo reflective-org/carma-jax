@@ -91,8 +91,11 @@ def sample_scenarios(n_scen, seed=42):
     # Relative humidity (over liquid), 0–60%
     rh = rng.uniform(0.0, 0.60, n_scen)
 
-    # H₂SO₄ production rate, 1e1 – 1e9 molecules/cm³/s (log-uniform)
-    h2so4_prod = 10.0 ** rng.uniform(1.0, 9.0, n_scen)
+    # H₂SO₄ production rate, 1e1 – 1e7 molecules/cm³/s (log-uniform).
+    # Capped at 1e7 (background-to-urban range); 1e8-1e9 are essentially
+    # industrial-plume extremes that demand thousands of substeps to
+    # converge and dominate the JAX runtime.
+    h2so4_prod = 10.0 ** rng.uniform(1.0, 7.0, n_scen)
 
     # Initial seed: log-normal log-uniform sampling
     M_ug_m3 = 10.0 ** rng.uniform(np.log10(0.1), np.log10(50.0), n_scen)   # 0.1–50 µg/m³

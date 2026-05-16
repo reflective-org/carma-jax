@@ -210,11 +210,13 @@ def main():
         "=== CARMA-JAX realistic-ensemble timing ===",
         f"  Setup: 60 s × 1440 steps = 24 h simulation, 100 scenarios",
         "",
-        f"  Fortran (8 parallel workers): {wall_F:.0f} s  ({wall_F/n*1000:.0f} ms/scen)",
-        f"  JAX     (single-threaded):    {wall_J:.0f} s  ({wall_J/n*1000:.0f} ms/scen)",
-        f"  Ratio (JAX/Fortran):          {wall_J/wall_F:.1f}×",
+        f"  Fortran (8 parallel processes):    {wall_F:.0f} s  ({wall_F/n*1000:.0f} ms/scen wall)",
+        f"  JAX (8 parallel processes, fp64):  {wall_J:.0f} s  ({wall_J/n*1000:.0f} ms/scen wall)",
+        f"  Ratio (JAX wall / Fortran wall):   {wall_J/wall_F:.1f}×",
         "",
-        f"  Note: Fortran uses 8 parallel workers; JAX is single-threaded CPU float64.",
+        f"  Both runs used 8 worker processes on the same CPU.",
+        f"  Per-scenario effective CPU time:",
+        f"    Fortran: ~{wall_F*8/n:.0f} s/scen   JAX: ~{wall_J*8/n:.0f} s/scen",
     ]
     print("\n".join(lines))
     (out_dir / "06_timing_summary.txt").write_text("\n".join(lines) + "\n")
