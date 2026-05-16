@@ -16,19 +16,90 @@ Per-step loop:
    ``nretries > maxretries`` (failure mode — final state may be
    inconsistent).
 
-This driver runs the inner substep loop in pure Python with the
-JIT'd ``microfast_full_jit`` inside, so each substep dispatches
-once. The retry loop is also Python — it depends on the traced rc
-which can't be passed through ``lax.while_loop`` without
-materialising. For Phase 10 vmap'd ensembles a future refactor
-will need ``lax.while_loop`` with a worst-case substep ceiling,
-but Python loops are fine for the differential bench.
+Two implementations of the substep loop coexist:
+
+- ``make_substep_loop_jit(microfast_full_jit)`` returns a fully
+  JIT'd ``lax.while_loop`` version. For hard scenarios (thousands
+  of substeps per outer step) this collapses the substep loop into
+  a single JAX call, eliminating per-substep Python dispatch.
+  *Preferred path*: callers should build this once per config
+  (cheap — happens at ``make_step_full_faithful`` time) and pass
+  it via ``substep_loop_jit=...``.
+
+- The legacy Python loop with chunked rc-sync (every 32 substeps).
+  Still used when no ``substep_loop_jit`` is supplied. Slower for
+  hard scenarios but easier to debug; kept for backwards-compat
+  with older callers.
 """
 
+import jax
+import jax.lax as lax
 import jax.numpy as jnp
 
 from carma.enums import RC_OK, RC_WARNING_RETRY
 from carma.precision import DTYPE
+
+
+def make_substep_loop_jit(microfast_full_jit):
+    """Build a ``@jax.jit``-wrapped substep loop bound to ``microfast_full_jit``.
+
+    The returned callable runs up to ``ntsubsteps`` iterations of
+    ``microfast_full_jit`` inside a single ``lax.while_loop`` so JAX can
+    trace and compile the entire substep loop once. Early-breaks on the
+    first substep that returns ``RC_WARNING_RETRY``.
+
+    Build this **once per CarmaConfig** (typically inside
+    ``make_step_full_faithful``) — the JIT cache is then reused across
+    all outer steps and scenarios that share the same array shapes.
+    """
+    @jax.jit
+    def _substep_loop_jit(
+        pc_init, gc_init, t_init,
+        ntsubsteps,                   # dynamic int32 scalar
+        dtime_orig, d_gc, d_t,
+        rhoa, zmet,
+        akelvin, akelvini, gro, gro1, rup_wet,
+        rmass_2d, dm_2d, rmassup, r_bins, rmrat_val,
+        pratt, prat, pden1, palr,
+        rlhe, rlhm, ds_threshold_arr,
+        dt_threshold, scale_threshold, iz,
+    ):
+        nts_f = ntsubsteps.astype(DTYPE)
+        dtime_sub = dtime_orig / nts_f
+        fraction = DTYPE(1.0) / nts_f
+
+        def cond_fn(carry):
+            i, _pc, _gc, _t, _rlheat, failed = carry
+            return jnp.logical_and(i < ntsubsteps, jnp.logical_not(failed))
+
+        def body_fn(carry):
+            i, pc, gc, t, rlheat, _failed = carry
+            gc_new = gc + d_gc * fraction
+            t_new = t + d_t * fraction
+            pc_out, gc_out, t_out, rlheat_val, rc = microfast_full_jit(
+                pc, gc_new, t_new, dtime_sub,
+                rhoa, zmet,
+                akelvin, akelvini, gro, gro1, rup_wet,
+                rmass_2d, dm_2d, rmassup, r_bins, rmrat_val,
+                pratt, prat, pden1, palr,
+                rlhe, rlhm,
+                ds_threshold_arr,
+                dt_threshold, scale_threshold, iz,
+            )
+            return (i + jnp.int32(1),
+                    pc_out, gc_out, t_out,
+                    rlheat + rlheat_val,
+                    rc == RC_WARNING_RETRY)
+
+        init = (jnp.int32(0),
+                pc_init, gc_init, t_init,
+                jnp.float64(0.0),
+                jnp.bool_(False))
+        final = lax.while_loop(cond_fn, body_fn, init)
+        i_final, pc, gc, t, rlheat, failed = final
+        return pc, gc, t, rlheat, i_final, failed
+
+    return _substep_loop_jit
 
 
 def newstate_calc_full(
@@ -49,6 +120,7 @@ def newstate_calc_full(
     dt_threshold=DTYPE(1.0),
     scale_threshold=DTYPE(1.0),
     prescribed_ntsubsteps=None,
+    substep_loop_jit=None,
 ):
     """Adaptive-substep retry around ``microfast_full_jit``.
 
@@ -104,11 +176,31 @@ def newstate_calc_full(
     ntsubsteps = max(int(initial_ntsubsteps), int(minsubsteps))
     nretries = 0
 
-    # Sync only every CHECK_EVERY substeps instead of after every one.
-    # This lets JAX pipeline several microfast calls between Python checks,
-    # cutting the per-step sync overhead. The trade-off is some wasted work
-    # when failure happens in the middle of a chunk, but this is dwarfed by
-    # the dispatch savings for hard scenarios.
+    # ----- Fast path: pre-built JIT'd substep loop -----
+    if substep_loop_jit is not None:
+        while True:
+            pc, gc, t, rlheat_total, _i_final, failed = substep_loop_jit(
+                pc_init, gc_init, t_init,
+                jnp.int32(ntsubsteps),
+                dtime_orig, d_gc, d_t,
+                rhoa, zmet,
+                akelvin, akelvini, gro, gro1, rup_wet,
+                rmass_2d, dm_2d, rmassup, r_bins, rmrat_val,
+                pratt, prat, pden1, palr,
+                rlhe, rlhm,
+                ds_threshold_arr,
+                dt_threshold, scale_threshold, iz,
+            )
+            # One Python sync per retry attempt (cheap — max ~16 retries).
+            if not bool(failed):
+                break
+            nretries += 1
+            if nretries > maxretries:
+                break
+            ntsubsteps *= 2
+        return pc, gc, t, rlheat_total, ntsubsteps, nretries
+
+    # ----- Legacy path: Python loop with chunked rc-sync every 32 substeps -----
     CHECK_EVERY = 32
 
     while True:
