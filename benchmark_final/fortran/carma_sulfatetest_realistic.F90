@@ -62,12 +62,13 @@ subroutine test_sulfate_realistic()
   integer, parameter        :: I_H2SO4  = 1
 
   ! NEW scenario inputs: production rate (molec/cm³/s) and seed mass (µg/m³)
-  character(len=512)        :: scenario_path, output_path
+  character(len=512)        :: scenario_path, output_path, arg3, arg4
   real(kind=f)              :: T_scen, p_scen_hPa, rh_scen
   real(kind=f)              :: h2so4_prod_rate                 ! molec/cm³/s
   real(kind=f)              :: M_total_ug_m3                    ! µg/m³
   real(kind=f)              :: mu_nm, sigma_g
   integer                   :: unit_in, unit_out, ios
+  logical                   :: do_coag_flag, do_grow_flag      ! runtime toggles
 
   type(carma_type), target            :: carma
   type(carma_type), pointer           :: carma_ptr
@@ -100,11 +101,22 @@ subroutine test_sulfate_realistic()
   integer                      :: unit_sched
 
   if (command_argument_count() < 2) then
-    write(0, '(A)') 'usage: <scenario_file> <output_file>'
+    write(0, '(A)') 'usage: <scenario_file> <output_file> [do_coag=1] [do_grow=1]'
+    write(0, '(A)') '  do_coag, do_grow: 1 (on) or 0 (off). Defaults: both on.'
     call exit(2)
   end if
   call get_command_argument(1, scenario_path)
   call get_command_argument(2, output_path)
+  do_coag_flag = .true.
+  do_grow_flag = .true.
+  if (command_argument_count() >= 3) then
+    call get_command_argument(3, arg3)
+    if (trim(arg3) == '0') do_coag_flag = .false.
+  end if
+  if (command_argument_count() >= 4) then
+    call get_command_argument(4, arg4)
+    if (trim(arg4) == '0') do_grow_flag = .false.
+  end if
 
   open(newunit=unit_in, file=trim(scenario_path), action='read', &
        status='old', iostat=ios)
@@ -162,7 +174,7 @@ subroutine test_sulfate_realistic()
   call CARMA_AddCoagulation(carma, 1, 1, 1, I_COLLEC_FUCHS, rc)
   if (rc /= 0) stop '*** CARMA_AddCoagulation FAILED ***'
 
-  call CARMA_Initialize(carma, rc, do_grow=.true., do_coag=.true., &
+  call CARMA_Initialize(carma, rc, do_grow=do_grow_flag, do_coag=do_coag_flag, &
       do_substep=.true., do_thermo=.true., maxretries=16, maxsubsteps=32, &
       dt_threshold=1._f, sulfnucl_method='ZhaoTurco')
   if (rc /= 0) stop '*** CARMA_Initialize FAILED ***'

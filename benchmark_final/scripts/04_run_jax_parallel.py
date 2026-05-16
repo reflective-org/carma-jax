@@ -20,7 +20,7 @@ REPO = ROOT.parent
 
 def _worker_run(args):
     """Run one scenario in a worker process. Returns (idx, result_dict)."""
-    idx, scen_dict, dtime, nstep = args
+    idx, scen_dict, dtime, nstep, do_coag, do_grow = args
 
     # JAX setup (per-process)
     import jax
@@ -35,9 +35,12 @@ def _worker_run(args):
     from carma.prestep import prestep
     from carma.precision import DTYPE
 
-    # Reuse the cell-runner from sibling script (build everything once per worker)
-    if not hasattr(_worker_run, "_cached"):
+    # Reuse the cell-runner from sibling script (build everything once per worker).
+    # Cache keyed by (do_coag, do_grow) — different config flags need different closures.
+    cache_key = (bool(do_coag), bool(do_grow))
+    if getattr(_worker_run, "_cache_key", None) != cache_key:
         cfg = _minimal_config()
+        cfg = cfg._replace(do_coag=do_coag, do_grow=do_grow)
         ppm = _compute_ppm_coefs(cfg)
         step = make_step_full_faithful(cfg, ppm_coefs=ppm)
         itype_arr   = jnp.asarray([e.itype for e in cfg.elements])
@@ -48,6 +51,7 @@ def _worker_run(args):
         )
         _worker_run._cached = (cfg, ppm, step, itype_arr, ienconc_arr,
                                 igelem_arr, rmass_2d)
+        _worker_run._cache_key = cache_key
     cfg, ppm, step, itype_arr, ienconc_arr, igelem_arr, rmass_2d = _worker_run._cached
 
     T_K = scen_dict["T"]
@@ -130,7 +134,13 @@ def main():
     p.add_argument("--dtime", type=float, default=60.0)
     p.add_argument("--nstep", type=int, default=1440)
     p.add_argument("--workers", type=int, default=8)
+    p.add_argument("--no-coag", action="store_true",
+                   help="disable coagulation in JAX")
+    p.add_argument("--no-grow", action="store_true",
+                   help="disable growth/condensation/nucleation in JAX")
     args = p.parse_args()
+    do_coag = not args.no_coag
+    do_grow = not args.no_grow
 
     scens = np.load(args.scenarios)
     n = int(scens["_n"])
@@ -140,7 +150,7 @@ def main():
         scen_dict = {k: float(scens[k][i]) for k in
                      ["T", "p", "rh", "h2so4_prod_rate", "M_total_ug_m3",
                       "aerosol_mu_nm", "aerosol_sigma_g"]}
-        work.append((i, scen_dict, args.dtime, args.nstep))
+        work.append((i, scen_dict, args.dtime, args.nstep, do_coag, do_grow))
 
     print(f"Running JAX realistic ensemble: {n} scenarios, "
           f"{args.nstep} steps × {args.dtime} s ({args.nstep*args.dtime/3600:.0f} h)\n"

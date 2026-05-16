@@ -31,14 +31,17 @@ def scenario_line(scen, i):
             f"{float(scen['aerosol_sigma_g'][i])!r}\n")
 
 
-def run_one(binary, scenario_line_text, work_dir, idx, timeout_s):
+def run_one(binary, scenario_line_text, work_dir, idx, timeout_s,
+            do_coag=True, do_grow=True):
     scen_path = work_dir / f"scen_{idx:04d}.txt"
     out_path = work_dir / f"out_{idx:04d}.json"
     scen_path.write_text(scenario_line_text)
+    cmd = [str(binary), str(scen_path), str(out_path),
+           "1" if do_coag else "0",
+           "1" if do_grow else "0"]
     try:
         result = subprocess.run(
-            [str(binary), str(scen_path), str(out_path)],
-            capture_output=True, text=True, timeout=timeout_s,
+            cmd, capture_output=True, text=True, timeout=timeout_s,
         )
     except subprocess.TimeoutExpired:
         return idx, None, f"timeout (>{timeout_s}s)"
@@ -58,7 +61,13 @@ def main():
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--timeout", type=int, default=1800,
                    help="per-scenario timeout in seconds (default 1800 = 30 min)")
+    p.add_argument("--no-coag", action="store_true",
+                   help="disable coagulation in Fortran")
+    p.add_argument("--no-grow", action="store_true",
+                   help="disable growth/condensation/nucleation in Fortran")
     args = p.parse_args()
+    do_coag = not args.no_coag
+    do_grow = not args.no_grow
 
     if not args.binary.exists():
         print(f"ERROR: binary not found at {args.binary}\n"
@@ -78,7 +87,7 @@ def main():
         with cf.ThreadPoolExecutor(max_workers=args.workers) as ex:
             futs = [
                 ex.submit(run_one, args.binary, scenario_line(scens, i),
-                          work_dir, i, args.timeout)
+                          work_dir, i, args.timeout, do_coag, do_grow)
                 for i in range(n)
             ]
             done = 0
