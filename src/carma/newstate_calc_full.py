@@ -151,6 +151,24 @@ def newstate_calc_full(
     # drift vs. something else.
     if prescribed_ntsubsteps is not None:
         ntsubsteps = int(prescribed_ntsubsteps)
+
+        # Fast path: use the JIT'd substep loop if available.
+        if substep_loop_jit is not None:
+            pc, gc, t, rlheat_total, _i_final, _failed = substep_loop_jit(
+                pc_init, gc_init, t_init,
+                jnp.int32(ntsubsteps),
+                dtime_orig, d_gc, d_t,
+                rhoa, zmet,
+                akelvin, akelvini, gro, gro1, rup_wet,
+                rmass_2d, dm_2d, rmassup, r_bins, rmrat_val,
+                pratt, prat, pden1, palr,
+                rlhe, rlhm,
+                ds_threshold_arr,
+                dt_threshold, scale_threshold, iz,
+            )
+            return pc, gc, t, rlheat_total, ntsubsteps, 0
+
+        # Fallback: Python loop (slow, retained for backwards compat).
         pc = pc_init
         gc = gc_init
         t = t_init

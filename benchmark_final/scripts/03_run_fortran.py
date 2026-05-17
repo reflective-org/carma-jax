@@ -35,6 +35,7 @@ def run_one(binary, scenario_line_text, work_dir, idx, timeout_s,
             do_coag=True, do_grow=True):
     scen_path = work_dir / f"scen_{idx:04d}.txt"
     out_path = work_dir / f"out_{idx:04d}.json"
+    sched_path = Path(str(out_path) + ".schedule.bin")
     scen_path.write_text(scenario_line_text)
     cmd = [str(binary), str(scen_path), str(out_path),
            "1" if do_coag else "0",
@@ -44,13 +45,20 @@ def run_one(binary, scenario_line_text, work_dir, idx, timeout_s,
             cmd, capture_output=True, text=True, timeout=timeout_s,
         )
     except subprocess.TimeoutExpired:
-        return idx, None, f"timeout (>{timeout_s}s)"
+        return idx, None, None, f"timeout (>{timeout_s}s)"
     if result.returncode != 0:
-        return idx, None, result.stderr[:300]
+        return idx, None, None, result.stderr[:300]
     try:
-        return idx, json.loads(out_path.read_text()), None
+        out_data = json.loads(out_path.read_text())
     except (FileNotFoundError, json.JSONDecodeError) as e:
-        return idx, None, f"read: {e}"
+        return idx, None, None, f"read: {e}"
+    # Read substep schedule (int64[nstep] nsubsteps + int64[nstep] nretries)
+    schedule = None
+    if sched_path.exists():
+        raw = np.fromfile(sched_path, dtype=np.int64)
+        n_half = raw.size // 2
+        schedule = (raw[:n_half], raw[n_half:])
+    return idx, out_data, schedule, None
 
 
 def main():
@@ -91,14 +99,16 @@ def main():
                 for i in range(n)
             ]
             done = 0
+            schedules = [None] * n
             for fut in cf.as_completed(futs):
-                idx, out, err = fut.result()
+                idx, out, schedule, err = fut.result()
                 done += 1
                 if out is None:
                     errors.append((idx, err))
                     print(f"  [{done:3d}/{n}] scen {idx} FAILED: {err}", flush=True)
                 else:
                     results[idx] = out
+                    schedules[idx] = schedule
                     if done % 10 == 0:
                         print(f"  [{done:3d}/{n}] done", flush=True)
     elapsed = time.perf_counter() - t_start
@@ -135,6 +145,20 @@ def main():
         n_scenarios=np.array([n]),
     )
     print(f"\nSaved: {args.out}")
+
+    # Aggregate per-scenario substep schedules into one (N, nstep) array.
+    valid_schedules = [s for s in schedules if s is not None]
+    if valid_schedules:
+        first_nstep = valid_schedules[0][0].shape[0]
+        nsub_arr = np.zeros((n, first_nstep), dtype=np.int64)
+        nret_arr = np.zeros((n, first_nstep), dtype=np.int64)
+        for i, s in enumerate(schedules):
+            if s is not None:
+                nsub_arr[i], nret_arr[i] = s
+        sched_out = args.out.with_name(args.out.stem + "_schedules.npz")
+        np.savez_compressed(sched_out, nsubsteps_history=nsub_arr,
+                             nretries_history=nret_arr)
+        print(f"Saved substep schedules: {sched_out}")
 
 
 if __name__ == "__main__":
