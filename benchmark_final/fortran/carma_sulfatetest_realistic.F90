@@ -53,16 +53,17 @@ subroutine test_sulfate_realistic()
   integer, parameter        :: NWAVE        = 0
   integer, parameter        :: LUNOPRT      = 6
 
-  ! NEW: 60 s timestep × 24 h = 1440 steps
-  real(kind=f), parameter   :: dtime  = 60._f
+  ! dtime and nstep are now runtime args (argv[5], argv[6]). Defaults:
+  ! 60 s × 1440 = 24 h. Pass e.g. "1800 48" for 30-min × 48-steps (also 24 h).
+  real(kind=f)              :: dtime
   real(kind=f), parameter   :: deltaz = 10000._f
   real(kind=f), parameter   :: zmin   = 17000._f
-  integer, parameter        :: nstep  = 86400 / int(dtime)
+  integer                   :: nstep
 
   integer, parameter        :: I_H2SO4  = 1
 
   ! NEW scenario inputs: production rate (molec/cm³/s) and seed mass (µg/m³)
-  character(len=512)        :: scenario_path, output_path, arg3, arg4
+  character(len=512)        :: scenario_path, output_path, arg3, arg4, arg5, arg6
   real(kind=f)              :: T_scen, p_scen_hPa, rh_scen
   real(kind=f)              :: h2so4_prod_rate                 ! molec/cm³/s
   real(kind=f)              :: M_total_ug_m3                    ! µg/m³
@@ -101,14 +102,18 @@ subroutine test_sulfate_realistic()
   integer                      :: unit_sched
 
   if (command_argument_count() < 2) then
-    write(0, '(A)') 'usage: <scenario_file> <output_file> [do_coag=1] [do_grow=1]'
+    write(0, '(A)') 'usage: <scenario_file> <output_file> [do_coag=1] [do_grow=1] [dtime=60] [nstep=1440]'
     write(0, '(A)') '  do_coag, do_grow: 1 (on) or 0 (off). Defaults: both on.'
+    write(0, '(A)') '  dtime: outer-step size in seconds. Default 60.'
+    write(0, '(A)') '  nstep: number of outer steps. Default 1440 (24 h at 60 s).'
     call exit(2)
   end if
   call get_command_argument(1, scenario_path)
   call get_command_argument(2, output_path)
   do_coag_flag = .true.
   do_grow_flag = .true.
+  dtime = 60._f
+  nstep = 1440
   if (command_argument_count() >= 3) then
     call get_command_argument(3, arg3)
     if (trim(arg3) == '0') do_coag_flag = .false.
@@ -116,6 +121,22 @@ subroutine test_sulfate_realistic()
   if (command_argument_count() >= 4) then
     call get_command_argument(4, arg4)
     if (trim(arg4) == '0') do_grow_flag = .false.
+  end if
+  if (command_argument_count() >= 5) then
+    call get_command_argument(5, arg5)
+    read(arg5, *, iostat=ios) dtime
+    if (ios /= 0) then
+      write(0, '(A, A)') 'invalid dtime: ', trim(arg5)
+      call exit(2)
+    end if
+  end if
+  if (command_argument_count() >= 6) then
+    call get_command_argument(6, arg6)
+    read(arg6, *, iostat=ios) nstep
+    if (ios /= 0) then
+      write(0, '(A, A)') 'invalid nstep: ', trim(arg6)
+      call exit(2)
+    end if
   end if
 
   open(newunit=unit_in, file=trim(scenario_path), action='read', &

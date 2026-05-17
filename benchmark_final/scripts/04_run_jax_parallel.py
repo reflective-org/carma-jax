@@ -138,6 +138,7 @@ def main():
                    help="disable coagulation in JAX")
     p.add_argument("--no-grow", action="store_true",
                    help="disable growth/condensation/nucleation in JAX")
+    # --dtime and --nstep are already defined above
     args = p.parse_args()
     do_coag = not args.no_coag
     do_grow = not args.no_grow

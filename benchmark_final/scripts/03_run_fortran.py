@@ -32,14 +32,15 @@ def scenario_line(scen, i):
 
 
 def run_one(binary, scenario_line_text, work_dir, idx, timeout_s,
-            do_coag=True, do_grow=True):
+            do_coag=True, do_grow=True, dtime=60.0, nstep=1440):
     scen_path = work_dir / f"scen_{idx:04d}.txt"
     out_path = work_dir / f"out_{idx:04d}.json"
     sched_path = Path(str(out_path) + ".schedule.bin")
     scen_path.write_text(scenario_line_text)
     cmd = [str(binary), str(scen_path), str(out_path),
            "1" if do_coag else "0",
-           "1" if do_grow else "0"]
+           "1" if do_grow else "0",
+           str(dtime), str(nstep)]
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout_s,
@@ -73,6 +74,10 @@ def main():
                    help="disable coagulation in Fortran")
     p.add_argument("--no-grow", action="store_true",
                    help="disable growth/condensation/nucleation in Fortran")
+    p.add_argument("--dtime", type=float, default=60.0,
+                   help="outer-step size [s]")
+    p.add_argument("--nstep", type=int, default=1440,
+                   help="number of outer steps (default 1440 = 24h at 60s)")
     args = p.parse_args()
     do_coag = not args.no_coag
     do_grow = not args.no_grow
@@ -95,7 +100,8 @@ def main():
         with cf.ThreadPoolExecutor(max_workers=args.workers) as ex:
             futs = [
                 ex.submit(run_one, args.binary, scenario_line(scens, i),
-                          work_dir, i, args.timeout, do_coag, do_grow)
+                          work_dir, i, args.timeout, do_coag, do_grow,
+                          args.dtime, args.nstep)
                 for i in range(n)
             ]
             done = 0
@@ -121,6 +127,7 @@ def main():
             print(f"  scen {idx}: {err[:200]}")
 
     nbin = 38
+    n_actual = args.nstep
     T_final = np.zeros(n)
     gc_final = np.zeros(n)
     pc_final = np.zeros((n, nbin))
@@ -157,7 +164,9 @@ def main():
                 nsub_arr[i], nret_arr[i] = s
         sched_out = args.out.with_name(args.out.stem + "_schedules.npz")
         np.savez_compressed(sched_out, nsubsteps_history=nsub_arr,
-                             nretries_history=nret_arr)
+                             nretries_history=nret_arr,
+                             dtime=np.array([args.dtime]),
+                             nstep=np.array([args.nstep]))
         print(f"Saved substep schedules: {sched_out}")
 
 
