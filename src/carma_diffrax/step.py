@@ -67,6 +67,10 @@ def diffrax_step(pc0, gc0, T0, dtime, env: FrozenEnv,
         "num_accepted_steps": int(sol.stats["num_accepted_steps"]),
         "num_rejected_steps": int(sol.stats["num_rejected_steps"]),
         "num_steps": int(sol.stats["num_steps"]),
-        "result": str(sol.result),
+        # `result` is a `diffrax.RESULTS` enumeration item. Compare via
+        # equality with `diffrax.RESULTS.successful` — `str()` returns an
+        # empty `<>` for the successful case under JIT trace.
+        "result": sol.result,
+        "successful": bool(sol.result == diffrax.RESULTS.successful),
     }
     return pc, gc, T, stats
