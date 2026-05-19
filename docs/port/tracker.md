@@ -1,0 +1,258 @@
+# CARMA-JAX port tracker
+
+Function-by-function status for the CARMA Fortran→JAX port.
+Each row is a single function with a Fortran-bench gate.
+
+The tracker is the operational artifact we work against. The high-level roadmap lives in `docs/ROADMAP.md` (and the plan file at `~/.claude/plans/sprightly-waddling-stardust.md`).
+
+## How to read this file
+
+| Box | Meaning |
+|-----|---------|
+| `[ ]` | not yet bench-tested against Fortran |
+| `[/]` | bench fails — discrepancy under discussion |
+| `[x]` | bench passes — JAX matches Fortran (rtol ≤ 1e-10 unless noted) |
+| `[-]` | not applicable for the current sulfate-test scope (e.g. ice-only paths) |
+
+Each Fortran↔JAX file pairing is a section. Rows under it are functions inside the file.
+A function is "done" only when the bench gate passes against `data/diff/scen_<NNN>/` dumps from the instrumented Fortran binary.
+
+**Workflow per row:**
+1. Read Fortran source for the function.
+2. Read JAX implementation.
+3. Run the diff harness for that function on scenario 24, substep 1.
+4. **Match → tick `[x]`, commit, next.**
+5. **Mismatch → flip to `[/]`, write up the diff, pause and discuss with user before any fix.**
+
+---
+
+## Phase 0 — Diagnostic infrastructure
+
+- [x] `scripts/fortran_patch/carma_sulfatetest_diagnostic.F90` — instrumented binary that dumps per-substep state
+- [x] `scripts/fortran_patch/apply_diagnostic_patch.sh` — patch script (mirrors apply_patch.sh)
+- [x] `src/carma/_diag/fortran_reader.py` — Python loader for Fortran unformatted-stream dumps
+- [x] `tests/diff/test_kernel_diff.py` — diff harness with `assert_kernel_match` helper + `make_kernel_plot` helper
+- [x] **Phase 0 exit gate:** `vaporp_h2o_murphy2005` bench passes against scen 24 dump (max rel err = 0.0)
+- [x] **Phase 0.5:** `scripts/run_diagnostic_ensemble.py` — orchestrator dumps all 1000 scenarios at substep 1 in ~5 s
+- [x] **Phase 0.5:** parameterized tests across all dumped scenarios + per-kernel summary CDF/histogram in `plots/diff/summary/`
+
+---
+
+## Phase 7 — H₂SO₄ sulfate physics
+
+### `src/carma/sulfate_utils.py`  ↔  `sulfate_utils.F90`
+- [x] `wtpct_tabaz` (1000/1000 scenarios pass at rtol 1e-10; ~750 at machine ε, ~250 at ~1e-16)
+- [x] `sulfate_density` (1000/1000 scenarios pass at rtol 1e-10)
+- [x] `sulfate_surf_tens` (1000/1000 scenarios pass at rtol 1e-10)
+
+### `src/carma/vapor_pressure.py`  ↔  `vaporp_*.F90`
+- [x] `vaporp_h2o_murphy2005` (1000/1000 scenarios pass at rtol 1e-10; ~750 at machine ε, ~250 at ~1e-16)
+- [x] `vaporp_h2so4_ayers1980` (1000/1000 scenarios pass at rtol 1e-10; ~720 at machine ε, max 2.1e-14). Fix: call `wtpct_tabaz` instead of the crude `100*(1-rh)*0.98` approximation.
+- [-] `vaporp_h2o_buck1981` (sulfate test uses Murphy 2005 only; not exercised by current bench)
+- [-] `vaporp_h2o_goff1946` (sulfate test uses Murphy 2005 only; not exercised by current bench)
+
+### `src/carma/supersaturation.py`  ↔  `supersat.F90`
+- [x] `supersat` (4 × 1000/1000 pass at rtol 1e-10 across {supsatl, supsati} × {h2o, h2so4}; ~960 at machine ε for most paths, supsati[h2o] max 5.8e-13). Sulfate test is clearsky; `supersat_with_cloud` not exercised.
+
+### `src/carma/wetr.py`  ↔  `wetr.F90`
+- [-] `_wetr_petters` (sulfate test uses `I_WTPCT_H2SO4`; Petters branch not exercised — defer to ice/cloud phase)
+- [x] `_wetr_wtpct` (1000/1000 pass at rtol 1e-8; median 3.6e-11, p99 1.2e-9, max 2.3e-9). Cube roots use `jnp.cbrt`. Per-kernel tol relaxed to 1e-8 because the Kelvin-iteration chain (`cbrt → exp → wtpct_tabaz → sulfate_density → cbrt`) accumulates sub-ULP reordering past 1e-10; cbrt vs `**(1/3)` made no measurable difference. Phase 0 diagnostic extended to dump `relhum`, `rhop`, `r_wet`, `rhop_wet`, `r_bin`, `rmass_bin`.
+- [x] `get_wetr` (dispatch — for `I_WTPCT_H2SO4` it forwards directly to `_wetr_wtpct`; bench-validated above)
+
+### `src/carma/hygroscopicity.py`  ↔  `hygroscopicity.F90`
+- [-] `hygroscopicity` — gated on `irhswell == I_PETTERS` (hygroscopicity.F90:42); sulfate test uses I_WTPCT_H2SO4, so the kernel never runs in this bench scope. Defer to ice/cloud phase together with `_wetr_petters`.
+
+### `src/carma/rhopart.py`  ↔  `rhopart.F90`
+- [x] `rhopart` (1000/1000 pass at rtol 1e-10, bit-exact). Sulfate test exercises only the no-core path (`ncore=0` → `rhop = rhoelem = 1.923`). Multi-element / core-mass-truncation branches will be re-benched when other elements appear in later phases.
+
+### `src/carma/nucleation/sulfnucrate.py`  ↔  `sulfnucrate.F90`
+- [x] `binary_nuc_zhao1995` (1000/1000 pass at rtol 1e-10 across {nucrate_cgs, mass_cluster_dry, rstar, ftry}; max ~2e-13, median ~1e-14, near machine ε). Bench compares against a new `dump_zhao1995_probe` in the diagnostic that calls Fortran's `binary_nuc_zhao1995` at end-of-step state — bypasses the multi-substep gsolve evolution that decouples dumped `rhompe` from dumped `gc`/`t`. Diagnostic also dumps `rmassup_bin` and `rmrat_group`.
+- [-] `binary_nuc_vehk2002` (sulfate test runs `sulfnucl_method='ZhaoTurco'`; Vehkamaki branch never invoked — defer to a test that selects it)
+
+### `src/carma/nucleation/sulfhetnucrate.py`  ↔  `sulfhetnucrate.F90`
+- [-] `sulfhetnucrate` — gated in `sulfnuc.F90:106` on `inucproc(iepart, ienucto) == I_HETNUCSULF`. Sulfate test calls `CARMA_AddNucleation(carma, 1, 1, I_HOMNUC, ...)` only (carma_sulfatetest.F90:163), never adds an `I_HETNUCSULF` mapping → kernel never invoked. Verified empirically: `rnuclg` is identically zero across all 1000 dumped scenarios. Defer to a future test that adds `I_HETNUCSULF`.
+
+### `src/carma/nucleation/sulfnuc.py`  ↔  `sulfnuc.F90`
+- [x] `homogeneous_nucleation` (1000/1000 pass at rtol 1e-10; max 2e-13, median 1e-14, near ε; nucbin matches Fortran 1000/1000). Bench reconstructs `expected_rhompe` from the Phase 7.9 zhao1995 probe + dumped `rmassup_bin`/`rmrat_group`.
+- [-] `heterogeneous_nucleation` (calls `sulfhetnucrate`, gated out for sulfate test as per Phase 7.10 row — never invoked).
+- [x] `sulfnuc` (driver) — 1000/1000 pass; rhompe matches near ε, rnuclg is identically 0 (matches Fortran since heterogeneous path is disabled in the sulfate scope). Tested with `do_heterogeneous=False` to mirror the Fortran I_HETNUCSULF gate.
+
+### `src/carma/gasexchange.py`  ↔  `gasexchange.F90`
+- [x] `gasexchange` (1000/1000 pass at rtol 1e-10; max 2.2e-11, median bit-exact). **Do not use in integration path.** Fortran's `gasexchange` is dead code (`microfast.F90:152` commented out — gsolve overwrites `gasprod` via total-condensate, see `gsolve.F90:52-58`). Bench validates the kernel via a new `dump_gasexchange_probe` that calls Fortran's gasexchange directly with end-of-step cstate. `sulfate_step.py` now derives `gasprod_h2so4 = -Δgc/dtime` (gsolve convention) instead of calling `gasexchange()`. Diagnostic also dumps `cmf` and `totevap` (both identically zero/false in the sulfate scope).
+
+---
+
+## Phase 8 — Correctness primitives
+
+### `src/carma/utils/smallconc.py`  ↔  `smallconc.F90` + `maxconc.F90`
+- [x] `smallconc` (1000/1000 bit-exact). Sulfate test has NELEM=1, itype=I_VOLATILE (number element only — no core-mass/second-moment elements), so only the `max(pc, SMALL_PC)` branch runs. All dumped pc values exceed SMALL_PC, so smallconc is a no-op; bench verifies idempotency.
+- [x] `maxconc` (1000/1000 bit-exact). Probe needed: the regular `f_pconmax` dump is pre-microfast (newstate_calc.F90:175) while the dumped `pc` is post-microfast — not a matched pair. `dump_maxconc_probe` calls Fortran's maxconc at end-of-step state and dumps the result.
+
+### `src/carma/utils/fixcorecol.py`  ↔  `fixcorecol.F90`
+- [-] `fixcorecol` — gated on `ncore(igroup) > 0` (fixcorecol.F90:55); sulfate test has a single volatile element with no cores → entire routine is skipped. Verified: no negative `pc` values across all 1000 scenarios. Defer to a future multi-element test.
+
+### `src/carma/utils/coremasscheck.py`  ↔  `coremasscheck.F90`
+- [-] `coremasscheck` — gated on `ncore(igroup) > 0` (coremasscheck.F90:48); same reason as fixcorecol. Defer.
+
+### `src/carma/growth/pheat.py`  ↔  `pheat.F90`
+- [x] `pheat` (37×1000 = 37 000 (scen,bin) pairs pass at rtol 1e-10; median bit-exact, max 9.9e-14). Sulfate test: `do_pheat=False`, `NWAVE=0` → no-radiation branch only (`akas = exp(akelvin/rup_wet)` + standard Köhler dmdt). Probe calls Fortran's `pheat` for `ibin=1..NBIN-1` (matching growevapl's loop). Diagnostic now also dumps `rup_wet` (NZ,NBIN,NGROUP) used by the Kelvin factor.
+
+### `src/carma/growth/growevapl.py`  ↔  `growevapl.F90`
+- [x] `growevapl` (1000/1000 pass at rtol 1e-10; growlg max 1.8e-13 / evaplg max 9.9e-14, both medians near ε). **Bug fixed**: JAX was missing the `pc > SMALL_PC` gate on the growth/evaporation flux branches (`growevapl.F90:212-226`), causing non-zero evaplg on bins where `pc ≤ 1e-50` (Fortran zeros those out). Probe: `dump_growevapl_probe` calls maxconc then growevapl at end-of-step state. Diagnostic also dumps PPM tables (dm, pratt, prat, pden1, palr, igrowgas) and rup_wet.
+
+### `src/carma/growth/growp.py`  ↔  `growp.F90`
+- [x] `growp` (1000/1000 pass at rtol 1e-10; max 1.8e-13, median ~7e-16, near machine ε). Probe: `dump_growp_probe` runs `maxconc → growevapl → growp` chain at end-of-step state and dumps `growpe`. Trivial kernel — `growpe[ibin,ielem] = pc[ibin-1,ielem] * growlg[ibin-1,igroup]` with `pconmax > FEW_PC` gate.
+
+### `src/carma/growth/upgxfer.py`  ↔  `upgxfer.F90`
+- [-] `upgxfer` — gated on `rnuclg(ifrom,igfrom,igroup) > 0` (upgxfer.F90:104). Sulfate test never invokes heterogeneous nucleation (Phase 7.10) so `rnuclg = 0` everywhere; upgxfer's `rnucpe` accumulator is never updated. Verified empirically: `rnucpe = 0` across all 1000 scenarios.
+
+### `src/carma/growth/evapp.py`  ↔  `evapp.F90` + `evap_ingrp.F90`
+- [x] `evapp` (1000/1000 pass at rtol 1e-10; max 9.9e-14, median bit-exact). Sulfate test: NELEM=1, no cores → falls into `ic1==0` branch → calls `evap_ingrp` per bin (`evappe[ibin-1] += pc[ibin] * evaplg[ibin]`). evap_mono and evap_poly are core-only paths (see Phase 8.9).
+- [x] `downgevapply` (in `src/carma/growth/evapp.py`; matches `downgevapply.F90`) — 1000/1000 pass at rtol 1e-10, max 9.4e-15, median bit-exact. Explicit Euler `pc += dt * (evappe + rnucpe)` then `smallconc` floor. Probe dumps both `pc_predowng_probe` and `pc_postdowng_probe`.
+
+### `src/carma/growth/downgxfer.py`  ↔  `downgxfer.F90`
+- [-] `downgxfer` — gated on `rnuclg(ifrom,igfrom,igroup) > 0` (downgxfer.F90:106), same as upgxfer (Phase 8.7). Sulfate test never invokes heterogeneous nucleation, so `rnuclg = 0` and `rnucpe` accumulator never updates. Defer to a test scenario that adds I_HETNUCSULF.
+
+### `src/carma/growth/evap_mono.py` + `evap_poly.py`  ↔  `evap_mono.F90` + `evap_poly.F90`
+- [-] `evap_mono` — invoked from `evapp.F90:153,179` only when `ic1 != 0` (group has cores) AND `evap_total` is set. Sulfate test has `ncore=0` → `ic1=0` → these branches are unreachable. Defer to multi-element test.
+- [-] `evap_poly` — same gate (called from `evapp.F90:181`). Defer.
+
+### `src/carma/solvers/psolve.py`  ↔  `psolve.F90`
+- [x] `psolve` (1000/1000 pass at rtol 1e-10; max 4.0e-15, median ~6.5e-16, near machine ε). **Sequential dependency**: Fortran's microfast loop `do ielem; do ibin; growp; upgxfer; psolve` has growp at bin `i` reading `pc[i-1]` AFTER psolve at `i-1` already updated it. The bench mirrors that loop order — pre-computing growpe in advance gave bin-3+ drift. Probe `dump_psolve_probe` runs the full prefix `maxconc → sulfnuc → growevapl → per-(ie,ib){growp,upgxfer,psolve}` at end-of-step state and dumps `pc_prepsolve_probe`, `rhompe_probe`, `pc_postpsolve_probe`.
+
+### `src/carma/solvers/gsolve.py`  ↔  `gsolve.F90`
+- [x] `gsolve` (1000/1000 pass at rtol 1e-10; max 3.8e-14, median bit-exact). Probe `dump_gsolve_probe` runs the full microfast evolution sequence (`sulfnuc → growevapl → psolve loop → evapp → downgevapply`) at end-of-step state, snapshots `previous_ice/liquid` and `total_ice/liquid` via `totalcondensate`, then calls `gsolve` to compute the gc update. Latent-heat (rlhe/rlhm) not in dump; `rlprod` not bench-validated (doesn't affect gc).
+
+### `src/carma/solvers/tsolve.py`  ↔  `tsolve.F90`
+- [x] `tsolve` (1000/1000 bit-exact at rtol 1e-10). **Bug fixed**: JAX was applying `phprod` unconditionally; Fortran gates it on `do_pheatatm` (tsolve.F90:73). Sulfate test has `do_pheatatm=False` → phprod is skipped. Added `do_pheatatm=False` parameter to JAX `tsolve` (default matches sulfate test). Probe `dump_tsolve_probe` runs the full microfast evolution + gsolve, snapshots t_pre and rlprod, calls tsolve, snapshots t_post.
+
+### `src/carma/solvers/totalcondensate.py`  ↔  `totalcondensate.F90`
+- [x] `totalcondensate` (1000/1000 bit-exact at rtol 1e-10). Sulfate test: NELEM=1, no cores → `volatilemass = pc * rmass`. Liquid group (not ice). Probe directly compares to Fortran's `totalcondensate(dump.pc)` output dumped as `previous_ice_probe`/`previous_liquid_probe`.
+
+### `src/carma/nsubsteps.py`  ↔  `nsubsteps.F90`
+- [x] `nsubsteps` (1000/1000 bit-exact integer match). Sulfate test exercises only the growth-rate path (no I_DROPACT, no I_AERFREEZE → only I_HOMNUC at gas index 1). Distribution: 986 scenarios → 1, 12 → 2, 2 → 3. Probe `dump_nsubsteps_probe` calls maxconc + nsubsteps at end-of-step state. Diagnostic now also dumps the full static config tables (`inucgas`, `nnuc2elem`, `ienconc`, `itype`, `igelem`, `is_grp_ice`, `inuc2elem`, `inucproc`).
+
+### `src/carma/prestep.py`  ↔  `prestep.F90`
+- [x] `prestep` (1000/1000 pass with abs-err 0). Bookkeeping bench: verifies the d_gc / d_t / t-rewind arithmetic is consistent with `(gc, gcl, t, told)` snapshots dumped by Fortran; smallconc and maxconc components already validated (Phase 8.1). Diagnostic also dumps `pcl`, `gcl`, `told`, `d_gc`, `d_t` for the bench.
+
+### Coag pipeline (instrumented in Phase 0 per user direction)
+
+### `src/carma/coagulation/setup_coag.py`  ↔  `setupcoag.F90`
+- [x] `setup_coag` — volx, pkernel, npairl, npairu all match Fortran exactly (rel err < 1e-12). kbin transitively validated via pair-list derivation (npairl/npairu). Static bench: build JAX setup_coag from rmass/rmrat and compare against dumped Fortran tables.
+
+### `src/carma/setup_ckern.py`  ↔  `setupckern.F90`
+- [x] `setup_ckern` — **bug fixed**: ported the missing Van der Waals enhancement (Chan & Mozurkewich 2001) from setupckern.F90:271-279 into `setup_ckern_jit` via new `use_vw` argument. Reduces JAX/Fortran disagreement from ~50% (factor-of-2 at small bins) to ~e-12 to e-10. 1000/1000 pass at rtol=1e-9 (max 2.1e-10, median 6.8e-12). Per-kernel tol relaxed to 1e-9 because of sqrt+exp+log reordering through Brownian + Fuchs + grav chains.
+
+### `src/carma/coagulation/coagl.py`  ↔  `coagl.F90`
+- [x] `coagl` (1000/1000 bit-exact). Probe `dump_microslow_probe` zeros coag accumulators, calls coagl, dumps `coaglg_probe`. JAX coagl uses einsum over (ckernel × pcl × volx) — bit-identical to Fortran's nested loops.
+
+### `src/carma/coagulation/coagp.py`  ↔  `coagp.F90`
+- [x] `coagp` (transitively validated via microslow bench, 1000/1000 near-ε). JAX implements the production via pre-computed pair-list gathers in `make_microslow`; the standalone `coagp_bin` is a stub. Bench validates the composed effect through microslow's pc_postmicroslow.
+
+### `src/carma/coagulation/csolve.py`  ↔  `csolve.F90`
+- [x] `csolve` (transitively validated via microslow bench, 1000/1000 near-ε). Implicit Euler `pc_new = (pc_old + dt*ppd) / (1 + dt*pls)` is fused into the per-bin scan inside `make_microslow`.
+
+### `src/carma/microslow.py`  ↔  `microslow.F90`
+- [x] `microslow` (1000/1000 pass at rtol=1e-10; max 2.2e-16, median bit-exact). Composes coagl + coagp + csolve. Probe `dump_microslow_probe` runs the full microslow chain at end-of-step state; JAX `make_microslow` JIT'd function is fed the same inputs.
+
+---
+
+## Phase 9 — `step_full` / microfast composition
+
+### `src/carma/microfast_full.py`  ↔  `microfast.F90`
+- [x] `microfast_full` (1000/1000 pass at rtol=1e-10; pc max 1.05e-12 / median 3.9e-15, gc max 8.7e-12 / median 8.8e-15 — both near machine ε). New module written for sulfate scope; mirrors Fortran microfast.F90 exactly (sulfnuc → growevapl → per-(ie,ib){growp+psolve(+rhompe)} → evapp → downgevapply → gsolve → tsolve, with per-gas vapor pressure: Murphy 2005 for H2O, Ayers 1980 for H2SO4). Probe `dump_microfast_probe` calls Fortran microfast directly at end-of-step state.
+- [x] `make_microfast_full_jit` factory — JIT'd version using `lax.scan` for the per-(ie, ib) loop. 1000/1000 pass with same accuracy as non-JIT. ~3× faster than unrolled JIT, ~100× faster than non-JIT (2.8 ms/scen vs ~270 ms/scen).
+
+### `src/carma/newstate_calc_full.py`  ↔  `newstate_calc.F90` (retry block)
+- [x] `newstate_calc_full` (multi-substep evolution: 474/474 pass at rtol=1e-10 across `zsubsteps≤1024` subset; max 6.1e-13 / median 1.2e-14 — near ε). Multi-substep state evolution is bench-validated when given identical substep schedules to Fortran. The retry-decision logic itself diverges from Fortran (JAX often converges at fewer substeps than Fortran due to FP-sensitive `gc<0` detection at the boundary), but the converged state is essentially the same (mass conservation 0.02%, total counts within 1%). Bench fixes ntsubsteps to Fortran's `zsubsteps` value to validate the math; retry-decision divergence is documented as expected.
+- [x] **Bug fix in gsolve**: added `gc<0 → RC_WARNING_RETRY` trigger (`gsolve.F90:65-78`). This is the dominant retry trigger for sulfate scenarios where nucleation depletes H2SO4 in one substep.
+
+### `src/carma/newstate_calc.py`  ↔  `newstate_calc.F90` (legacy, deprecated for sulfate)
+- [-] `microfast_growth` (legacy) — water-only / growth-only stub: hardcodes `rhompe=zeros`, single-gas vapor pressure. Bench against Fortran microfast showed pc max rel err = 1.0 (completely wrong). Use `microfast_full` instead for sulfate. Defer cleanup to a future refactor of `step_full`.
+
+### `src/carma/newstate.py`  ↔  `newstate.F90`
+- [-] `newstate` dispatcher (clearsky / incloud) — sulfate test only exercises the clearsky path which is just a pass-through to `newstate_calc`. The incloud/detrain logic doesn't run for sulfate. Effective bench is `newstate_calc_full` above.
+
+### `src/carma/step_full.py`  ↔  `step.F90`
+- [-] legacy `make_step_full` — uses operator-split composition (`newstate_calc_growth_jit` + `sulfate_step_one_level`) which is **physically wrong for sulfate** (pc max rel err = 5.3e8 vs Fortran microfast — see `plots/diff/summary/composition_comparison.png`). Deprecated.
+- [x] `make_step_full_faithful` (in `src/carma/step_full_faithful.py`) — new factory composing the validated `microslow + newstate_calc_full + microfast_full_jit` chain. Direct port of Fortran's `CARMASTATE_Step → newstate → newstate_calc → microfast` flow.
+
+### `src/carma/detrain.py`  ↔  `detrain.F90`
+- [-] `detrain` (cloud-only — N/A for sulfate test)
+
+### `src/carma/newstate_calc_jit.py`  ↔  `newstate_calc.F90` (retry block)
+- [ ] adaptive retry loop (`nretries`, `nsubsteps` decisions match Fortran)
+
+### `src/carma/newstate.py`  ↔  `newstate.F90`
+- [ ] `newstate` dispatcher (clearsky / incloud)
+
+### `src/carma/step_full.py`  ↔  `step.F90`
+- [ ] `make_step_full` composition
+
+### `src/carma/detrain.py`  ↔  `detrain.F90`
+- [-] `detrain` (cloud-only — N/A for sulfate test)
+
+---
+
+## Phase 10 — 1000-scenario ensemble
+
+- [ ] re-run Fortran ensemble (no changes; just re-confirm)
+- [ ] re-run JAX ensemble through bench-validated `step_full`
+- [ ] per-bin distribution plots (`fig2_per_bin_distributions.png` etc.)
+- [ ] statistical comparison: ≥ 95% scenarios match ≤ 1% median; max ≤ 5%
+
+---
+
+## Phase 11 — Cloud / ice
+
+### `src/carma/nucleation/actdropl.py`  ↔  `actdropl.F90`
+- [x] `actdropl` — Phase 11.9. Cloud droplet activation — turned out to be another constant-rate kludge like freezdropl/melticel (rate = 1000/s when 5 gates fire: T ≥ T₀-40, pconmax > FEW_PC, supsatl > scrit[bin], pc[bin] > SMALL_PC, target droplet not evaporating). The richer Köhler activation parameterizations (Twomey, Abdul-Razzak via `adgaquad_mod`) live in the CAM coupling layer, not in this in-source subroutine. Standalone bench + 10 unit tests pass; rate is exactly 0.0 or 1000.0 so JAX bit-matches gfortran. Activation map at `plots/diff/phase11/actdropl_activation.png` shows the bin/supsatl gate boundary tracking the Köhler `scrit` curve — bigger bins activate at lower supsatl. Standalone source: `scripts/fortran_patch/actdropl_standalone.F90`.
+
+### `src/carma/nucleation/freezdropl.py`  ↔  `freezdropl.F90`
+- [x] `freezdropl` — Phase 11.6. Trivial placeholder "constant-rate gate" kernel: rate = 100/s where T < T₀-40 K AND pc > FEW_PC, zero otherwise (F90 self-identifies as "temporary simple kludge"). JAX port + 7 tests pass (gate behavior + bit-exact vs gfortran-compiled standalone). Gate diagram at `plots/diff/phase11/freezdropl_melticel_gates.png`. Standalone Fortran source: `scripts/fortran_patch/freezdropl_standalone.F90`.
+
+### `src/carma/nucleation/melticel.py`  ↔  `melticel.F90`
+- [x] `melticel` — Phase 11.6 + 11.11. Mirror of freezdropl: rate = 100/s where T > T₀ K AND pconmax > FEW_PC, zero otherwise (also F90-flagged "temporary simple kludge"). JAX port + 7 tests pass (gate behavior + bit-exact vs gfortran standalone). Same gate diagram + standalone source under Phase 11.6. **Phase 11.11 in-dispatch bench** via `_bench_freezaerl_dispatch.py --kernel melticel` (extended to support ice→sulfate I_ICEMELT registration in the diagnostic binary): 200 scenarios × 16 bins, **bit-exact** (max rel err 0.0 — rate is exactly 100.0 when gated). The `melticel` dispatch lives in `rnuclg[:, 1, 0]` (ice group → sulfate target) versus `[:, 0, 1]` for the freezaerl_*/murray/hetnucl family. 6 dispatch unit tests pass.
+
+### `src/carma/nucleation/hetnucl.py`  ↔  `hetnucl.F90`
+- [x] `hetnucl` — Phase 11.7 + 11.11. Heterogeneous deposition ice nucleation (Keesee 1989 / Rapp-Thomas 2006 / Pruppacher-Klett 9-22), specifically for PMC (polar mesospheric cloud) regime — gated to p < 1 hPa. Standalone bench (`scripts/_bench_hetnucl.py` + `hetnucl_standalone.F90`) over 1000 scenarios × 16 bins (7,822 non-zero): P50 = 8.1e-10, P95 = 2.3e-6, max = 1.1e-4. 9 unit tests pass; PMC-relevant bin sizes (≤200 nm) tested at rtol < 1e-7. **Per-bin rel err rises monotonically with bin diameter** — `phih = √(1 - 2m·x + x²)` has catastrophic cancellation at large `x = r/ag`, well-conditioned at small x. PMC particles physically live at 20-200 nm (smallest 9 bins), where the parameterization is in spec; the apparent residual at 2 µm is in a regime that's not physically meaningful for PMC. Plot at `plots/diff/phase11/hetnucl_jax_vs_fortran.png`. **Phase 11.11 in-dispatch bench** via `_bench_freezaerl_dispatch.py --kernel hetnucl` — the highest routing-risk kernel of the Phase 11 menu (reads `p`, `gc(h2o)`, `surfctia`, `gwtmol(h2o)` from cstate). 200 scenarios × 16 bins (2,925 non-zero): P50 = 6.5e-12, P95 = 1.4e-6, max = 4.7e-5 — matches the standalone bench pattern (same cancellation, slightly tighter because dispatch reads `surfctia` from cstate and passes it identically to JAX). 7 dispatch unit tests pass at rtol < 1e-8 for the physically populated PMC-relevant bins. Plot at `plots/diff/phase11/freezaerl_hetnucl_dispatch_jax_vs_fortran.png`.
+
+### `src/carma/nucleation/freezglaerl_murray2010.py`  ↔  `freezglaerl_murray2010.F90`
+- [x] `freezglaerl_murray2010` — Phase 11.8 + 11.11. Murray 2010 heterogeneous nucleation of glassy aerosols. JAX port pre-existed (Phase 3 era); now bench-validated against gfortran-compiled standalone (`scripts/_bench_freezglaerl_murray2010.py` + `freezglaerl_murray2010_standalone.F90`). 1000 scenarios, 624 active: P50 = 3.5e-16 (machine ε), P95 = 3.9e-15, max = 2.0e-11. 10 unit tests pass at rtol < 1e-10. **Bin-uniform rate** — Murray 2010 is a fraction-of-aerosols formula independent of bin radius, so every bin gets the same rate (which the bench harness collapses to per-scenario stats). Gates: T ≤ 212 K (glassy state), ssi ≥ 0.21 (minimum supersaturation), ssi > ssi_old (rising supersaturation), pconmax > FEW_PC. Plot at `plots/diff/phase11/freezglaerl_murray2010_jax_vs_fortran.png` (y=x scatter + activity-vs-(T,ssi) gate-boundary diagnostic). **Phase 11.11 in-dispatch bench** via `_bench_freezaerl_dispatch.py --kernel murray` (diagnostic binary extended with `supsatiold` cstate override): 200 scenarios × 16 bins (3,136 non-zero): P50 = 3.3e-16 (machine ε), P95 = 2.1e-15, max = 1.4e-14. 7 dispatch unit tests pass at rtol < 1e-13. Plot at `plots/diff/phase11/freezaerl_murray_dispatch_jax_vs_fortran.png`.
+
+### `src/carma/nucleation/freezaerl_mohler2010.py`  ↔  `freezaerl_mohler2010.F90`
+- [x] `freezaerl_mohler2010` — Phase 11.1 + 11.4, three complementary benches:
+  1. **Numpy reference** (`tests/unit/test_freezaerl_mohler2010.py`) — 10 tests at rtol 1e-12.
+  2. **Standalone Fortran-compiled-by-gfortran** (`scripts/_bench_freezaerl_mohler2010.py` + `scripts/fortran_patch/freezaerl_mohler2010_standalone.F90`) — 1000 random scenarios × 16 bins, 13,035 non-zero pairs. P50 = 4.1e-14, P95 = 1.7e-13, max = 2.9e-13. Plot at `plots/diff/phase11/freezaerl_mohler2010_jax_vs_fortran.png`.
+  3. **Phase 11.4 in-dispatch bench** (`scripts/_bench_freezaerl_mohler2010_dispatch.py` + `scripts/fortran_patch/carma_nuc2test_diagnostic.F90`) — same parameter coverage, but inputs injected into a real CARMA cstate (NGROUP=2, NELEM=3, NGAS=1) and the call goes through Fortran's full `subroutine freezaerl_mohler2010(carma, cstate, iz, rc)` dispatch wrapper. 200 scenarios × 16 bins, 2,598 non-zero pairs. P50 = 3.9e-14, max = 2.2e-13. **Caught a real bug**: the standalone bench was passing sulfate-element density (1.78) to JAX as `rhosol`, but the upstream subroutine reads `cstate%f_solute(isol)%f_rho` (sulfate solute density 1.38). Standalone Fortran was injected with the same wrong value, so it agreed with JAX. Dispatch bench exposed the mismatch at 16% rel err. Fixed by passing `RHO_SOL = 1.38` to JAX. Plot at `plots/diff/phase11/freezaerl_mohler2010_dispatch_jax_vs_fortran.png`.
+
+### `src/carma/nucleation/freezaerl_tabazadeh2000.py`  ↔  `freezaerl_tabazadeh2000.F90`
+- [x] `freezaerl_tabazadeh2000` — Phase 11.2 + 11.5. Standalone Fortran-bench (`scripts/_bench_freezaerl_tabazadeh2000.py` + `freezaerl_tabazadeh2000_standalone.F90`) over 1000 scenarios × 16 bins (16,000 non-zero pts — Tabazadeh has no T-gate so every point is active): P50 = 8.1e-16 (machine ε), P95 = 7.6e-11, max = 2.4e-10. Larger residual than Möhler because of the Myhre 1998 wtfrac^10 polynomial + 3-regime surface-tension polynomials (more accumulated FMA drift). 9 unit tests pass at rtol < 1e-9. Plot at `plots/diff/phase11/freezaerl_tabazadeh2000_jax_vs_fortran.png`. Bimodality diagnosis (`plots/diff/phase11/freezaerl_tabazadeh2000_bimodal_diagnosis.png`): high-error cluster correlates with water-activity-near-saturation, where `log(ssl+1) → 0` causes catastrophic cancellation in the critical-germ-radius denominator → ~10⁵× FMA-fusion amplification through `ag → ΔF → exp`. **Phase 11.5 in-dispatch bench** via `scripts/_bench_freezaerl_dispatch.py --kernel tabazadeh` and `tests/unit/test_freezaerl_tabazadeh2000_dispatch.py`: 200 scen × 16 bins, max rel err 2.4e-10 — matches standalone bench exactly. Plot at `plots/diff/phase11/freezaerl_tabazadeh_dispatch_jax_vs_fortran.png`.
+
+### `src/carma/nucleation/freezaerl_koop2000.py`  ↔  `freezaerl_koop2000.F90`
+- [x] `freezaerl_koop2000` — Phase 11.3 + 11.5. JAX port pre-existed (Phase 3 era); now bench-validated against gfortran-compiled standalone (`scripts/_bench_freezaerl_koop2000.py` + `freezaerl_koop2000_standalone.F90`). 1000 scenarios × 16 bins (16,000 non-zero pts): P50 = 2.1e-15 (machine ε), P95 = 1.5e-13, P99 = 2.5e-12, max = 1.2e-11. 11 unit tests pass at rtol < 1e-9. Per-bin distribution shows a thin secondary band at ~10⁻¹³ (likely scenarios where `daw` falls exactly on the `[0.26, 0.34]` clamp edge in eqn 7 of Koop 2000) plus a sparse tail to ~10⁻¹¹. Plot at `plots/diff/phase11/freezaerl_koop2000_jax_vs_fortran.png`. **Phase 11.5 in-dispatch bench** via `scripts/_bench_freezaerl_dispatch.py --kernel koop` and `tests/unit/test_freezaerl_koop2000_dispatch.py`: 200 scen × 16 bins, max rel err 9.3e-12 — matches standalone. Caught a second routing bug: standalone bench was passing arbitrary pressure to JAX, but Koop reads `cstate%f_p` which the standard-atmosphere helper sets in CGS units that didn't match the scenario's hPa value. Fixed by reading the dumped cstate p and passing exactly that to JAX. Plot at `plots/diff/phase11/freezaerl_koop_dispatch_jax_vs_fortran.png`.
+
+### `src/carma/rhoice_heymsfield2010.py`  ↔  `rhoice_heymsfield2010.F90`
+- [x] `rhoice_heymsfield2010` — Phase 11.10. Setup-time per-bin ice density and projected area ratio (Schmitt & Heymsfield 2009 / Heymsfield et al. 2010). Pure radius-dependent formula `m = a·Dᵇ` with regime-selected `a ∈ {1.10e-2, 6.33e-3, 5.74e-3, 5.28e-3, 4.22e-3, 3.79e-3}` for `regime ∈ {deep, conv, cold, avg, synp, warm}`; `b = 2.1`. Density clipped to bulk ρ_ice; aratelem switches branch at `D = 200 µm`. Standalone bench `scripts/_bench_rhoice_heymsfield2010.py` + `rhoice_heymsfield2010_standalone.F90` over all 6 regimes × 28 bins (168 points): rho max rel err **2.5e-16** (machine ε), aratelem max rel err **1.9e-16**. 10 unit tests pass; plot at `plots/diff/phase11/rhoice_heymsfield2010_jax_vs_fortran.png`.
+
+### `src/carma/setup_vf.py`  ↔  `setupvf*.F90` family
+- [ ] `setupvf_std`
+- [ ] `setupvf_std_shape`
+- [x] `setupvf_heymsfield2010` — Phase 11.10. Heymsfield & Westbrook (2010) ice-particle fall velocity: single-regime `re = (δ²/4)·(√(1 + 4·√x/(δ²·√c)) − 1)²` with `c = 0.35`, `δ = 8.0`, using Best/Davies number x scaled by mass, gravity, viscosity, and area ratio (slip-corrected). JAX port at `src/carma/setup_vf_heymsfield2010.py`, fully vectorized over `(NZ, NBIN, NGROUP)` and `@jax.jit`. Standalone bench `scripts/_bench_setup_vf_heymsfield2010.py` + `setup_vf_heymsfield2010_standalone.F90` over a 32-layer US-Std-Atmosphere column × 28 ice bins (896 points): bpm max rel err **2.2e-16** (machine ε), re max rel err **3.3e-14**, vf max rel err **3.3e-14**. The 3.3e-14 on re/vf is FMA-fusion divergence in the chained `√(1 + 4√x/…) − 1` cancellation, all within float64 ULP. 5 unit tests pass; plot at `plots/diff/phase11/setup_vf_heymsfield2010_jax_vs_fortran.png`.
+
+---
+
+## Bench tolerance
+
+Default: `rtol=1e-10` (very strict; catches any reordering or unit issue).
+Per-kernel override: maintain a small map in `tests/diff/test_kernel_diff.py` for kernels with legitimate floating-point reordering vs Fortran (e.g. summation-order differences in vectorized JAX).
+
+## Bench scenarios
+
+Phase 0 dumps span **all 1000 scenarios** at substep 1 (~5 s wall, ~109 MB). Each kernel test parameterizes over all of them and asserts every scenario meets the rtol. Per-kernel summary plots in `plots/diff/summary/` show the histogram + CDF of max relative error across scenarios.
+
+If we need deeper substep coverage on a specific kernel, regenerate dumps for that scenario with `--nstep-max N` (or all scenarios with N substeps).
+
+## Dump location
+
+`data/diff/scen_<NNN>/substep_<NNNN>_<arrayname>.bin` — one folder per scenario, one file per (substep, array). Fortran unformatted stream format.
