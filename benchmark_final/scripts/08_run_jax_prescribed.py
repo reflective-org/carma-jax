@@ -130,11 +130,18 @@ def main():
     scens = np.load(args.scenarios)
     sched = np.load(args.schedules)
     n = int(scens["_n"])
-    nsub_history = sched["nsubsteps_history"]   # shape (N, nstep)
+    # Fortran's CARMASTATE_Get(nsubstep=...) is a CUMULATIVE counter across
+    # all outer steps. Per-outer-step count = diff. Prepend the first value
+    # (which is the per-step count for step 0, since cumulative starts at 0).
+    nsub_cumulative = sched["nsubsteps_history"].astype(np.int64)
+    first_col = nsub_cumulative[:, :1]
+    nsub_history = np.concatenate(
+        [first_col, np.diff(nsub_cumulative, axis=1)], axis=1)
+    nsub_history = np.clip(nsub_history, 1, None)   # safety floor
     nstep = nsub_history.shape[1]
-    print(f"Loaded schedules: ({n}, {nstep}). "
-          f"min nts={nsub_history.min()}, max nts={nsub_history.max()}, "
-          f"mean nts={nsub_history.mean():.1f}")
+    print(f"Loaded schedules: ({n}, {nstep}). Per-outer-step counts: "
+          f"min={nsub_history.min()}, max={nsub_history.max()}, "
+          f"mean={nsub_history.mean():.1f}, median={np.median(nsub_history):.0f}")
 
     work = []
     for i in range(n):
