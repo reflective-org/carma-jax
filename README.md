@@ -150,3 +150,7 @@ src/carma/
 Plots from 1000-scenario Fortran vs JAX comparison are in `plots/`:
 - `fortran_vs_jax_47bin/` — Error distributions, per-bin analysis, timing
 - `coagtest_validation/` — Single benchmark comparison with time evolution
+
+## 🔒 License
+
+This project is released under the Apache 2.0 License - see the [LICENSE](https://github.com/reflective-org/sai-simulator/blob/main/LICENSE) file for details.

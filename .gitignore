@@ -7,3 +7,7 @@ scripts/fortran_runner/test_coag_*
 __pycache__/
 *.egg-info/
 .pytest_cache/
+.DS_Store
+*.pyc
+.venv/
+.ipynb_checkpoints/
