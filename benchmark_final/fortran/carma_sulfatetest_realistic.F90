@@ -64,12 +64,22 @@ subroutine test_sulfate_realistic()
 
   ! NEW scenario inputs: production rate (molec/cm³/s) and seed mass (µg/m³)
   character(len=512)        :: scenario_path, output_path, arg3, arg4, arg5, arg6
+  character(len=512)        :: arg7
   real(kind=f)              :: T_scen, p_scen_hPa, rh_scen
   real(kind=f)              :: h2so4_prod_rate                 ! molec/cm³/s
   real(kind=f)              :: M_total_ug_m3                    ! µg/m³
   real(kind=f)              :: mu_nm, sigma_g
   integer                   :: unit_in, unit_out, ios
   logical                   :: do_coag_flag, do_grow_flag      ! runtime toggles
+  ! NEW: optional "fixed [H2SO4]" mode for condensation-only validation.
+  ! When fixed_h2so4_mol_cm3 > 0, gc[H2SO4] is RESET to the target value
+  ! at the start of every outer step (instead of being incremented by
+  ! the production rate). Also resets T to its initial value each step,
+  ! so the run is isothermal. Used for textbook condensation tests where
+  ! you want to compare against an analytic kinetic-regime growth rate.
+  real(kind=f)              :: fixed_h2so4_mol_cm3
+  real(kind=f)              :: fixed_h2so4_mmr
+  real(kind=f)              :: T_init_save
 
   type(carma_type), target            :: carma
   type(carma_type), pointer           :: carma_ptr
@@ -108,10 +118,13 @@ subroutine test_sulfate_realistic()
   integer                      :: unit_hist
 
   if (command_argument_count() < 2) then
-    write(0, '(A)') 'usage: <scenario_file> <output_file> [do_coag=1] [do_grow=1] [dtime=60] [nstep=1440]'
+    write(0, '(A)') 'usage: <scenario_file> <output_file> [do_coag=1] [do_grow=1] [dtime=60] [nstep=1440] [fixed_h2so4_molcm3=0]'
     write(0, '(A)') '  do_coag, do_grow: 1 (on) or 0 (off). Defaults: both on.'
     write(0, '(A)') '  dtime: outer-step size in seconds. Default 60.'
     write(0, '(A)') '  nstep: number of outer steps. Default 1440 (24 h at 60 s).'
+    write(0, '(A)') '  fixed_h2so4_molcm3: if > 0, reset gc[H2SO4] to this value (molec/cm^3)'
+    write(0, '(A)') '                       each step and skip the production injection;'
+    write(0, '(A)') '                       also reset T to initial each step. Default 0 (off).'
     call exit(2)
   end if
   call get_command_argument(1, scenario_path)
@@ -120,6 +133,7 @@ subroutine test_sulfate_realistic()
   do_grow_flag = .true.
   dtime = 60._f
   nstep = 1440
+  fixed_h2so4_mol_cm3 = 0._f
   if (command_argument_count() >= 3) then
     call get_command_argument(3, arg3)
     if (trim(arg3) == '0') do_coag_flag = .false.
@@ -141,6 +155,14 @@ subroutine test_sulfate_realistic()
     read(arg6, *, iostat=ios) nstep
     if (ios /= 0) then
       write(0, '(A, A)') 'invalid nstep: ', trim(arg6)
+      call exit(2)
+    end if
+  end if
+  if (command_argument_count() >= 7) then
+    call get_command_argument(7, arg7)
+    read(arg7, *, iostat=ios) fixed_h2so4_mol_cm3
+    if (ios /= 0) then
+      write(0, '(A, A)') 'invalid fixed_h2so4_molcm3: ', trim(arg7)
       call exit(2)
     end if
   end if
@@ -274,12 +296,29 @@ subroutine test_sulfate_realistic()
   nretries_history(:) = 0
   allocate(t_history(nstep), gc_history(nstep, NGAS), pc_history(nstep, NBIN))
 
+  ! For fixed-H2SO4 mode: convert target [H2SO4] (molec/cm^3) → mmr (g/g),
+  ! and snapshot the initial temperature so we can reset T each step.
+  if (fixed_h2so4_mol_cm3 > 0._f) then
+    fixed_h2so4_mmr = fixed_h2so4_mol_cm3 * M_H2SO4_g_per_mol &
+                       / (N_A * rho_air_g_cm3)
+    T_init_save = t(1)
+    write(0, '(A, ES12.5, A, ES12.5, A)') &
+        '  fixed-H2SO4 mode: target = ', fixed_h2so4_mol_cm3, &
+        ' molec/cm^3 = ', fixed_h2so4_mmr, ' mmr; T reset = on'
+  end if
+
   do istep = 1, nstep
     time = (istep - 1) * dtime
 
-    ! NEW: inject H2SO4 production into the gas reservoir BEFORE the
-    ! microphysics step, so growth/nucleation see it within the step.
-    mmr_gas(:,2) = mmr_gas(:,2) + dmmr_h2so4_per_step
+    if (fixed_h2so4_mol_cm3 > 0._f) then
+      ! Fixed-H2SO4 mode: hold [H2SO4] constant and reset T to initial.
+      mmr_gas(:,2) = fixed_h2so4_mmr
+      t(:) = T_init_save
+    else
+      ! NEW: inject H2SO4 production into the gas reservoir BEFORE the
+      ! microphysics step, so growth/nucleation see it within the step.
+      mmr_gas(:,2) = mmr_gas(:,2) + dmmr_h2so4_per_step
+    end if
 
     call CARMASTATE_Create(cstate, carma_ptr, time, dtime, NZ, &
         I_CART, lat, lon, zc(:), zl(:), p(:), pl(:), t(:), rc, &
