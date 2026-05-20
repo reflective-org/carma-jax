@@ -49,8 +49,14 @@ P_PA = P_HPA * 100.0
 RH = 0.30
 N0 = 1.0e4
 GSD = 1.60
-DTIME = 60.0
-NSTEP = 1440
+# Coarser outer-step than the gas-depletion timescale would let Fortran
+# and faithful JAX see gas depletion *between* resets, biasing growth
+# downward. Pick dt small enough that gas barely depletes per step.
+# At [H2SO4]=1e7 cm^-3, N=1e4, the depletion timescale is ~25 s. We use
+# dt=1s for Fortran/faithful so gas is reset before noticeable depletion.
+# Diffrax holds dgc/dt=0 internally, so its dt doesn't matter for this.
+DTIME = 1.0
+NSTEP = 86400
 M_H2SO4 = 98.078479
 AVG = 6.02252e23
 RPA2CGS = 10.0
