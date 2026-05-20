@@ -108,7 +108,17 @@ def _bin_transfer(dmdt_inner: jnp.ndarray, pc_g: jnp.ndarray,
     n_at = jnp.where(dmdt > 0, pc_g / dm_g, pc_above / dm_above)
     F = dmdt * n_at                                     # (nbin,) [#/cm^3/s]
     F_below = jnp.concatenate([zero, F[:-1]])
-    return F_below - F                                  # d(pc)/dt for this group
+    dpc_dt = F_below - F                                # d(pc)/dt for this group
+    # Bin-0 evap-out sink (mirrors Fortran growevapl L243-249): when
+    # boundary 0 is in evap mode, bin 0 also drains "downward" — physically,
+    # sub-monomer cluster dissolves back into vapor. Without this, particles
+    # entering bin 0 via downward upwind flux accumulate forever.
+    evap_bin0_out = jnp.where(
+        dmdt[0] < 0,
+        -dmdt[0] / dm_g[0] * pc_g[0],
+        DTYPE(0.0),
+    )
+    return dpc_dt.at[0].add(-evap_bin0_out)
 
 
 def make_rhs_ms(*args, **kwargs):

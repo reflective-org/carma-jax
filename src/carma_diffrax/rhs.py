@@ -183,6 +183,24 @@ def _make_rhs_args(shape: StateShape):
 
         dpc_dt_ge = F_n_below - F_n                             # (nbin,)
 
+        # Bin-0 evap-out channel (mirrors Fortran growevapl L243-249).
+        # Bin 0 is sub-monomer (rmass[0] ≈ half an H₂SO₄ molecule), so when
+        # boundary 0 is in evap mode (dmdt[0] < 0), bin-0 particles also
+        # "evaporate" — physically, dissolve back into gas-phase monomers
+        # rather than going to a non-existent bin -1. Without this sink,
+        # particles entering bin 0 via downward upwind flux accumulate
+        # indefinitely and inflate the total-N count.
+        # Loss rate from bin 0 matches the rate at which bin 1 particles
+        # are crossing boundary 0 inward (|dmdt[0]|/dm[0] per particle):
+        evap_bin0_out = jnp.where(
+            dmdt[0] < 0,
+            -dmdt[0] / dm_g[0] * pc_elem[0],
+            DTYPE(0.0),
+        )
+        dpc_dt_ge = dpc_dt_ge.at[0].add(-evap_bin0_out)
+        # Mass returns to gas automatically via the
+        # dgc/dt = -d(particle_mass)/dt formula below.
+
         # --- 5) Nucleation rate (homogeneous; heterogeneous off for sulfate) ---
         h2o_cgs = gc_2d[iz, _IGAS_H2O] / env.zmet[iz]
         h2so4_cgs = gc_2d[iz, _IGAS_H2SO4] / env.zmet[iz]
