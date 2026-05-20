@@ -1,0 +1,292 @@
+"""60-second-timestep parity: Fortran vs diffrax on v2 ensemble.
+
+24h simulation (1440 outer steps × 60 s) on 100 scenarios. At this
+timestep both algorithms are in their stable regime; the comparison is
+the parity check Fortran was designed for.
+
+Panels:
+  (a) Total particle number — diffrax vs Fortran scatter
+  (b) Total particle mass   — diffrax vs Fortran scatter
+  (c) Bin-by-bin rel err — number
+  (d) Bin-by-bin rel err — mass
+  (e) Summary stats panel
+
+Inputs:
+  benchmark_final/scenarios/realistic_scenarios_100_v2.npz
+  benchmark_final/outputs/dt60/v2/adaptive/fortran_outputs.npz
+  benchmark_final/outputs/dt60/v2/diffrax/jax_diffrax_outputs.npz
+
+Output:
+  benchmark_final/plots/v2_60s_parity/parity.png
+"""
+import json
+import math
+import sys
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib.lines import Line2D
+from matplotlib.ticker import LogLocator
+
+ROOT = Path(__file__).resolve().parents[1]
+REPO = ROOT.parent
+sys.path.insert(0, str(REPO / "scripts"))
+from jax_ensemble import _minimal_config
+from carma.constants import R_AIR
+
+
+def bin_diameters_nm(nbin=38, rmin_cm=2e-8, rmrat=2.0, rho=1.923):
+    vmin = (4.0 / 3.0) * math.pi * rmin_cm ** 3 * rho
+    rmass = vmin * rmrat ** np.arange(nbin)
+    r = (3.0 * rmass / (4.0 * math.pi * rho)) ** (1.0 / 3.0)
+    return 2.0 * r * 1e7
+
+
+def main():
+    OUT_DIR = ROOT / "plots" / "v2_60s_parity"
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    S = np.load(ROOT / "scenarios" / "realistic_scenarios_100_v2.npz")
+    F = np.load(ROOT / "outputs" / "dt60" / "v2" / "adaptive"
+                 / "fortran_outputs.npz")
+    D = np.load(ROOT / "outputs" / "dt60" / "v2" / "diffrax"
+                 / "jax_diffrax_outputs.npz")
+
+    cfg = _minimal_config()
+    rmass = np.asarray(cfg.groups[0].rmass)        # g per bin
+    d_nm = bin_diameters_nm(cfg.nbin)
+
+    # Conversion factor MMR (g/g) → #/cm^3 of air for Fortran outputs,
+    # which store pc_final as mmr per bin.
+    rho_air = S["p"] * 100.0 * 10.0 / (float(R_AIR) * S["T"])
+
+    # IMPORTANT: both Fortran and diffrax runners save pc_final in MMR
+    # (g/g) — the diffrax runner divides by rhoa before saving. Use the
+    # same conversions for both.
+    pc_F_mmr = F["pc_final"]                        # (n, nbin) mmr
+    pc_D_mmr = D["pc_final"]                        # (n, nbin) mmr
+
+    # Number per bin [#/cm³ air] = mmr × rho_air / rmass
+    num_F = pc_F_mmr * rho_air[:, None] / rmass[None, :]
+    num_D = pc_D_mmr * rho_air[:, None] / rmass[None, :]
+    # Mass per bin [µg/m³] = mmr × rho_air × 1e12
+    mass_F = pc_F_mmr * rho_air[:, None] * 1e12
+    mass_D = pc_D_mmr * rho_air[:, None] * 1e12
+
+    # Total per scenario
+    N_total_F = num_F.sum(axis=1)
+    N_total_D = num_D.sum(axis=1)
+    M_total_F = mass_F.sum(axis=1)
+    M_total_D = mass_D.sum(axis=1)
+
+    # Per-scenario relative error of totals
+    rel_N = np.abs(N_total_D - N_total_F) / np.maximum(N_total_F, 1e-30)
+    rel_M = np.abs(M_total_D - M_total_F) / np.maximum(M_total_F, 1e-30)
+
+    fortran_fail = F["gc_h2so4_final"] < 0   # ceiling-hit mask
+
+    fig = plt.figure(figsize=(18, 12))
+    gs = fig.add_gridspec(3, 3, height_ratios=[1.0, 1.0, 0.6],
+                            hspace=0.40, wspace=0.30)
+
+    # ---------- (a) Total number scatter ----------
+    ax = fig.add_subplot(gs[0, 0])
+    ok = ~fortran_fail
+    ax.scatter(N_total_F[ok], N_total_D[ok], s=30, alpha=0.6,
+                color="steelblue", label=f"Fortran OK (n={ok.sum()})")
+    if fortran_fail.any():
+        ax.scatter(N_total_F[fortran_fail], N_total_D[fortran_fail],
+                    s=50, color="crimson", marker="x",
+                    label=f"Fortran ceiling-hit (n={fortran_fail.sum()})")
+    lo, hi = min(N_total_F[N_total_F>0].min(), N_total_D[N_total_D>0].min()), \
+             max(N_total_F.max(), N_total_D.max())
+    ax.plot([lo, hi], [lo, hi], "k--", lw=1, alpha=0.6, label="1:1")
+    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.set_xlabel("Fortran Σ N  [#/cm³]"); ax.set_ylabel("Diffrax Σ N  [#/cm³]")
+    ax.set_title("(a) Total particle number")
+    ax.legend(fontsize=8); ax.grid(alpha=0.3, which="both")
+
+    # ---------- (b) Total mass scatter ----------
+    ax = fig.add_subplot(gs[0, 1])
+    ax.scatter(M_total_F[ok], M_total_D[ok], s=30, alpha=0.6,
+                color="steelblue", label=f"Fortran OK (n={ok.sum()})")
+    if fortran_fail.any():
+        ax.scatter(M_total_F[fortran_fail], M_total_D[fortran_fail],
+                    s=50, color="crimson", marker="x",
+                    label=f"Fortran ceiling-hit (n={fortran_fail.sum()})")
+    lo, hi = min(M_total_F[M_total_F>0].min(), M_total_D[M_total_D>0].min()), \
+             max(M_total_F.max(), M_total_D.max())
+    ax.plot([lo, hi], [lo, hi], "k--", lw=1, alpha=0.6, label="1:1")
+    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.set_xlabel("Fortran Σ mass  [µg/m³]")
+    ax.set_ylabel("Diffrax Σ mass  [µg/m³]")
+    ax.set_title("(b) Total particle mass")
+    ax.legend(fontsize=8); ax.grid(alpha=0.3, which="both")
+
+    # ---------- (c) Total rel err per scenario ----------
+    ax = fig.add_subplot(gs[0, 2])
+    rng = np.random.default_rng(0)
+    x_N = 1 + rng.normal(0, 0.05, size=ok.sum())
+    x_M = 2 + rng.normal(0, 0.05, size=ok.sum())
+    ax.scatter(x_N, rel_N[ok], s=20, alpha=0.6, color="steelblue")
+    ax.scatter(x_M, rel_M[ok], s=20, alpha=0.6, color="darkorange")
+    if fortran_fail.any():
+        ax.scatter(np.full(fortran_fail.sum(), 1.0),
+                    rel_N[fortran_fail], s=40, color="crimson", marker="x")
+        ax.scatter(np.full(fortran_fail.sum(), 2.0),
+                    rel_M[fortran_fail], s=40, color="crimson", marker="x")
+    ax.axhline(0.01, color="green", ls="--", lw=1, alpha=0.8, label="1%")
+    ax.axhline(0.05, color="orange", ls="--", lw=1, alpha=0.8, label="5%")
+    ax.set_yscale("log"); ax.set_ylim(1e-12, 2)
+    ax.set_xticks([1, 2]); ax.set_xticklabels(["ΣN", "ΣM"])
+    ax.set_ylabel("|D - F| / F  (per-scenario)")
+    ax.set_title(f"(c) Total rel err\nmedian ΣN={np.median(rel_N[ok]):.1e}, "
+                  f"ΣM={np.median(rel_M[ok]):.1e}")
+    ax.legend(fontsize=8); ax.grid(alpha=0.3, which="both")
+
+    # ---------- (d) Bin-by-bin rel err — number ----------
+    ax = fig.add_subplot(gs[1, 0])
+    _binbybin_panel(ax, num_F, num_D, ok, fortran_fail, d_nm,
+                     threshold=1e-3, ylabel="rel err — N per bin",
+                     title="(d) Number per bin — rel err")
+    # ---------- (e) Bin-by-bin rel err — mass ----------
+    ax = fig.add_subplot(gs[1, 1])
+    _binbybin_panel(ax, mass_F, mass_D, ok, fortran_fail, d_nm,
+                     threshold=1e-6, ylabel="rel err — M per bin [µg/m³]",
+                     title="(e) Mass per bin — rel err")
+
+    # ---------- (f) Summary stats ----------
+    ax = fig.add_subplot(gs[1, 2]); ax.axis("off")
+    text = (
+        "60-second timestep parity (24 h sim)\n"
+        "─────────────────────────────────────\n"
+        f"Scenarios            : 100 (v2)\n"
+        f"Outer steps          : 1440 × 60 s = 24 h\n"
+        "\n"
+        "Fortran (Euler+retry):\n"
+        f"  wall              {float(F['wall_time_s'][0]):.0f} s\n"
+        f"  ceiling-hits      {fortran_fail.sum()}/100\n"
+        "\n"
+        "Diffrax (Kvaerno5+PID+Chord):\n"
+        f"  wall              {float(D['wall_time_s'][0]):.0f} s\n"
+        f"  failures          {(D['n_failures']>0).sum()}/100\n"
+        "\n"
+        "Total Σ N rel err (Fortran-OK):\n"
+        f"  median            {np.median(rel_N[ok]):.2e}\n"
+        f"  P95               {np.percentile(rel_N[ok], 95):.2e}\n"
+        f"  max               {rel_N[ok].max():.2e}\n"
+        "\n"
+        "Total Σ M rel err (Fortran-OK):\n"
+        f"  median            {np.median(rel_M[ok]):.2e}\n"
+        f"  P95               {np.percentile(rel_M[ok], 95):.2e}\n"
+        f"  max               {rel_M[ok].max():.2e}\n"
+    )
+    ax.text(0.0, 1.0, text, transform=ax.transAxes, va="top", ha="left",
+             family="monospace", fontsize=9.5,
+             bbox=dict(facecolor="#f5f5f5", edgecolor="0.7", pad=10))
+
+    # ---------- Bottom row: panels swap to a single banana-style figure ----------
+    ax = fig.add_subplot(gs[2, :])
+    _aggregate_binbybin_summary(ax, num_F, num_D, mass_F, mass_D, ok, d_nm)
+
+    fig.suptitle(
+        "Fortran vs Diffrax at 60 s outer timestep — 24 h simulation, 100-scen v2\n"
+        f"Mass parity: ULP-to-1e-5 level. Number parity: large in nucleation-fed\n"
+        f"small-bin tail (different rate-integration). Larger bins agree to ~10%.",
+        fontsize=12, fontweight="bold", y=0.995,
+    )
+
+    out = OUT_DIR / "parity.png"
+    plt.savefig(out, dpi=130, bbox_inches="tight")
+    print(f"Saved: {out}")
+
+
+def _binbybin_panel(ax, F_arr, D_arr, ok, fail, d_nm, threshold,
+                    ylabel, title):
+    """One bin-by-bin scatter+box panel."""
+    rng = np.random.default_rng(0)
+    nbin = F_arr.shape[1]
+    box_data = []
+    for b in range(nbin):
+        denom = np.maximum(np.abs(F_arr[:, b]), np.abs(D_arr[:, b]))
+        denom = np.where(denom > 1e-300, denom, 1.0)
+        err = np.abs(F_arr[:, b] - D_arr[:, b]) / denom
+        active = F_arr[:, b] > threshold
+        jitter = rng.normal(0, 0.07, size=err.shape)
+        xs = d_nm[b] * np.exp(jitter)
+        ax.scatter(xs[active & ok], np.clip(err[active & ok], 1e-13, 1),
+                    s=6, alpha=0.5, color="steelblue", edgecolors="none")
+        if fail.any():
+            ax.scatter(xs[active & fail],
+                        np.clip(err[active & fail], 1e-13, 1),
+                        s=12, alpha=0.8, color="crimson", marker="x")
+        v = err[active & ok]
+        box_data.append(np.clip(v, 1e-13, 1) if v.size else np.array([1e-13]))
+    ax.boxplot(box_data, positions=d_nm, widths=d_nm * 0.13,
+                showfliers=False, patch_artist=True,
+                medianprops=dict(color="darkblue", lw=1.4),
+                boxprops=dict(facecolor="white", alpha=0.85, edgecolor="black"))
+    ax.axhline(0.01, color="green", ls="--", lw=1, alpha=0.8)
+    ax.axhline(0.05, color="orange", ls="--", lw=1, alpha=0.8)
+    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.set_xlabel("Bin median diameter [nm]")
+    ax.set_ylabel(ylabel)
+    ax.set_ylim(1e-13, 2.0)
+    ax.xaxis.set_minor_locator(LogLocator(numticks=15))
+    ax.yaxis.set_minor_locator(LogLocator(numticks=15))
+    ax.grid(alpha=0.2, which="both")
+    ax.set_title(title)
+
+
+def _aggregate_binbybin_summary(ax, num_F, num_D, mass_F, mass_D, ok, d_nm):
+    """Per-bin median + P95 of rel-err for both number and mass."""
+    nbin = num_F.shape[1]
+    med_N, p95_N = np.zeros(nbin), np.zeros(nbin)
+    med_M, p95_M = np.zeros(nbin), np.zeros(nbin)
+    for b in range(nbin):
+        for src, med, p95 in [(num_F, med_N, p95_N), (mass_F, med_M, p95_M)]:
+            pass
+        # number
+        denom = np.maximum(np.abs(num_F[:, b]), np.abs(num_D[:, b]))
+        denom = np.where(denom > 1e-300, denom, 1.0)
+        e = np.abs(num_F[:, b] - num_D[:, b]) / denom
+        active = num_F[:, b] > 1e-3
+        v = e[active & ok]
+        if v.size:
+            med_N[b] = np.median(v)
+            p95_N[b] = np.percentile(v, 95)
+        else:
+            med_N[b] = np.nan; p95_N[b] = np.nan
+        # mass
+        denom = np.maximum(np.abs(mass_F[:, b]), np.abs(mass_D[:, b]))
+        denom = np.where(denom > 1e-300, denom, 1.0)
+        e = np.abs(mass_F[:, b] - mass_D[:, b]) / denom
+        active = mass_F[:, b] > 1e-6
+        v = e[active & ok]
+        if v.size:
+            med_M[b] = np.median(v)
+            p95_M[b] = np.percentile(v, 95)
+        else:
+            med_M[b] = np.nan; p95_M[b] = np.nan
+
+    ax.plot(d_nm, med_N, "o-", color="steelblue", lw=1.5, ms=4,
+             label="Number — median rel err")
+    ax.plot(d_nm, p95_N, "o:", color="steelblue", lw=1, ms=3, alpha=0.6,
+             label="Number — P95")
+    ax.plot(d_nm, med_M, "o-", color="darkorange", lw=1.5, ms=4,
+             label="Mass — median rel err")
+    ax.plot(d_nm, p95_M, "o:", color="darkorange", lw=1, ms=3, alpha=0.6,
+             label="Mass — P95")
+    ax.axhline(0.01, color="green", ls="--", lw=1, alpha=0.6, label="1%")
+    ax.axhline(0.05, color="orange", ls="--", lw=1, alpha=0.6, label="5%")
+    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.set_xlabel("Bin median diameter [nm]")
+    ax.set_ylabel("rel err  |D − F| / max(|F|,|D|)")
+    ax.set_title("(g) Per-bin parity summary — Fortran-OK scenarios only")
+    ax.legend(fontsize=9, ncol=3)
+    ax.grid(alpha=0.3, which="both")
+
+
+if __name__ == "__main__":
+    main()
