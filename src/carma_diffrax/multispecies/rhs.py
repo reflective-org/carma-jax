@@ -111,21 +111,44 @@ def _bin_transfer(dmdt_inner: jnp.ndarray, pc_g: jnp.ndarray,
     return F_below - F                                  # d(pc)/dt for this group
 
 
-def make_rhs_ms(env: FrozenEnvMS, ms: MultiSpeciesConfig,
-                shape: MultiSpeciesShape,
-                *,
-                do_homogeneous_nuc: bool = True,
-                do_ccn_activation: bool = True,
-                do_droplet_freezing: bool = True,
-                do_ice_melting: bool = True):
-    """Build a JIT-compiled multispecies RHS closure.
+def make_rhs_ms(*args, **kwargs):
+    """Build a JIT-compiled multispecies RHS.
 
-    Captures `env` (frozen tables) and `ms` (static dispatch arrays) in
-    closure. Returns a callable `rhs(t, y, args)` suitable for
-    `diffrax.ODETerm`.
+    Two call signatures supported:
 
-    Toggle flags switch off individual transitions for isolated testing.
+      make_rhs_ms(ms, shape, do_homogeneous_nuc=…, …)
+          → new (preferred): rhs(t, y, env) takes env via args. The JIT
+          cache is reused across outer steps regardless of env values.
+
+      make_rhs_ms(env, ms, shape, …)
+          → legacy: rhs(t, y, _) with env baked in via closure. Triggers
+          re-trace whenever env changes.
     """
+    # New signature: first positional arg is MultiSpeciesConfig.
+    if args and isinstance(args[0], MultiSpeciesConfig):
+        return _make_rhs_ms_args(*args, **kwargs)
+    # Legacy signature: first positional arg is FrozenEnvMS.
+    if args and isinstance(args[0], FrozenEnvMS):
+        env_legacy = args[0]
+        rest = args[1:]
+        rhs_v2 = _make_rhs_ms_args(*rest, **kwargs)
+        def rhs_legacy(t, y, _ignored):
+            return rhs_v2(t, y, env_legacy)
+        return rhs_legacy
+    raise TypeError(
+        "make_rhs_ms takes (ms, shape, ...) or (env, ms, shape, ...); "
+        f"first arg type is {type(args[0]).__name__ if args else 'None'}"
+    )
+
+
+def _make_rhs_ms_args(ms: MultiSpeciesConfig,
+                       shape: MultiSpeciesShape,
+                       *,
+                       do_homogeneous_nuc: bool = True,
+                       do_ccn_activation: bool = True,
+                       do_droplet_freezing: bool = True,
+                       do_ice_melting: bool = True):
+    """Actual multispecies RHS builder — env passed at call time via args."""
     cfg = ms.cfg
     nbin = shape.nbin
     ngroup = cfg.ngroup
@@ -143,8 +166,8 @@ def make_rhs_ms(env: FrozenEnvMS, ms: MultiSpeciesConfig,
     igas_h2so4 = int(cfg.igash2so4)
 
     @jax.jit
-    def rhs(t, y, args):
-        del t, args
+    def rhs(t, y, env):
+        del t
         pc, gc, T_scalar = unpack(y, shape)              # pc: (nbin, nelem)
         T = jnp.atleast_1d(T_scalar)                     # (1,)
         gc_2d = gc[None, :]                              # (1, ngas)

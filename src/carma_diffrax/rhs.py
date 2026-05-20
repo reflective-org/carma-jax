@@ -82,21 +82,42 @@ class FrozenEnv(NamedTuple):
     rlhm: jnp.ndarray            # (1, ngas) — latent heat of melt [erg/g]
 
 
-def make_rhs(env: FrozenEnv, shape: StateShape):
-    """Build a JIT-compiled RHS closure that captures `env`.
+def make_rhs(*args):
+    """Build a JIT-compiled sulfate RHS.
 
-    The returned callable has signature ``rhs(t, y, args)`` matching
-    `diffrax.ODETerm`. ``args`` is unused — all parameters travel via
-    ``env`` and ``shape`` in the closure.
+    Two call signatures supported:
+      - ``make_rhs(shape)``        → new: rhs(t, y, env) takes env via args.
+      - ``make_rhs(env, shape)``   → legacy: rhs(t, y, _) with env baked in.
+
+    The new form is preferred because it lets JAX reuse the JIT cache
+    across outer steps (and across scenarios under vmap) even when env
+    changes. Use diffrax's ``args=env`` parameter on ``diffeqsolve``.
     """
+    if len(args) == 1 and isinstance(args[0], StateShape):
+        return _make_rhs_args(args[0])
+    elif len(args) == 2:
+        env, shape = args
+        rhs_v2 = _make_rhs_args(shape)
+        # Bake env into a wrapper matching the legacy (t, y, args) signature.
+        def rhs_legacy(t, y, _ignored):
+            return rhs_v2(t, y, env)
+        return rhs_legacy
+    raise TypeError(
+        "make_rhs takes either (shape,) or (env, shape); got "
+        f"{len(args)} args"
+    )
+
+
+def _make_rhs_args(shape: StateShape):
+    """The actual RHS builder. Closes over only the static shape."""
     nbin = shape.nbin
     ig = _IGROUP_SULFATE
     ielem = _IELEM_SULFATE
     iz = _IZ
 
     @jax.jit
-    def rhs(t, y, args):
-        del t, args
+    def rhs(t, y, env):
+        del t
         pc, gc, T_scalar = unpack(y, shape)
         # Lift scalars into shapes the existing physics modules expect.
         T = jnp.atleast_1d(T_scalar)            # (1,)
