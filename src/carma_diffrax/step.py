@@ -39,8 +39,10 @@ def _resolve_solver(name: str):
 
 @lru_cache(maxsize=64)
 def _build_jit_step(shape: StateShape, solver_name: str,
-                     rtol: float, atol: float, max_steps: int):
-    """Build a JIT-compiled outer-step function bound to (shape, solver, tol).
+                     rtol: float, atol: float, max_steps: int,
+                     pcoeff: float, icoeff: float, dcoeff: float,
+                     factormin: float, factormax: float, safety: float):
+    """Build a JIT-compiled outer-step function bound to all controller knobs.
 
     The returned `step(pc0, gc0, T0, dtime, env)` is `@jax.jit`-wrapped and
     can be called repeatedly with different (pc0, gc0, T0, dtime, env)
@@ -50,7 +52,11 @@ def _build_jit_step(shape: StateShape, solver_name: str,
     rhs = make_rhs(shape)
     term = diffrax.ODETerm(rhs)
     solver = _resolve_solver(solver_name)
-    controller = diffrax.PIDController(rtol=rtol, atol=atol)
+    controller = diffrax.PIDController(
+        rtol=rtol, atol=atol,
+        pcoeff=pcoeff, icoeff=icoeff, dcoeff=dcoeff,
+        factormin=factormin, factormax=factormax, safety=safety,
+    )
 
     @jax.jit
     def step(pc0, gc0, T0, dtime, env):
@@ -90,6 +96,8 @@ def diffrax_step(pc0, gc0, T0, dtime, env: FrozenEnv,
     """
     step_jit = _build_jit_step(
         shape, cfg.solver_name, cfg.rtol, cfg.atol, cfg.max_steps,
+        cfg.pcoeff, cfg.icoeff, cfg.dcoeff,
+        cfg.factormin, cfg.factormax, cfg.safety,
     )
     pc, gc, T, stats_raw, result = step_jit(pc0, gc0, T0, dtime, env)
     stats = {

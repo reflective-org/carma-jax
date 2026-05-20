@@ -9,14 +9,30 @@ from typing import NamedTuple
 class DiffraxConfig(NamedTuple):
     """Static configuration for diffrax_step.
 
-    rtol / atol : passed to `diffrax.PIDController(rtol, atol)`.
-    max_steps   : safety cap on the number of internal diffrax steps per
-                  diffeqsolve call. The PIDController controls actual count.
-    solver_name : "Kvaerno5" (default) or "KenCarp4" — both DIRK methods
-                  suitable for stiff chemistry. Resolved to a diffrax
-                  solver instance inside step.py.
+    Tolerances (rtol, atol) and solver_name are the obvious knobs.
+
+    PID gains tuned via Phase 2B sweep (21_sweep_pid_gains.py on scenario 21):
+    the defaults below are from the ``PI_balanced_safer`` config, which cut
+    step-rejection rate from 56% (pure I controller) to 34% — about 45%
+    fewer total Newton iterations.
+
+    rtol / atol  : passed to ``diffrax.PIDController(rtol, atol)``.
+    max_steps    : safety cap on internal diffrax steps per diffeqsolve.
+    solver_name  : DIRK solver name; resolved in step.py.
+    pcoeff       : PID proportional gain.
+    icoeff       : PID integral gain.
+    dcoeff       : PID derivative gain.
+    factormin    : min step shrinkage ratio (default 0.2 → 0.5 = less aggressive).
+    factormax    : max step growth ratio (default 10 → 5 = smoother).
+    safety       : multiplicative margin on step size (default 0.9 → 0.7 = more conservative).
     """
     rtol: float = 1.0e-5
     atol: float = 1.0e-5
     max_steps: int = 10_000
     solver_name: str = "Kvaerno5"
+    pcoeff: float = 0.3
+    icoeff: float = 0.3
+    dcoeff: float = 0.0
+    factormin: float = 0.5
+    factormax: float = 5.0
+    safety: float = 0.7
