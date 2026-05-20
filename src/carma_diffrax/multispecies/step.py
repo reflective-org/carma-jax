@@ -8,6 +8,7 @@ from carma_diffrax.config import DiffraxConfig
 from carma_diffrax.multispecies.rhs import FrozenEnvMS, make_rhs_ms
 from carma_diffrax.multispecies.config import MultiSpeciesConfig
 from carma_diffrax.multispecies.state import MultiSpeciesShape, pack, unpack
+from carma_diffrax.step import _build_root_finder
 
 
 _SOLVER_REGISTRY = {
@@ -29,15 +30,14 @@ def _resolve_solver(name: str):
 def _build_jit_step_ms(ms: MultiSpeciesConfig, shape: MultiSpeciesShape,
                         solver_name: str, rtol: float, atol: float,
                         max_steps: int,
+                        pcoeff: float, icoeff: float, dcoeff: float,
+                        factormin: float, factormax: float, safety: float,
+                        root_finder_name: str, linear_solver_name: str,
                         do_homogeneous_nuc: bool,
                         do_ccn_activation: bool,
                         do_droplet_freezing: bool,
                         do_ice_melting: bool):
-    """Build the JIT-compiled outer-step function.
-
-    Caller is responsible for caching this — its identity depends on
-    (ms, shape, solver, rtol, atol, max_steps, toggles).
-    """
+    """Build the JIT-compiled outer-step function for the multispecies path."""
     rhs = make_rhs_ms(
         ms, shape,
         do_homogeneous_nuc=do_homogeneous_nuc,
@@ -46,8 +46,16 @@ def _build_jit_step_ms(ms: MultiSpeciesConfig, shape: MultiSpeciesShape,
         do_ice_melting=do_ice_melting,
     )
     term = diffrax.ODETerm(rhs)
-    solver = _resolve_solver(solver_name)
-    controller = diffrax.PIDController(rtol=rtol, atol=atol)
+    root_finder = _build_root_finder(
+        root_finder_name, rtol, atol, linear_solver_name,
+    )
+    solver_cls = _SOLVER_REGISTRY[solver_name]
+    solver = solver_cls(root_finder=root_finder)
+    controller = diffrax.PIDController(
+        rtol=rtol, atol=atol,
+        pcoeff=pcoeff, icoeff=icoeff, dcoeff=dcoeff,
+        factormin=factormin, factormax=factormax, safety=safety,
+    )
 
     @jax.jit
     def step(pc0, gc0, T0, dtime, env):
@@ -72,12 +80,14 @@ def _build_jit_step_ms(ms: MultiSpeciesConfig, shape: MultiSpeciesShape,
 # hashable, so we use (id(ms), shape, solver_name, rtol, atol, ...).
 @lru_cache(maxsize=64)
 def _cached_jit_step(ms_id, shape, solver_name, rtol, atol, max_steps,
+                      pcoeff, icoeff, dcoeff, factormin, factormax, safety,
+                      root_finder_name, linear_solver_name,
                       do_hom_nuc, do_ccn, do_freeze, do_melt):
-    # ms_id is just a cache key — the real ms is looked up from the
-    # `_MS_REGISTRY` populated below.
     ms = _MS_REGISTRY[ms_id]
     return _build_jit_step_ms(
         ms, shape, solver_name, rtol, atol, max_steps,
+        pcoeff, icoeff, dcoeff, factormin, factormax, safety,
+        root_finder_name, linear_solver_name,
         do_hom_nuc, do_ccn, do_freeze, do_melt,
     )
 
@@ -100,7 +110,11 @@ def diffrax_step_ms(pc0, gc0, T0, dtime, env: FrozenEnvMS,
     _MS_REGISTRY[ms_id] = ms
     step_jit = _cached_jit_step(
         ms_id, shape, cfg_d.solver_name, cfg_d.rtol, cfg_d.atol,
-        cfg_d.max_steps, do_hom, do_ccn, do_frz, do_mlt,
+        cfg_d.max_steps,
+        cfg_d.pcoeff, cfg_d.icoeff, cfg_d.dcoeff,
+        cfg_d.factormin, cfg_d.factormax, cfg_d.safety,
+        cfg_d.root_finder_name, cfg_d.linear_solver_name,
+        do_hom, do_ccn, do_frz, do_mlt,
     )
     pc, gc, T, stats_raw, result = step_jit(pc0, gc0, T0, dtime, env)
     stats = {

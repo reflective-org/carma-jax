@@ -36,3 +36,12 @@ class DiffraxConfig(NamedTuple):
     factormin: float = 0.5
     factormax: float = 5.0
     safety: float = 0.7
+    # Newton root-finder choice for the implicit DIRK stage.
+    # Chord (optimistix) gave a 1.6× speedup on scenario 21 vs VeryChord
+    # by accepting bigger diffrax outer steps (rejection 41% → 11%) with
+    # the same final accuracy. Phase 2C sweep.
+    root_finder_name: str = "Chord"
+    # Linear solver used inside the Newton step. Dense LU is optimal for
+    # the 41-dim (sulfate) / 117-dim (multispecies) state — iterative
+    # solvers add overhead without exploitable sparsity at this size.
+    linear_solver_name: str = "LU"
