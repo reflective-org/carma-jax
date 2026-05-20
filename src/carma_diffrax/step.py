@@ -15,6 +15,9 @@ from functools import lru_cache
 import diffrax
 import jax
 import jax.numpy as jnp
+import lineax as lx
+import optimistix as optx
+from diffrax._root_finder import VeryChord
 
 from carma_diffrax.config import DiffraxConfig
 from carma_diffrax.rhs import FrozenEnv, make_rhs
@@ -28,6 +31,13 @@ _SOLVER_REGISTRY = {
     "KenCarp4": diffrax.KenCarp4,
 }
 
+# Linear solver options (passed into the Newton root_finder).
+_LINEAR_SOLVERS = {
+    "LU": lambda: lx.LU(),
+    "QR": lambda: lx.QR(),
+    "Auto": lambda: lx.AutoLinearSolver(well_posed=None),
+}
+
 
 def _resolve_solver(name: str):
     if name not in _SOLVER_REGISTRY:
@@ -37,11 +47,42 @@ def _resolve_solver(name: str):
     return _SOLVER_REGISTRY[name]()
 
 
+def _build_root_finder(name: str, rtol: float, atol: float,
+                        linear_solver_name: str):
+    """Build the Newton root_finder for Kvaerno's implicit stage.
+
+    Available names:
+      - "Chord"     : optimistix.Chord (Phase 2C winner; bigger PID steps
+                      with same accuracy → 1.6× speedup on scen 21).
+      - "VeryChord" : diffrax.VeryChord (default in stock diffrax).
+      - "Newton"    : optimistix.Newton (full Newton, recomputes Jacobian
+                      every iteration; slightly slower than Chord on our
+                      problem).
+    """
+    if linear_solver_name not in _LINEAR_SOLVERS:
+        raise ValueError(
+            f"Unknown linear_solver_name {linear_solver_name!r}. "
+            f"Available: {sorted(_LINEAR_SOLVERS)}."
+        )
+    lin = _LINEAR_SOLVERS[linear_solver_name]()
+    if name == "Chord":
+        return optx.Chord(rtol=rtol, atol=atol, linear_solver=lin)
+    if name == "Newton":
+        return optx.Newton(rtol=rtol, atol=atol, linear_solver=lin)
+    if name == "VeryChord":
+        return VeryChord(rtol=rtol, atol=atol, linear_solver=lin)
+    raise ValueError(
+        f"Unknown root_finder_name {name!r}. "
+        f"Available: 'Chord', 'Newton', 'VeryChord'."
+    )
+
+
 @lru_cache(maxsize=64)
 def _build_jit_step(shape: StateShape, solver_name: str,
                      rtol: float, atol: float, max_steps: int,
                      pcoeff: float, icoeff: float, dcoeff: float,
-                     factormin: float, factormax: float, safety: float):
+                     factormin: float, factormax: float, safety: float,
+                     root_finder_name: str, linear_solver_name: str):
     """Build a JIT-compiled outer-step function bound to all controller knobs.
 
     The returned `step(pc0, gc0, T0, dtime, env)` is `@jax.jit`-wrapped and
@@ -51,7 +92,11 @@ def _build_jit_step(shape: StateShape, solver_name: str,
     """
     rhs = make_rhs(shape)
     term = diffrax.ODETerm(rhs)
-    solver = _resolve_solver(solver_name)
+    root_finder = _build_root_finder(
+        root_finder_name, rtol, atol, linear_solver_name,
+    )
+    solver_cls = _SOLVER_REGISTRY[solver_name]
+    solver = solver_cls(root_finder=root_finder)
     controller = diffrax.PIDController(
         rtol=rtol, atol=atol,
         pcoeff=pcoeff, icoeff=icoeff, dcoeff=dcoeff,
@@ -98,6 +143,7 @@ def diffrax_step(pc0, gc0, T0, dtime, env: FrozenEnv,
         shape, cfg.solver_name, cfg.rtol, cfg.atol, cfg.max_steps,
         cfg.pcoeff, cfg.icoeff, cfg.dcoeff,
         cfg.factormin, cfg.factormax, cfg.safety,
+        cfg.root_finder_name, cfg.linear_solver_name,
     )
     pc, gc, T, stats_raw, result = step_jit(pc0, gc0, T0, dtime, env)
     stats = {
