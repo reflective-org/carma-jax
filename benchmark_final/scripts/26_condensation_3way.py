@@ -421,7 +421,7 @@ def main():
         ax.set_ylabel("dN/dlog₁₀(D) [#/cm³]")
         ax.set_title(info["label"], fontweight="bold")
         ax.set_ylim(1e1, 5e4)
-        ax.legend(fontsize=8.5, loc="upper right")
+        ax.legend(fontsize=8.5, loc="lower left")
         ax.grid(alpha=0.3, which="both")
 
     fig.suptitle(
