@@ -80,6 +80,14 @@ subroutine test_sulfate_realistic()
   real(kind=f)              :: fixed_h2so4_mol_cm3
   real(kind=f)              :: fixed_h2so4_mmr
   real(kind=f)              :: T_init_save
+  ! NEW: optional pc_init file. If provided (env var CARMA_PC_INIT_FILE),
+  ! the per-bin initial particle concentrations are read from that file
+  ! as 38 float64 values in MMR (g/g), overriding the internal lognormal
+  ! builder. Used to make Fortran start from the exact same pc as the
+  ! JAX scripts for the 3-solver condensation test.
+  character(len=512)        :: pc_init_file
+  integer                   :: pc_init_unit, env_status
+  real(kind=f), allocatable :: pc_init_mmr(:)
 
   type(carma_type), target            :: carma
   type(carma_type), pointer           :: carma_ptr
@@ -218,10 +226,22 @@ subroutine test_sulfate_realistic()
 
   call CARMA_AddGrowth(carma, 1, 2, rc)
   if (rc /= 0) stop '*** CARMA_AddGrowth FAILED ***'
-  call CARMA_AddNucleation(carma, 1, 1, I_HOMNUC, 0._f, rc, igas=2)
-  if (rc /= 0) stop '*** CARMA_AddNucleation FAILED ***'
-  call CARMA_AddCoagulation(carma, 1, 1, 1, I_COLLEC_FUCHS, rc)
-  if (rc /= 0) stop '*** CARMA_AddCoagulation FAILED ***'
+  ! NEW: register nucleation only if do_grow_flag is on. (Nucleation is
+  ! part of the "grow" family in our flag scheme — but the user typically
+  ! wants to disable it together with coag for clean condensation tests.)
+  if (do_grow_flag) then
+    call CARMA_AddNucleation(carma, 1, 1, I_HOMNUC, 0._f, rc, igas=2)
+    if (rc /= 0) stop '*** CARMA_AddNucleation FAILED ***'
+  end if
+  ! Only register coagulation when the user wants it. Passing
+  ! do_coag=.false. to CARMA_Initialize alone was apparently not enough
+  ! to suppress coag dynamics — N_total dropped from 1e4 to ~2.4e3 over
+  ! 24 h in condensation-only tests with do_coag_flag=.false.. Skipping
+  ! AddCoagulation entirely keeps the coag pair table empty.
+  if (do_coag_flag) then
+    call CARMA_AddCoagulation(carma, 1, 1, 1, I_COLLEC_FUCHS, rc)
+    if (rc /= 0) stop '*** CARMA_AddCoagulation FAILED ***'
+  end if
 
   call CARMA_Initialize(carma, rc, do_grow=do_grow_flag, do_coag=do_coag_flag, &
       do_substep=.true., do_thermo=.true., maxretries=16, maxsubsteps=32, &
@@ -288,6 +308,25 @@ subroutine test_sulfate_realistic()
   end do
   if (norm > 0._f) then
     mmr(1,1,:) = mmr(1,1,:) * (M_target_mmr / norm)
+  end if
+
+  ! If CARMA_PC_INIT_FILE is set, overwrite the internal lognormal seed
+  ! with the per-bin MMR values from that file (NBIN float64).
+  call get_environment_variable('CARMA_PC_INIT_FILE', pc_init_file, &
+       status=env_status)
+  if (env_status == 0 .and. len_trim(pc_init_file) > 0) then
+    allocate(pc_init_mmr(NBIN))
+    open(newunit=pc_init_unit, file=trim(pc_init_file), &
+         access='stream', form='unformatted', status='old', iostat=ios)
+    if (ios /= 0) then
+      write(0, '(A, A)') 'cannot open CARMA_PC_INIT_FILE: ', trim(pc_init_file)
+      call exit(8)
+    end if
+    read(pc_init_unit) pc_init_mmr
+    close(pc_init_unit)
+    mmr(1,1,:) = pc_init_mmr(:)
+    deallocate(pc_init_mmr)
+    write(0, '(A, A)') '  using pc_init from file: ', trim(pc_init_file)
   end if
 
   lastsub = 0

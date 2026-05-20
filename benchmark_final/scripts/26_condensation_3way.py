@@ -69,16 +69,24 @@ PLOT_DIR = ROOT / "plots" / "condensation_3way"
 
 
 def initial_seed(gmd_nm, gsd, n0=N0, rho_air_g_cm3=None):
-    """Build the initial per-bin number-conc distribution.
+    """Build the initial per-bin distribution from a true lognormal in
+    log10(D) space, normalised to total number N0 particles.
 
-    Returns pc_per_bin in #/cm^3 of air with N_total = n0.
+    Returns the per-bin pc array that all three solvers use as the
+    canonical initial state. To make Fortran start from the SAME pc,
+    write this array to a binary file and feed Fortran's
+    ``--pc-init-file`` argv option (see run_fortran).
+
+    Returns: pc_per_bin [#/cm^3 of air], d_nm, dlog10_d, rmass.
     """
     from jax_ensemble import _minimal_config
+
     cfg = _minimal_config()
     grp = cfg.groups[0]
     rmass = np.asarray(grp.rmass)
     d_nm = 2.0 * (3.0 * rmass / (4 * np.pi * RHO_SULF)) ** (1/3) * 1e7
     dlog10_d = math.log10(grp.rmrat) / 3.0
+
     log10_gsd = math.log10(gsd)
     log10_gmd = math.log10(gmd_nm)
     dN_dlogD = (n0 / (math.sqrt(2 * math.pi) * log10_gsd)
@@ -98,30 +106,40 @@ def gmd_from_pc(pc, d_nm):
 
 # ---------------- Fortran ----------------
 def run_fortran(gmd_nm, h2so4_mol_cm3, scenario_dir):
-    """Call the patched Fortran binary in fixed-H2SO4 mode."""
+    """Call the patched Fortran binary in fixed-H2SO4 mode.
+
+    Writes the canonical initial-pc array (built by initial_seed) to a
+    temp binary file and points Fortran at it via CARMA_PC_INIT_FILE
+    env var. This guarantees Fortran starts from the exact same
+    per-bin distribution as the JAX paths.
+    """
+    import os as _os
     from carma.constants import R_AIR
     rho_air_g_cm3 = P_PA * 10.0 / (float(R_AIR) * T_K)
     pc_init, d_nm, dlog10_d, rmass = initial_seed(gmd_nm, GSD)
-    # Convert pc (#/cm^3) → mmr → total M (µg/m³) to feed Fortran's
-    # lognormal-seed builder (Fortran reads M, GMD, GSD and rebuilds).
-    mmr_total = (pc_init * rmass).sum() / rho_air_g_cm3   # g/g
-    M_ug_m3 = mmr_total * rho_air_g_cm3 * 1e12
-    print(f"    Fortran: feeding M={M_ug_m3:.3e} µg/m³ → expected N={pc_init.sum():.3e}")
+    mmr_per_bin = pc_init * rmass / rho_air_g_cm3   # g/g per bin
+    # Sanity: compute equivalent M_ug_m3 for the print-out
+    M_ug_m3 = mmr_per_bin.sum() * rho_air_g_cm3 * 1e12
+    print(f"    Fortran: feeding pc_init via file; total N={pc_init.sum():.3e}, "
+          f"M={M_ug_m3:.3e} µg/m³")
 
     with tempfile.TemporaryDirectory() as d:
         d = Path(d)
         scen_path = d / "scen.txt"
         out_path = d / "out.json"
-        # prod_rate=0 because we use fixed_h2so4 mode (overrides anyway).
+        pc_init_path = d / "pc_init.bin"
+        # Write per-bin MMR (38 × float64, little-endian native).
+        mmr_per_bin.astype(np.float64).tofile(pc_init_path)
         scen_line = (f"{T_K!r} {P_HPA!r} {RH!r} 0.0 "
                       f"{float(M_ug_m3)!r} {float(gmd_nm)!r} {GSD!r}\n")
         scen_path.write_text(scen_line)
-        # do_coag=0, do_grow=1, dtime=60, nstep=1440, fixed_h2so4
         cmd = [str(FORTRAN_BIN), str(scen_path), str(out_path),
                 "0", "1", str(DTIME), str(NSTEP),
                 str(h2so4_mol_cm3)]
+        env = {**_os.environ, "CARMA_PC_INIT_FILE": str(pc_init_path)}
         t0 = time.perf_counter()
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                            timeout=3600, env=env)
         wall = time.perf_counter() - t0
         if r.returncode != 0:
             raise RuntimeError(f"Fortran failed: {r.stderr[:500]}")
