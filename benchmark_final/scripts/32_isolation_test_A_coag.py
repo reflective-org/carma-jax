@@ -57,6 +57,14 @@ NSTEP = 48
 NBIN = 38
 NGAS = 2
 
+# Aerosol seed override — user-requested common parameters for Test A.
+# Chosen to give N₀ ~ tens of thousands of #/cm³ so coag actually
+# does something measurable within 24 h. With M=20 µg/m³ at GMD=20 nm,
+# N₀ is ~9e5 #/cm³ at strat39.
+TEST_A_M_UG_M3 = 20.0
+TEST_A_GMD_NM = 20.0
+TEST_A_GSD = 1.4
+
 OUT_ROOT = ROOT / "outputs" / "iso_test_A"
 SCENARIOS = ROOT / "scenarios" / "realistic_scenarios_100.npz"
 FORTRAN_BIN = REPO.parent / "original-carma" / "CARMA" / "build" / "test_sulfate_realistic"
@@ -64,9 +72,16 @@ FORTRAN_BIN = REPO.parent / "original-carma" / "CARMA" / "build" / "test_sulfate
 
 def _scen_info(idx):
     S = np.load(SCENARIOS)
-    return {k: float(S[k][idx]) for k in
-             ["T", "p", "rh", "h2so4_prod_rate", "M_total_ug_m3",
-              "aerosol_mu_nm", "aerosol_sigma_g"]}
+    out = {k: float(S[k][idx]) for k in
+            ["T", "p", "rh", "h2so4_prod_rate", "M_total_ug_m3",
+             "aerosol_mu_nm", "aerosol_sigma_g"]}
+    # Override aerosol seed with user-fixed common parameters so the
+    # 3-way comparison sees the same initial particle population
+    # across both atmospheres.
+    out["M_total_ug_m3"] = TEST_A_M_UG_M3
+    out["aerosol_mu_nm"] = TEST_A_GMD_NM
+    out["aerosol_sigma_g"] = TEST_A_GSD
+    return out
 
 
 def _scenario_line(s):

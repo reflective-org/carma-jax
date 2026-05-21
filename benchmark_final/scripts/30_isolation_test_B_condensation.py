@@ -72,7 +72,13 @@ ATMOSPHERES = {
 }
 DT_VALUES = [1.0, 10.0, 60.0, 300.0, 1800.0]
 NSTEP = 48
-FIXED_H2SO4_MOLEC_CM3 = 1.0e8   # held constant across all runs
+# User-specified common parameters for Test B (and Test C):
+#   Fixed [H2SO4] = 1e7 molec/cm³ — moderate condensation forcing
+#   Seed lognormal: GMD = 20 nm, GSD = 1.2 (tight distribution)
+FIXED_H2SO4_MOLEC_CM3 = 1.0e7
+TEST_B_GMD_NM = 20.0
+TEST_B_GSD = 1.2
+TEST_B_M_UG_M3 = 2.0   # background aerosol mass to grow onto
 NBIN = 38
 NGAS = 2
 
@@ -83,9 +89,15 @@ FORTRAN_BIN = REPO.parent / "original-carma" / "CARMA" / "build" / "test_sulfate
 
 def _scen_info(idx):
     S = np.load(SCENARIOS)
-    return {k: float(S[k][idx]) for k in
-             ["T", "p", "rh", "h2so4_prod_rate", "M_total_ug_m3",
-              "aerosol_mu_nm", "aerosol_sigma_g"]}
+    out = {k: float(S[k][idx]) for k in
+            ["T", "p", "rh", "h2so4_prod_rate", "M_total_ug_m3",
+             "aerosol_mu_nm", "aerosol_sigma_g"]}
+    # Override aerosol seed — common across atmospheres so 3-way
+    # parity compares like-for-like.
+    out["aerosol_mu_nm"] = TEST_B_GMD_NM
+    out["aerosol_sigma_g"] = TEST_B_GSD
+    out["M_total_ug_m3"] = TEST_B_M_UG_M3
+    return out
 
 
 def _scenario_line(s):

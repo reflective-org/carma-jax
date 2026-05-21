@@ -46,12 +46,17 @@ DT_VALUES = [1.0, 10.0, 60.0, 300.0, 1800.0]
 NSTEP = 48
 NBIN = 38
 NGAS = 2
-FIXED_H2SO4_MOLEC_CM3 = 1.0e8   # same as Test B; high enough for
-                                  # measurable nucleation but tractable.
-                                  # 1e10 stresses Fortran's substep
-                                  # adaptive logic to the maxretries
-                                  # ceiling and runs into 5+ minute
-                                  # walls in faithful JAX.
+FIXED_H2SO4_MOLEC_CM3 = 1.0e7   # user-fixed common with Test B.
+                                  # Lower than the earlier 1e8 → more
+                                  # tractable nucleation rate, lets
+                                  # all 3 solvers converge cleanly.
+# User-requested: background aerosol of 2 µg/m³ at GMD=20 nm GSD=1.2.
+# This makes Test C "fresh nucleation in the presence of a pre-existing
+# background", which is a more realistic atmospheric setup than the
+# previous pc=0 isolation (pure homogeneous nucleation onto empty air).
+TEST_C_GMD_NM = 20.0
+TEST_C_GSD = 1.2
+TEST_C_M_UG_M3 = 2.0
 
 OUT_ROOT = ROOT / "outputs" / "iso_test_C"
 SCENARIOS = ROOT / "scenarios" / "realistic_scenarios_100.npz"
@@ -66,12 +71,12 @@ def _scen_info(idx):
 
 
 def _scenario_line(s):
-    # M_total → 0 and prod_rate → 0 so the only H2SO4 source is the
-    # fixed-H2SO4 reset each step and the only particles are from
-    # nucleation.
+    # prod_rate → 0 so the only H2SO4 source is the fixed-H2SO4 reset.
+    # M_total → TEST_C_M_UG_M3 so we seed a background aerosol.
+    # Aerosol GMD/GSD: TEST_C_GMD_NM / TEST_C_GSD.
     return (f"{s['T']!r} {s['p']!r} {s['rh']!r} "
-             f"{0.0!r} {0.0!r} "
-             f"{s['aerosol_mu_nm']!r} {s['aerosol_sigma_g']!r}\n")
+             f"{0.0!r} {TEST_C_M_UG_M3!r} "
+             f"{TEST_C_GMD_NM!r} {TEST_C_GSD!r}\n")
 
 
 def run_fortran(s, dtime, nstep, out_dir):
@@ -115,7 +120,8 @@ def run_fortran(s, dtime, nstep, out_dir):
 
 
 def _build_initial(s, cfg):
-    """Empty aerosol (zero pc), water at scenario RH, H2SO4 at fixed target."""
+    """Lognormal background aerosol at TEST_C_M_UG_M3 µg/m³, water at
+    scenario RH, H2SO4 at the fixed target."""
     import jax.numpy as jnp
     from carma.constants import R_AIR, RPA2CGS
     from carma.precision import DTYPE
@@ -123,8 +129,15 @@ def _build_initial(s, cfg):
     p_cgs_val = p_hPa * 100.0 * float(RPA2CGS)
     rhoa = p_cgs_val / (float(R_AIR) * T_K)
     grp = cfg.groups[0]
-    nbin = cfg.nbin
-    pc_per_bin = np.zeros(nbin)
+    r = np.asarray(grp.r)
+    rmass_np = np.asarray(grp.rmass)
+    log_mu_cm = math.log(TEST_C_GMD_NM * 1e-7)
+    log_sigma = math.log(TEST_C_GSD)
+    pdf = (np.exp(-0.5 * ((np.log(r) - log_mu_cm) / log_sigma) ** 2)
+            / (r * log_sigma * math.sqrt(2.0 * math.pi)) * rmass_np)
+    M_target_mmr = (TEST_C_M_UG_M3 * 1e-12) / rhoa
+    mmr_per_bin = pdf * (M_target_mmr / pdf.sum())
+    pc_per_bin = mmr_per_bin * rhoa / rmass_np
     pvapl_Pa = math.exp(54.842763 - 6763.22 / T_K
                          - 4.210 * math.log(T_K) + 0.000367 * T_K)
     h2o_mmr = s["rh"] * pvapl_Pa * 18.0 / (29.0 * p_hPa * 100.0)
