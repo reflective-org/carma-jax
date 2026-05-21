@@ -123,7 +123,8 @@ def _build_jit_step(shape: StateShape, solver_name: str,
 
 
 def diffrax_step(pc0, gc0, T0, dtime, env: FrozenEnv,
-                 shape: StateShape, cfg: DiffraxConfig):
+                 shape: StateShape, cfg: DiffraxConfig,
+                 coag=None):
     """Integrate (pc, gc, T) over one outer step `dtime` with diffrax.
 
     Args:
@@ -134,11 +135,19 @@ def diffrax_step(pc0, gc0, T0, dtime, env: FrozenEnv,
         env: FrozenEnv built at outer-step boundary
         shape: StateShape — static; resolved at JIT trace time
         cfg: DiffraxConfig — solver name + tolerances + max_steps
+        coag: optional :class:`carma_diffrax.coag_step.CoagBundle` for
+            operator-split coagulation applied **before** the diffeqsolve
+            inner step. ``None`` skips coag (existing behaviour).
 
     Returns:
         (pc, gc, T, stats) where stats dict has num_accepted_steps,
         num_rejected_steps, num_steps, result, successful.
     """
+    # Operator-split coag pre-step (mirrors faithful path).
+    if coag is not None:
+        from carma_diffrax.coag_step import apply_coag
+        pc0 = apply_coag(pc0, coag, dtime)
+
     step_jit = _build_jit_step(
         shape, cfg.solver_name, cfg.rtol, cfg.atol, cfg.max_steps,
         cfg.pcoeff, cfg.icoeff, cfg.dcoeff,
