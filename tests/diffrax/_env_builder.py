@@ -82,6 +82,10 @@ def make_env_and_state(T_K=240.0, p_hPa=200.0, rh=0.3,
         zmet=env_dict["zmet"],
         rlhe=env_dict["rlhe"],
         rlhm=env_dict["rlhm"],
+        pratt=env_dict["pratt"][..., 0],
+        prat=env_dict["prat"][..., 0],
+        pden1=env_dict["pden1"][..., 0],
+        palr=env_dict["palr"][..., 0],
     )
 
     # Initial lognormal aerosol seed.

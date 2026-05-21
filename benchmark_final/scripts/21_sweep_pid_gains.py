@@ -110,6 +110,10 @@ def _run_pid(cfg, ppm, pc0, gc0_2d, T_arr, p_cgs, dgc_per_step,
             rmrat_val=float(grp.rmrat),
             rhoa=env_d["rhoa"], zmet=env_d["zmet"],
             rlhe=env_d["rlhe"], rlhm=env_d["rlhm"],
+            pratt=env_d["pratt"][..., 0],
+            prat=env_d["prat"][..., 0],
+            pden1=env_d["pden1"][..., 0],
+            palr=env_d["palr"][..., 0],
         )
         rhs = make_rhs(env, shape)
         term = diffrax.ODETerm(rhs)

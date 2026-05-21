@@ -95,6 +95,10 @@ def main():
             rmrat_val=float(grp.rmrat),
             rhoa=env_d["rhoa"], zmet=env_d["zmet"],
             rlhe=env_d["rlhe"], rlhm=env_d["rlhm"],
+            pratt=env_d["pratt"][..., 0],
+            prat=env_d["prat"][..., 0],
+            pden1=env_d["pden1"][..., 0],
+            palr=env_d["palr"][..., 0],
         )
 
         t0 = time.perf_counter()
