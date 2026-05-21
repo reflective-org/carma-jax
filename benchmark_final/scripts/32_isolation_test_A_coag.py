@@ -70,8 +70,13 @@ def _scen_info(idx):
 
 
 def _scenario_line(s):
+    # Force prod_rate to 0 so Fortran injects no H2SO4 — this lets us
+    # keep do_grow=1 (avoids a SIGBUS in F90's growth-disabled path)
+    # while still effectively isolating coag (zero H2SO4 → growth code
+    # runs but produces zero condensation flux). do_nuc=0 separately
+    # disables nucleation.
     return (f"{s['T']!r} {s['p']!r} {s['rh']!r} "
-             f"{s['h2so4_prod_rate']!r} {s['M_total_ug_m3']!r} "
+             f"{0.0!r} {s['M_total_ug_m3']!r} "
              f"{s['aerosol_mu_nm']!r} {s['aerosol_sigma_g']!r}\n")
 
 
@@ -86,10 +91,11 @@ def run_fortran(s, dtime, nstep, out_dir):
         env = os.environ.copy()
         cmd = [str(FORTRAN_BIN), str(scen_path), str(out_path),
                "1",        # do_coag
-               "0",        # do_grow
+               "1",        # do_grow (kept on; prod_rate=0 in scenario
+                            #          means no condensation forcing)
                str(dtime),
                str(nstep),
-               "0",        # fixed_h2so4 — irrelevant (no growth, no nuc)
+               "0",        # fixed_h2so4 — irrelevant (prod=0, do_nuc=0)
                "0",        # do_nuc
                ]
         t0 = time.perf_counter()
