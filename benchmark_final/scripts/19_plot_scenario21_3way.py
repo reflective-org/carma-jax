@@ -28,8 +28,15 @@ from jax_ensemble import _minimal_config
 from carma.constants import R_AIR
 
 
-DATA = ROOT / "outputs" / "dt1800" / "scen21_3way" / "all_solvers.npz"
-OUT_DIR = ROOT / "plots" / "scen21_3way"
+import argparse
+_p = argparse.ArgumentParser()
+_p.add_argument("--tag", default="scen21_3way",
+                 help="output subdir tag matching what 17_*.py wrote")
+_args, _ = _p.parse_known_args()
+_TAG = _args.tag
+
+DATA = ROOT / "outputs" / "dt1800" / _TAG / "all_solvers.npz"
+OUT_DIR = ROOT / "plots" / _TAG
 
 DTIME = 1800.0
 NSTEP = 48
@@ -172,8 +179,13 @@ def main():
         d_nm[-1] * (d_nm[1] / d_nm[0]) ** 0.5,
         len(d_nm) + 1,
     )
+    # Label varies depending on whether Fortran's gc went negative.
+    fort_gc_neg = (data.get("fortran_gc") is not None
+                    and np.asarray(data["fortran_gc"])[:, 1].min() < 0)
+    fort_label = ("(e1) Fortran — gc_h2so4 went negative!"
+                  if fort_gc_neg else "(e1) Fortran (semi-implicit Euler)")
     titles = {
-        "fortran":  "(e1) Fortran — gc_h2so4 went negative!",
+        "fortran":  fort_label,
         "faithful": "(e2) Faithful JAX — same algorithm",
         "diffrax":  "(e3) Diffrax (Kvaerno5+PID)",
     }
@@ -195,7 +207,7 @@ def main():
     # --- summary info panel ---
     ax = fig.add_subplot(gs[1, 3]); ax.axis("off")
     info = (
-        f"Scenario 21\n"
+        f"{_TAG.replace('_3way','').replace('scen','Scenario ').upper()}\n"
         f"  T = {scen['T']:.1f} K\n"
         f"  p = {scen['p']:.1f} hPa  (stratosphere)\n"
         f"  RH = {scen['rh']:.2f}\n"
@@ -226,11 +238,13 @@ def main():
              bbox=dict(facecolor="#f5f5f5", edgecolor="0.7", pad=8))
 
     fig.suptitle(
-        f"Scenario 21 (Fortran ceiling-hit at 1800 s) — Fortran vs Faithful JAX vs Diffrax",
+        (f"{_TAG.replace('_3way','').replace('scen','Scenario ').upper()} "
+         f"{'(Fortran ceiling-hit at 1800 s)' if fort_gc_neg else '(all solvers succeed)'} "
+         f"— Fortran vs Faithful JAX vs Diffrax"),
         fontsize=14, fontweight="bold", y=0.995,
     )
 
-    out = OUT_DIR / "scen21_3way.png"
+    out = OUT_DIR / f"{_TAG}.png"
     plt.savefig(out, dpi=130, bbox_inches="tight")
     print(f"Saved: {out}")
 

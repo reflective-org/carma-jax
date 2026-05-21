@@ -25,6 +25,8 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO = ROOT.parent
+# Default SCEN_IDX kept at 21 for backward compatibility; override via
+# --scen-idx CLI arg (see `main()` below).
 SCEN_IDX = 21
 DTIME = 1800.0
 NSTEP = 48
@@ -263,11 +265,19 @@ def run_diffrax(s):
 
 
 def main():
+    global SCEN_IDX, OUT_DIR
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--skip", nargs="*", default=[],
                     choices=["fortran", "faithful", "diffrax"],
                     help="solvers to skip (useful when iterating)")
+    p.add_argument("--scen-idx", type=int, default=SCEN_IDX,
+                    help="scenario index (0-99) in realistic_scenarios_100.npz")
+    p.add_argument("--out-tag", default=None,
+                    help="output subdir tag (default: scen<idx>_3way)")
     args = p.parse_args()
+    SCEN_IDX = args.scen_idx
+    out_tag = args.out_tag or f"scen{SCEN_IDX}_3way"
+    OUT_DIR = ROOT / "outputs" / "dt1800" / out_tag
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     s = _scen_info()
