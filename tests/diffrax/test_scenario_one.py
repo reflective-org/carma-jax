@@ -50,6 +50,10 @@ def _env_from_dict(env_dict, cfg):
         rmrat_val=float(grp.rmrat),
         rhoa=env_dict["rhoa"], zmet=env_dict["zmet"],
         rlhe=env_dict["rlhe"], rlhm=env_dict["rlhm"],
+        pratt=env_dict["pratt"][..., 0],
+        prat=env_dict["prat"][..., 0],
+        pden1=env_dict["pden1"][..., 0],
+        palr=env_dict["palr"][..., 0],
     )
 
 

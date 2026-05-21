@@ -41,6 +41,7 @@ from carma.sulfate_utils import wtpct_tabaz
 from carma.supersaturation import supersat
 from carma.vapor_pressure import vaporp_h2o_murphy2005, vaporp_h2so4_ayers1980
 
+from carma_diffrax.ppm_advection import ppm_n_at_boundary
 from carma_diffrax.state import StateShape, pack, unpack
 
 
@@ -65,6 +66,11 @@ class FrozenEnv(NamedTuple):
 
     All arrays are sized for sulfate-only single-cell scope:
     nelem = ngroup = 1, NZ = 1, nbin = 38 (typically), ngas = 2.
+
+    The PPM coefficients (``pratt``, ``prat``, ``pden1``, ``palr``) are
+    static for a given bin grid, but live here for trivial threading
+    through the existing ``env`` argument plumbing. They are consumed
+    by :func:`carma_diffrax.ppm_advection.ppm_n_at_boundary`.
     """
     akelvin: jnp.ndarray         # (1, ngas)
     akelvini: jnp.ndarray        # (1, ngas)
@@ -80,6 +86,10 @@ class FrozenEnv(NamedTuple):
     zmet: jnp.ndarray            # (1,) — vertical metric; = 1 in single-column
     rlhe: jnp.ndarray            # (1, ngas) — latent heat of evap [erg/g]
     rlhm: jnp.ndarray            # (1, ngas) — latent heat of melt [erg/g]
+    pratt: jnp.ndarray           # (3, nbin) — PPM gradient coefs (sulfate group sliced)
+    prat: jnp.ndarray            # (4, nbin) — PPM boundary coefs
+    pden1: jnp.ndarray           # (nbin,)   — PPM denominator
+    palr: jnp.ndarray            # (4,)      — PPM edge slope factors
 
 
 def make_rhs(*args):
@@ -159,24 +169,22 @@ def _make_rhs_args(shape: StateShape):
         # boundary "above bin nbin-1" as zero (no boundary exists there).
         dmdt = jnp.concatenate([dmdt_inner, jnp.zeros((1,), dtype=DTYPE)])
 
-        # --- 4) Upwind number-density flux in mass space ---
+        # --- 4) PPM number-density flux in mass space ---
         # Continuous-time mass-space advection of n(m) at velocity v=dmdt:
         #   ∂n/∂t + ∂(v·n)/∂m = 0
         # Discretized via finite-volume on (pc[b] = ∫_bin n dm), the bin
         # update is d(pc[b])/dt = F[b-1] - F[b] where F[b] is the number
-        # flux at boundary b. With upwind reconstruction of n at the
-        # boundary:
-        #   F[b] = v[b] · n_upwind = v[b] · (pc[b]/dm[b]   if v[b]>0
-        #                                    else pc[b+1]/dm[b+1])
-        # dm is the true bin width: rmassup[b] - rmasslow[b].
+        # flux at boundary b. ``ppm_n_at_boundary`` (Colella-Woodward
+        # PPM, Steps 1-4 of the faithful path's growevapl) reconstructs
+        # the upwind n at each bin boundary at third-order accuracy with
+        # monotonicity preservation. This replaces the previous
+        # first-order upwind ``n = pc / dm`` reconstruction.
         dm_g = env.dm[:, ig]                                    # (nbin,)
         pc_elem = pc[:, ielem]                                  # (nbin,)
         zero = jnp.zeros((1,), dtype=DTYPE)
-        pc_above = jnp.concatenate([pc_elem[1:], zero])         # pc[b+1]
-        dm_above = jnp.concatenate([dm_g[1:], jnp.ones((1,), dtype=DTYPE)])
 
-        n_at_boundary = jnp.where(
-            dmdt > 0, pc_elem / dm_g, pc_above / dm_above,
+        n_at_boundary = ppm_n_at_boundary(
+            pc_elem, dm_g, env.pratt, env.prat, env.pden1, env.palr, dmdt,
         )
         F_n = dmdt * n_at_boundary                              # (nbin,) [#/cm^3/s]
         F_n_below = jnp.concatenate([zero, F_n[:-1]])           # F at b-1
