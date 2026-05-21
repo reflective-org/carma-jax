@@ -170,8 +170,7 @@ def plot_dt_convergence(atm):
         ax.set_yscale(yscale)
         ax.grid(True, alpha=0.3, which="both")
         ax.legend()
-    fig.suptitle(f"Test C convergence — {atm}  "
-                  "(diffrax bin-0 trap visible in Total N panel)", fontsize=13)
+    fig.suptitle(f"Test C convergence — {atm}", fontsize=13)
     plt.tight_layout(rect=(0, 0, 1, 0.96))
     out = OUT_DIR / f"dt_convergence_{atm}.png"
     plt.savefig(out, dpi=110)

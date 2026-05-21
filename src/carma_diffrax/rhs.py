@@ -208,6 +208,28 @@ def _make_rhs_args(shape: StateShape, do_growth: bool = True,
         F_n_below = jnp.concatenate([zero, F_n[:-1]])           # F at b-1
 
         dpc_dt_ge = F_n_below - F_n                             # (nbin,)
+
+        # Bin-0 evap-out channel (mirrors Fortran growevapl L243-249).
+        # Bin 0 is sub-monomer (rmass[0] ≈ half an H₂SO₄ molecule), so when
+        # boundary 0 is in evap mode (dmdt[0] < 0) the bin-0 particles
+        # also "evaporate" — physically, dissolve back into gas-phase
+        # monomers rather than going to a non-existent bin -1. Without
+        # this sink, nucleation-injected particles accumulate in bin 0
+        # indefinitely and inflate total-N counts by orders of magnitude
+        # (this is the smoking-gun result Test C surfaced).
+        # Loss rate from bin 0 matches the rate at which bin-0 particles
+        # would cross a non-existent boundary -1 inward (|dmdt[0]|/dm[0]
+        # per particle):
+        evap_bin0_out = jnp.where(
+            dmdt[0] < DTYPE(0.0),
+            -dmdt[0] / dm_g[0] * pc_elem[0],
+            DTYPE(0.0),
+        )
+        dpc_dt_ge = dpc_dt_ge.at[0].add(-evap_bin0_out)
+        # Mass returns to gas automatically via the
+        # dgc/dt = -d(particle_mass)/dt formula below — the rmass[0]
+        # weighting picks up the bin-0 loss.
+
         if not do_growth:
             # Isolation mode: suppress condensation/evaporation entirely.
             # pheat still runs above (cheap), but its contribution to dpc/dt
