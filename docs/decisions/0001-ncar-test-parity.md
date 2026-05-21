@@ -116,6 +116,31 @@ Vehkamaki variant tests at 24% per-bin (better than ZhaoTurco's 67%)
 and 1% on gas (vs 46%), suggesting most of the gap is ZhaoTurco-specific
 rate-integration drift, not a general port bug.
 
+### ZhaoTurco rate point-sample diagnosis
+
+`tests/ncar_parity/diagnose_zhaoturco_rate.py` evaluates our
+`binary_nuc_zhao1995` at the exact `carma_sulfatetest` initial
+conditions (T=250 K, [H₂SO₄]=2.6e8 cm⁻³, RH=1.5%):
+
+|   | JAX | Bench-implied | ratio |
+|---|---|---|---|
+| Rate [#/cm³/s] | 4.5e-4 | ~7.0e-4 | **0.64** |
+
+Vehkamäki on the same point agrees with Fortran within ~5%, so the
+bug lives inside `binary_nuc_zhao1995` itself (not in the dispatcher
+or nucbin placement).
+
+The rate-dominating term is `exhom = exp(-gstar/kT) ≈ 7.18e-18`. A 36%
+rate ratio corresponds to only a 0.8% difference in `gstar`. That
+narrows the suspects to the values of `(wstar, dstar, sigma, ystar)`
+at the saddle — table-interpolation differences in `sulfate_surf_tens`
+or `dnpot`, or a tiny error in `dens1` blending.
+
+Next step for root-cause: patch the F90 source with a `write()` of
+`(wstar, dstar, sigma, ystar, rstar, gstar, ftry)` at the first
+substep, rebuild, run, and compare term-by-term against the Python
+dump from `diagnose_zhaoturco_rate.py`.
+
 ## How to extend
 
 Per-test stub:
