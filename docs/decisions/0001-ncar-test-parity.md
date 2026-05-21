@@ -25,7 +25,7 @@ Physics is fully ported and we have a step-function path.
 | `carma_sulfatetest`         | faithful JAX (`step_full_faithful`) | **GREEN totals (5%), per-bin xfail (~67%)** |
 | `carma_sulfate_vehkamaki_test` | faithful JAX, `method="Vehkamaki"` | **GREEN totals (5%), per-bin xfail (~24%)** |
 | `carma_nuctest`             | needs NGROUP=2 NELEM=3 config | TBD |
-| `carma_growtest`            | needs ice (RHO_I) group | TBD |
+| `carma_growtest`            | needs ice (RHO_I) group | **PARSE GATE GREEN**, parity blocked on multi-species microfast (see below) |
 | `carma_growintest`          | needs ice + diagnostic output | TBD |
 | `carma_growclrtest`         | needs ice + clear-sky | TBD |
 | `carma_growsubtest`         | needs ice + substep stress test | TBD |
@@ -183,6 +183,27 @@ gap, not 36 %. The bulk of the sulfatetest disagreement (40 % gas,
 not in the per-call nucleation rate. That's the right place to look
 next (e.g. comparison of nucrate trajectories across an entire
 1800 s step, not just first call).
+
+### Growtest parity blocker (Phase 6.7)
+
+Adding `carma_growtest` as the second Tier-1 test surfaced a
+structural blocker: `src/carma/microfast_full.py` is hardcoded for
+sulfate. Specifically:
+
+  - Line 133: `is_ice_arr = (False,)` — fixed at trace time.
+  - Line 134: `igrowgas_arr = (igas_h2so4,)` — every group is assumed
+    to grow on H2SO4.
+  - Lines 141–169 unconditionally index `gc[:, igas_h2so4]` and call
+    `wtpct_tabaz`, the sulfate wt-percent helper.
+
+Growtest's group is ice (`is_ice=True`, `igrowgas=igas_h2o`,
+single gas) so the path doesn't apply. Until microfast_full is
+generalised (planned: Phase 5 PPM rewrite or a sibling driver), the
+``test_growtest_faithful_totals`` parity check stays ``xfail``. The
+parser-regression gate (``test_growtest_bench_parse``) is green and
+guards the bench format itself, so when the multi-species refactor
+lands we already have a deterministic ground-truth side to validate
+against.
 
 ## How to extend
 
