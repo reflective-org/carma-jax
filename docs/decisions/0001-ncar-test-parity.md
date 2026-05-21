@@ -131,15 +131,58 @@ bug lives inside `binary_nuc_zhao1995` itself (not in the dispatcher
 or nucbin placement).
 
 The rate-dominating term is `exhom = exp(-gstar/kT) ≈ 7.18e-18`. A 36%
-rate ratio corresponds to only a 0.8% difference in `gstar`. That
-narrows the suspects to the values of `(wstar, dstar, sigma, ystar)`
-at the saddle — table-interpolation differences in `sulfate_surf_tens`
-or `dnpot`, or a tiny error in `dens1` blending.
+rate ratio corresponds to only a 0.8% difference in `gstar`.
 
-Next step for root-cause: patch the F90 source with a `write()` of
-`(wstar, dstar, sigma, ystar, rstar, gstar, ftry)` at the first
-substep, rebuild, run, and compare term-by-term against the Python
-dump from `diagnose_zhaoturco_rate.py`.
+### ZhaoTurco term-by-term diff (Phase 6.6c)
+
+Patched `sulfnucrate.F90` with a one-shot `write()` of every saddle
+intermediate at the first call to `binary_nuc_zhao1995` (saved fixture:
+`tests/ncar_parity/fixtures/zhaoturco_dump_fortran.txt`). Ran
+`tests/ncar_parity/diff_zhaoturco_intermediates.py` to recompute the
+JAX intermediates at the **exact same inputs** (read from the Fortran
+dump rather than reconstructed from MMR).
+
+Headline: **the rate function itself agrees to ~9 %, not 36 %.**
+
+| term            | F90              | JAX              | rel diff |
+|---|---|---|---|
+| saddle_i        | 25               | 25               | 0 %      |
+| pa_i            | 5.41886e+00      | 5.41966e+00      | +0.01 %  |
+| pb_i            | 1.45588e+00      | 1.45677e+00      | +0.06 %  |
+| c1_i            | -2.50692e+00     | -2.51166e+00     | -0.19 %  |
+| fct_i           |  1.65823e+00     |  1.65478e+00     | -0.21 %  |
+| fct_ip1         | -8.94077e-02     | -9.30028e-02     | **-4.02 %** |
+| xfrac           |  5.11592e-02     |  5.32119e-02     | +4.01 %  |
+| wstar           | 78.9488          | 78.9468          | -0.00 %  |
+| sigma           | 72.8404          | 72.8411          |  +0.00 % |
+| gstar           | 1.34814e-12      | 1.34513e-12      | -0.22 %  |
+| ftry            | -39.0614         | -38.9741         | +0.22 %  |
+| exhom           | 1.08610e-17      | 1.18509e-17      | **+9.11 %** |
+| **nucrate_cgs** | **7.0326e-04**   | **7.6709e-04**   | **+9.08 %** |
+
+So `binary_nuc_zhao1995` over-predicts by ~9 % at identical inputs,
+not under-predicts by 36 %. The original 36 % gap is dominated by an
+**input mismatch** ~5 % in `h2so4_cgs` (Python's diagnostic used a
+crude `P/(R_AIR·T)` for `rho_air` while Fortran's `CARMASTATE_Create`
+flow produces a slightly different effective density), amplified
+through the exponential ftry term.
+
+The residual 9 % at identical inputs comes from cumulative drift:
+`pa/pb` table values differ by 0.05 %, propagating into `c1/c2`
+(0.2 %) and `fct` (0.2 %); because `fct_hi` is close to zero at the
+saddle, `xfrac = fct_hi/(fct_hi - fct_lo)` amplifies the 0.2 %
+`fct_hi` drift to ~4 %, then `gstar/ftry` and `exp(ftry)` amplify
+further. RGAS, BK, AVG, M_air all match between F90 and JAX exactly,
+so the source is in the Lin–Tabazadeh or Ayers–Kulmala
+parameterisations or in `_DNWTP/_DNC0/_DNC1/_DNPOT` rounding.
+
+**Practical takeaway:** the ZhaoTurco rate routine is not buggy
+enough to chase further — fixing it would close ~9 % of the test
+gap, not 36 %. The bulk of the sulfatetest disagreement (40 % gas,
+67 % per-bin) lives in the **substepping or bin-crossing** layer,
+not in the per-call nucleation rate. That's the right place to look
+next (e.g. comparison of nucrate trajectories across an entire
+1800 s step, not just first call).
 
 ## How to extend
 
