@@ -333,11 +333,17 @@ def main():
     p.add_argument("--atm", nargs="*", default=list(ATMOSPHERES.keys()),
                     choices=list(ATMOSPHERES.keys()))
     p.add_argument("--dt", nargs="*", type=float, default=DT_VALUES)
+    p.add_argument("--nstep", type=int, default=NSTEP,
+                    help="number of outer steps (default 48)")
+    p.add_argument("--out-tag", default=None,
+                    help="output subdir tag (default: iso_test_<mode>)")
     p.add_argument("--skip", nargs="*", default=[],
                     choices=["fortran", "faithful", "diffrax"])
     args = p.parse_args()
     flags = MODES[args.mode]
-    out_root = ROOT / "outputs" / f"iso_test_{args.mode}"
+    nstep_use = args.nstep
+    tag = args.out_tag or f"iso_test_{args.mode}"
+    out_root = ROOT / "outputs" / tag
     out_root.mkdir(parents=True, exist_ok=True)
 
     for atm_key in args.atm:
@@ -347,17 +353,18 @@ def main():
         for k, v in s.items():
             print(f"  {k}: {v}")
         for dt in args.dt:
-            print(f"\n--- dt = {dt} s × {NSTEP} steps ---")
+            print(f"\n--- dt = {dt} s × {nstep_use} steps "
+                  f"(physical = {dt*nstep_use:.0f} s = {dt*nstep_use/3600:.2f} h) ---")
             out_dir = out_root / f"{atm_key}_dt{int(dt)}"
             out_dir.mkdir(parents=True, exist_ok=True)
             bundle = {"scenario_info": np.array(json.dumps(
-                dict(s, dt=dt, nstep=NSTEP, atm=atm_key,
+                dict(s, dt=dt, nstep=nstep_use, atm=atm_key,
                       fixed_h2so4_molec_cm3=FIXED_H2SO4_MOLEC_CM3,
                       test=args.mode, flags=flags),
             ))}
             if "fortran" not in args.skip:
                 print("  Fortran...")
-                F = run_fortran(s, dt, NSTEP, flags)
+                F = run_fortran(s, dt, nstep_use, flags)
                 print(f"    wall = {F['wall']:.1f}s, "
                       f"nsubsteps {F['nsubsteps'].min()}-{F['nsubsteps'].max()}, "
                       f"retries {F['nretries'].max()}")
@@ -365,13 +372,13 @@ def main():
                     bundle[f"fortran_{k}"] = np.asarray(v)
             if "faithful" not in args.skip:
                 print("  Faithful JAX...")
-                J = run_faithful_jax(s, dt, NSTEP, flags)
+                J = run_faithful_jax(s, dt, nstep_use, flags)
                 print(f"    wall = {J['wall']:.1f}s")
                 for k, v in J.items():
                     bundle[f"faithful_{k}"] = np.asarray(v)
             if "diffrax" not in args.skip:
                 print("  Diffrax...")
-                D = run_diffrax(s, dt, NSTEP, flags)
+                D = run_diffrax(s, dt, nstep_use, flags)
                 print(f"    wall = {D['wall']:.1f}s, "
                       f"accepted={D['n_accepted']}, rejected={D['n_rejected']}")
                 for k, v in D.items():
