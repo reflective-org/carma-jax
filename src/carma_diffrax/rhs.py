@@ -93,7 +93,8 @@ class FrozenEnv(NamedTuple):
     palr: jnp.ndarray            # (4,)      — PPM edge slope factors
 
 
-def make_rhs(*args, do_growth: bool = True, do_homogeneous: bool = True):
+def make_rhs(*args, do_growth: bool = True, do_homogeneous: bool = True,
+              fix_h2so4: bool = False):
     """Build a JIT-compiled sulfate RHS.
 
     Two call signatures supported:
@@ -117,14 +118,24 @@ def make_rhs(*args, do_growth: bool = True, do_homogeneous: bool = True):
             ``binary_nuc_zhao1995`` has double-where guards that both
             produce NaN cotangents *and* introduce a noise floor at low
             [H2SO4] that would otherwise contaminate the isolation tests.
+        fix_h2so4: if True, force ``dgc[H2SO4]/dt = 0`` in the RHS,
+            effectively pinning the gas to whatever value it started at.
+            Used to test diffrax's pure dt-independence without the
+            outer-step gas-reset confound — a single ``diffeqsolve`` over
+            the full integration window then sees a constant gas
+            concentration throughout. Breaks mass conservation (the
+            'infinite reservoir' approximation); for isolation testing
+            only, not for physical runs.
     """
     if len(args) == 1 and isinstance(args[0], StateShape):
         return _make_rhs_args(args[0], do_growth=do_growth,
-                                do_homogeneous=do_homogeneous)
+                                do_homogeneous=do_homogeneous,
+                                fix_h2so4=fix_h2so4)
     elif len(args) == 2:
         env, shape = args
         rhs_v2 = _make_rhs_args(shape, do_growth=do_growth,
-                                  do_homogeneous=do_homogeneous)
+                                  do_homogeneous=do_homogeneous,
+                                  fix_h2so4=fix_h2so4)
         # Bake env into a wrapper matching the legacy (t, y, args) signature.
         def rhs_legacy(t, y, _ignored):
             return rhs_v2(t, y, env)
@@ -136,7 +147,8 @@ def make_rhs(*args, do_growth: bool = True, do_homogeneous: bool = True):
 
 
 def _make_rhs_args(shape: StateShape, do_growth: bool = True,
-                    do_homogeneous: bool = True):
+                    do_homogeneous: bool = True,
+                    fix_h2so4: bool = False):
     """The actual RHS builder. Closes over only the static shape."""
     nbin = shape.nbin
     ig = _IGROUP_SULFATE
@@ -279,6 +291,14 @@ def _make_rhs_args(shape: StateShape, do_growth: bool = True,
         # Convert to gc-units (mmr × rhoa × zmet). With single-column zmet=1
         # this is a no-op; kept for unit clarity.
         dgc_h2so4 = dgc_h2so4_cgs * env.zmet[iz]
+        if fix_h2so4:
+            # Isolation mode: pin gc[H2SO4] (infinite-reservoir approx).
+            # Breaks mass conservation by design — lets us run one
+            # diffeqsolve over a long window without the outer-step
+            # gas-reset confound. The particle side still gets the
+            # full condensation/nucleation source as if the gas were
+            # being depleted; we just don't let the gas state move.
+            dgc_h2so4 = DTYPE(0.0)
         # H2O is a spectator in cut 1 — sulfate aerosol water uptake is
         # implicit in wtpct, no separate water-mass exchange. Future work
         # will couple H2O via the wet-radius equation.
