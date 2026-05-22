@@ -8,9 +8,10 @@ outer step. The state vector is::
 The faithful CARMA port uses `growevapl`, a Piecewise-Parabolic-Method (PPM)
 finite-volume scheme that returns *time-averaged* loss rates over a substep —
 not suitable as a continuous-time RHS. Here we use the underlying primitive
-`pheat()`, which returns the *instantaneous* mass growth rate at a bin
-boundary, and combine it with a first-order upwind bin-transfer scheme to
-build a true ODE RHS::
+`pheat()` for the *instantaneous* mass growth rate at each bin boundary, and
+`ppm_advection.ppm_n_at_boundary` (lifting Colella-Woodward Steps 1-4 from
+`growevapl`) for the third-order upwind reconstruction of n at boundaries.
+The combination produces a continuous-time ODE RHS::
 
     dpc[i]/dt = grow_in[i] - grow_out[i] + evap_in[i] - evap_out[i] + nucl[i]
     dgc[H2SO4]/dt = - (mass uptake by growth across all boundaries
@@ -92,7 +93,8 @@ class FrozenEnv(NamedTuple):
     palr: jnp.ndarray            # (4,)      — PPM edge slope factors
 
 
-def make_rhs(*args):
+def make_rhs(*args, do_growth: bool = True, do_homogeneous: bool = True,
+              fix_h2so4: bool = False):
     """Build a JIT-compiled sulfate RHS.
 
     Two call signatures supported:
@@ -102,12 +104,38 @@ def make_rhs(*args):
     The new form is preferred because it lets JAX reuse the JIT cache
     across outer steps (and across scenarios under vmap) even when env
     changes. Use diffrax's ``args=env`` parameter on ``diffeqsolve``.
+
+    Process toggles for physics-isolation tests:
+
+    Args:
+        do_growth: if False, suppress condensation/evaporation. ``dpc_dt``
+            from PPM mass-space advection is zeroed out and ``dgc[H2SO4]``
+            picks up only the nucleation-mass-sink term. Lets ``carma_diffrax``
+            be exercised in 'nucleation-only' isolation mode.
+        do_homogeneous: if False, skip the sulfnuc call entirely. Used by
+            ``carma_diffrax.sensitivity`` (gradient PoC) and by the
+            'condensation-only' / 'coag-only' isolation tests, since
+            ``binary_nuc_zhao1995`` has double-where guards that both
+            produce NaN cotangents *and* introduce a noise floor at low
+            [H2SO4] that would otherwise contaminate the isolation tests.
+        fix_h2so4: if True, force ``dgc[H2SO4]/dt = 0`` in the RHS,
+            effectively pinning the gas to whatever value it started at.
+            Used to test diffrax's pure dt-independence without the
+            outer-step gas-reset confound — a single ``diffeqsolve`` over
+            the full integration window then sees a constant gas
+            concentration throughout. Breaks mass conservation (the
+            'infinite reservoir' approximation); for isolation testing
+            only, not for physical runs.
     """
     if len(args) == 1 and isinstance(args[0], StateShape):
-        return _make_rhs_args(args[0])
+        return _make_rhs_args(args[0], do_growth=do_growth,
+                                do_homogeneous=do_homogeneous,
+                                fix_h2so4=fix_h2so4)
     elif len(args) == 2:
         env, shape = args
-        rhs_v2 = _make_rhs_args(shape)
+        rhs_v2 = _make_rhs_args(shape, do_growth=do_growth,
+                                  do_homogeneous=do_homogeneous,
+                                  fix_h2so4=fix_h2so4)
         # Bake env into a wrapper matching the legacy (t, y, args) signature.
         def rhs_legacy(t, y, _ignored):
             return rhs_v2(t, y, env)
@@ -118,7 +146,9 @@ def make_rhs(*args):
     )
 
 
-def _make_rhs_args(shape: StateShape):
+def _make_rhs_args(shape: StateShape, do_growth: bool = True,
+                    do_homogeneous: bool = True,
+                    fix_h2so4: bool = False):
     """The actual RHS builder. Closes over only the static shape."""
     nbin = shape.nbin
     ig = _IGROUP_SULFATE
@@ -191,23 +221,58 @@ def _make_rhs_args(shape: StateShape):
 
         dpc_dt_ge = F_n_below - F_n                             # (nbin,)
 
-        # --- 5) Nucleation rate (homogeneous; heterogeneous off for sulfate) ---
-        h2o_cgs = gc_2d[iz, _IGAS_H2O] / env.zmet[iz]
-        h2so4_cgs = gc_2d[iz, _IGAS_H2SO4] / env.zmet[iz]
-        h2o_n = h2o_cgs * AVG / _GWTMOL_H2O
-        h2so4_n = h2so4_cgs * AVG / _GWTMOL_H2SO4
-        rh = ssl_h2o[iz] + DTYPE(1.0)
-        wtp = wtpct_tabaz(T[iz], h2o_cgs, pvapl[iz, _IGAS_H2O])
-        rhompe_1d, _rnuclg = sulfnuc(
-            T[iz], wtp, rh, h2so4_n, h2so4_cgs, h2o_n, h2o_cgs,
-            env.r_wet, env.rmassup, DTYPE(env.rmrat_val), env.zmet[iz],
-            method=_NUCLEATION_METHOD,
-            do_homogeneous=True, do_heterogeneous=False,
-            gwtmol_h2so4=_GWTMOL_H2SO4, gwtmol_h2o=_GWTMOL_H2O,
+        # Bin-0 evap-out channel (mirrors Fortran growevapl L243-249).
+        # Bin 0 is sub-monomer (rmass[0] ≈ half an H₂SO₄ molecule), so when
+        # boundary 0 is in evap mode (dmdt[0] < 0) the bin-0 particles
+        # also "evaporate" — physically, dissolve back into gas-phase
+        # monomers rather than going to a non-existent bin -1. Without
+        # this sink, nucleation-injected particles accumulate in bin 0
+        # indefinitely and inflate total-N counts by orders of magnitude
+        # (this is the smoking-gun result Test C surfaced).
+        # Loss rate from bin 0 matches the rate at which bin-0 particles
+        # would cross a non-existent boundary -1 inward (|dmdt[0]|/dm[0]
+        # per particle):
+        evap_bin0_out = jnp.where(
+            dmdt[0] < DTYPE(0.0),
+            -dmdt[0] / dm_g[0] * pc_elem[0],
+            DTYPE(0.0),
         )
-        # sulfnuc returns rates already multiplied by zmet (Fortran's "z" units).
-        # Our pc state is in #/cm^3, so divide back out.
-        nucl_rate = rhompe_1d / env.zmet[iz]                    # (nbin,)
+        dpc_dt_ge = dpc_dt_ge.at[0].add(-evap_bin0_out)
+        # Mass returns to gas automatically via the
+        # dgc/dt = -d(particle_mass)/dt formula below — the rmass[0]
+        # weighting picks up the bin-0 loss.
+
+        if not do_growth:
+            # Isolation mode: suppress condensation/evaporation entirely.
+            # pheat still runs above (cheap), but its contribution to dpc/dt
+            # and the gas mass balance is zeroed out here. Used by the
+            # 'coag-only' and 'nucleation-only' physics-isolation tests.
+            dpc_dt_ge = jnp.zeros_like(dpc_dt_ge)
+
+        # --- 5) Nucleation rate (homogeneous; heterogeneous off for sulfate) ---
+        if do_homogeneous:
+            h2o_cgs = gc_2d[iz, _IGAS_H2O] / env.zmet[iz]
+            h2so4_cgs = gc_2d[iz, _IGAS_H2SO4] / env.zmet[iz]
+            h2o_n = h2o_cgs * AVG / _GWTMOL_H2O
+            h2so4_n = h2so4_cgs * AVG / _GWTMOL_H2SO4
+            rh = ssl_h2o[iz] + DTYPE(1.0)
+            wtp = wtpct_tabaz(T[iz], h2o_cgs, pvapl[iz, _IGAS_H2O])
+            rhompe_1d, _rnuclg = sulfnuc(
+                T[iz], wtp, rh, h2so4_n, h2so4_cgs, h2o_n, h2o_cgs,
+                env.r_wet, env.rmassup, DTYPE(env.rmrat_val), env.zmet[iz],
+                method=_NUCLEATION_METHOD,
+                do_homogeneous=True, do_heterogeneous=False,
+                gwtmol_h2so4=_GWTMOL_H2SO4, gwtmol_h2o=_GWTMOL_H2O,
+            )
+            # sulfnuc returns rates already multiplied by zmet (Fortran's
+            # "z" units). Our pc state is in #/cm^3, so divide back out.
+            nucl_rate = rhompe_1d / env.zmet[iz]                # (nbin,)
+        else:
+            # Isolation mode: no nucleation. Used by 'condensation-only',
+            # 'coag-only', and the Phase 3.1 sensitivity wrapper (which
+            # also needs to avoid sulfnuc's NaN-cotangent double-where
+            # guards).
+            nucl_rate = jnp.zeros(nbin, dtype=DTYPE)
 
         # --- 6) Total dpc/dt ---
         dpc_dt = dpc_dt_ge + nucl_rate                          # (nbin,)
@@ -226,6 +291,14 @@ def _make_rhs_args(shape: StateShape):
         # Convert to gc-units (mmr × rhoa × zmet). With single-column zmet=1
         # this is a no-op; kept for unit clarity.
         dgc_h2so4 = dgc_h2so4_cgs * env.zmet[iz]
+        if fix_h2so4:
+            # Isolation mode: pin gc[H2SO4] (infinite-reservoir approx).
+            # Breaks mass conservation by design — lets us run one
+            # diffeqsolve over a long window without the outer-step
+            # gas-reset confound. The particle side still gets the
+            # full condensation/nucleation source as if the gas were
+            # being depleted; we just don't let the gas state move.
+            dgc_h2so4 = DTYPE(0.0)
         # H2O is a spectator in cut 1 — sulfate aerosol water uptake is
         # implicit in wtpct, no separate water-mass exchange. Future work
         # will couple H2O via the wet-radius equation.

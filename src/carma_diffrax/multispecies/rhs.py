@@ -108,7 +108,22 @@ def _bin_transfer(dmdt_inner: jnp.ndarray, pc_g: jnp.ndarray,
     n_at = jnp.where(dmdt > 0, pc_g / dm_g, pc_above / dm_above)
     F = dmdt * n_at                                     # (nbin,) [#/cm^3/s]
     F_below = jnp.concatenate([zero, F[:-1]])
-    return F_below - F                                  # d(pc)/dt for this group
+    dpc_dt = F_below - F                                # d(pc)/dt for this group
+
+    # Bin-0 evap-out sink (mirrors src/carma_diffrax/rhs.py and Fortran
+    # growevapl.F90:243-249). Bin 0 is sub-monomer, so when its boundary
+    # has dmdt < 0 the particles dissolve to gas-phase monomers rather
+    # than going to a non-existent bin -1. Without this sink,
+    # nucleation-injected particles accumulate in bin 0 indefinitely
+    # (Test C in carma-jax found this in the single-species path; the
+    # same bug lives here in multispecies).
+    evap_bin0_out = jnp.where(
+        dmdt[0] < DTYPE(0.0),
+        -dmdt[0] / dm_g[0] * pc_g[0],
+        DTYPE(0.0),
+    )
+    dpc_dt = dpc_dt.at[0].add(-evap_bin0_out)
+    return dpc_dt
 
 
 def make_rhs_ms(*args, **kwargs):

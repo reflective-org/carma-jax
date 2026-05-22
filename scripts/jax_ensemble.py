@@ -228,12 +228,14 @@ def _refresh_env(T, p_cgs, gc, cfg, ppm_coefs):
     nz = 1
 
     # Single thin-layer atmosphere column at current (T, p_cgs).
-    rho_approx = float(p_cgs[0]) / (float(R_AIR) * float(T[0]))
+    # Use JAX scalars instead of float() so this function is JIT-clean
+    # and autodiffable w.r.t. T and p_cgs (Phase 2D-true / Phase 3.2).
+    rho_approx = p_cgs[0] / (R_AIR * T[0])
     deltaz = 1.0e3                          # cm
     zc = jnp.asarray([1.0e5])               # 1 km above the virtual ground
     zl = jnp.asarray([zc[0] - deltaz / 2, zc[0] + deltaz / 2])
-    pl = jnp.asarray([p_cgs[0] + 0.5 * deltaz * rho_approx * float(GRAV),
-                       p_cgs[0] - 0.5 * deltaz * rho_approx * float(GRAV)])
+    pl = jnp.stack([p_cgs[0] + 0.5 * deltaz * rho_approx * GRAV,
+                     p_cgs[0] - 0.5 * deltaz * rho_approx * GRAV])
     rhoa, dz, zmet, zmetl, rmu, thcond, rhoa_wet = setup_atm(
         T, p_cgs, pl, zc, zl, GridType.I_CART,
     )
