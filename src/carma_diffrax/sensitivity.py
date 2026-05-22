@@ -222,3 +222,141 @@ def make_final_mass_wrt_prod_rate(scenario: dict, nstep: int = 1,
         return jnp.sum(pc[:, 0] * rmass_jnp)
 
     return f
+
+
+def _build_initial_pc_jax(grp, mu_nm, sigma_g, M_ug_m3, rhoa_g_cm3):
+    """JAX-traced version of _build_initial_pc.
+
+    Takes the (mu_nm, sigma_g, M_ug_m3, rhoa_g_cm3) inputs as JAX
+    scalars so we can autodiff w.r.t. them. The bin grid (r, rmass)
+    is static.
+    """
+    r = jnp.asarray(np.asarray(grp.r), dtype=DTYPE)
+    rmass_np = jnp.asarray(np.asarray(grp.rmass), dtype=DTYPE)
+    log_mu_cm = jnp.log(mu_nm * DTYPE(1e-7))
+    log_sigma = jnp.log(sigma_g)
+    shape_pdf = (
+        jnp.exp(-DTYPE(0.5) * ((jnp.log(r) - log_mu_cm) / log_sigma) ** 2)
+        / (r * log_sigma * jnp.sqrt(DTYPE(2.0) * jnp.pi))
+        * rmass_np
+    )
+    norm = shape_pdf.sum()
+    M_target_mmr = (M_ug_m3 * DTYPE(1e-12)) / rhoa_g_cm3
+    mmr_per_bin = shape_pdf * (M_target_mmr / jnp.maximum(norm, DTYPE(1e-300)))
+    pc_per_bin = mmr_per_bin * rhoa_g_cm3 / rmass_np
+    return pc_per_bin[:, None]   # (nbin, nelem=1)
+
+
+def make_final_mass_5d(scenario: dict, nstep: int = 1,
+                        dtime: float = 1800.0,
+                        rtol: float = 1e-5, atol: float = 1e-5,
+                        do_homogeneous: bool = True
+                        ) -> Callable:
+    """Multi-input forward-model: f(prod_rate, T0, mu_nm, sigma_g, M) -> final mass.
+
+    Phase 3.2 sensitivity wrapper. All 5 inputs are JAX-traceable
+    scalars, so jax.jvp/jacfwd can propagate tangents through any
+    combination. p and rh from the scenario are held fixed (they
+    don't appear as Phase 3.2 inputs).
+
+    Args:
+        scenario: scenario dict (used only for fixed p, rh).
+        nstep: outer-step count.
+        dtime: outer-step duration [s].
+        do_homogeneous: nucleation on by default. Forward-mode jvp
+            handles it; reverse-mode grad currently produces NaN.
+    """
+    from jax_ensemble import _minimal_config, _compute_ppm_coefs
+
+    cfg = _minimal_config()._replace(do_coag=True, do_grow=True)
+    ppm = _compute_ppm_coefs(cfg)
+    grp = cfg.groups[0]
+    shape = StateShape(nbin=cfg.nbin, nelem=1, ngas=2)
+
+    rmass_np = np.asarray(grp.rmass)
+    rmassup_np = np.asarray(grp.rmassup)
+    rmasslow_np = np.concatenate(
+        [[rmass_np[0] / (grp.rmrat ** 0.5)], rmassup_np[:-1]]
+    )
+    dm = jnp.asarray(rmassup_np - rmasslow_np, dtype=DTYPE)
+    rmass_jnp = jnp.asarray(rmass_np, dtype=DTYPE)
+
+    # Fixed scenario parts.
+    p_hPa = float(scenario["p"])
+    rh = float(scenario["rh"])
+    p_cgs_val = p_hPa * 100.0 * float(RPA2CGS)
+    p_cgs = jnp.asarray([p_cgs_val], dtype=DTYPE)
+
+    # Build a diffrax step that uses do_homogeneous from arg
+    # (since _build_diff_step always uses False).
+    import diffrax
+    import optimistix as optx
+
+    @jax.jit
+    def diff_step_homog(pc0, gc0, T0, dtime_arg, env):
+        term = diffrax.ODETerm(
+            make_rhs(shape, do_growth=True, do_homogeneous=do_homogeneous)
+        )
+        solver = diffrax.Kvaerno5(
+            root_finder=optx.Chord(rtol=rtol, atol=atol),
+        )
+        controller = diffrax.PIDController(
+            rtol=rtol, atol=atol,
+            pcoeff=0.3, icoeff=0.3, dcoeff=0.0,
+            factormin=0.5, factormax=5.0, safety=0.8,
+        )
+        y0 = pack(pc0, gc0, T0)
+        sol = diffrax.diffeqsolve(
+            term, solver,
+            t0=0.0, t1=dtime_arg, dt0=None, y0=y0,
+            args=env,
+            stepsize_controller=controller,
+            max_steps=20_000,
+            saveat=diffrax.SaveAt(t1=True),
+            adjoint=diffrax.DirectAdjoint(),
+        )
+        return unpack(sol.ys[-1], shape)
+
+    H2SO4_PER_MOLEC_G = 98.078479 / float(AVG)
+
+    def f(prod_rate, T0, mu_nm, sigma_g, M_ug_m3):
+        prod_rate = jnp.asarray(prod_rate, dtype=DTYPE)
+        T0       = jnp.asarray(T0, dtype=DTYPE)
+        mu_nm    = jnp.asarray(mu_nm, dtype=DTYPE)
+        sigma_g  = jnp.asarray(sigma_g, dtype=DTYPE)
+        M_ug_m3  = jnp.asarray(M_ug_m3, dtype=DTYPE)
+
+        # Atmosphere & water vapour from T0
+        rhoa = p_cgs_val / (float(R_AIR) * T0)
+        # Murphy 2005 ice-style fit
+        pvapl_Pa = jnp.exp(
+            DTYPE(54.842763) - DTYPE(6763.22) / T0
+            - DTYPE(4.210) * jnp.log(T0)
+            + DTYPE(0.000367) * T0
+        )
+        h2o_mmr = DTYPE(rh) * pvapl_Pa * DTYPE(18.0) / (
+            DTYPE(29.0) * DTYPE(p_hPa) * DTYPE(100.0)
+        )
+        gc0_h2o = h2o_mmr * rhoa
+
+        # Initial lognormal seed (depends on mu, sigma, M, rhoa).
+        pc = _build_initial_pc_jax(grp, mu_nm, sigma_g, M_ug_m3, rhoa)
+        gc = jnp.asarray([[gc0_h2o, DTYPE(0.0)]], dtype=DTYPE)
+        T_scalar = T0
+
+        # Per-step gas injection from prod_rate.
+        dgc_per_step = prod_rate * DTYPE(dtime) * DTYPE(H2SO4_PER_MOLEC_G)
+
+        for _ in range(nstep):
+            gc = gc.at[0, 1].set(gc[0, 1] + dgc_per_step)
+            env = _build_env(
+                jnp.atleast_1d(T_scalar), p_cgs, gc, cfg, ppm, grp, dm,
+            )
+            pc, gc_1d, T_scalar = diff_step_homog(
+                pc, gc[0], T_scalar, DTYPE(dtime), env,
+            )
+            gc = gc_1d[None, :]
+
+        return jnp.sum(pc[:, 0] * rmass_jnp)
+
+    return f
