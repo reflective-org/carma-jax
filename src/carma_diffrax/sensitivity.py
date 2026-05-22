@@ -360,3 +360,105 @@ def make_final_mass_5d(scenario: dict, nstep: int = 1,
         return jnp.sum(pc[:, 0] * rmass_jnp)
 
     return f
+
+
+def make_final_mass_7d(nstep: int = 48, dtime: float = 1800.0,
+                        rtol: float = 1e-5, atol: float = 1e-5,
+                        do_homogeneous: bool = True
+                        ) -> Callable:
+    """7-input version for batched scenario sensitivities (Phase 3.3).
+
+    All scenario inputs become JAX-traceable so a single JIT trace
+    handles every scenario, and ``jax.vmap`` can batch them.
+
+    Inputs (in order):
+      prod_rate [molec/cm³/s], T0 [K], mu_nm [nm], sigma_g, M_ug_m3 [µg/m³],
+      p_hPa [hPa], rh [0-1]
+    """
+    from jax_ensemble import _minimal_config, _compute_ppm_coefs
+
+    cfg = _minimal_config()._replace(do_coag=True, do_grow=True)
+    ppm = _compute_ppm_coefs(cfg)
+    grp = cfg.groups[0]
+    shape = StateShape(nbin=cfg.nbin, nelem=1, ngas=2)
+
+    rmass_np = np.asarray(grp.rmass)
+    rmassup_np = np.asarray(grp.rmassup)
+    rmasslow_np = np.concatenate(
+        [[rmass_np[0] / (grp.rmrat ** 0.5)], rmassup_np[:-1]]
+    )
+    dm = jnp.asarray(rmassup_np - rmasslow_np, dtype=DTYPE)
+    rmass_jnp = jnp.asarray(rmass_np, dtype=DTYPE)
+
+    import diffrax
+    import optimistix as optx
+
+    @jax.jit
+    def diff_step_homog(pc0, gc0, T0_, dtime_arg, env):
+        term = diffrax.ODETerm(
+            make_rhs(shape, do_growth=True, do_homogeneous=do_homogeneous)
+        )
+        solver = diffrax.Kvaerno5(
+            root_finder=optx.Chord(rtol=rtol, atol=atol),
+        )
+        controller = diffrax.PIDController(
+            rtol=rtol, atol=atol,
+            pcoeff=0.3, icoeff=0.3, dcoeff=0.0,
+            factormin=0.5, factormax=5.0, safety=0.8,
+        )
+        y0 = pack(pc0, gc0, T0_)
+        sol = diffrax.diffeqsolve(
+            term, solver,
+            t0=0.0, t1=dtime_arg, dt0=None, y0=y0,
+            args=env,
+            stepsize_controller=controller,
+            max_steps=20_000,
+            saveat=diffrax.SaveAt(t1=True),
+            adjoint=diffrax.DirectAdjoint(),
+        )
+        return unpack(sol.ys[-1], shape)
+
+    H2SO4_PER_MOLEC_G = 98.078479 / float(AVG)
+    RPA2CGS_d = DTYPE(RPA2CGS)
+
+    def f(prod_rate, T0, mu_nm, sigma_g, M_ug_m3, p_hPa, rh):
+        prod_rate = jnp.asarray(prod_rate, dtype=DTYPE)
+        T0       = jnp.asarray(T0, dtype=DTYPE)
+        mu_nm    = jnp.asarray(mu_nm, dtype=DTYPE)
+        sigma_g  = jnp.asarray(sigma_g, dtype=DTYPE)
+        M_ug_m3  = jnp.asarray(M_ug_m3, dtype=DTYPE)
+        p_hPa    = jnp.asarray(p_hPa, dtype=DTYPE)
+        rh       = jnp.asarray(rh, dtype=DTYPE)
+
+        p_cgs_val = p_hPa * DTYPE(100.0) * RPA2CGS_d
+        p_cgs = jnp.atleast_1d(p_cgs_val)
+        rhoa = p_cgs_val / (DTYPE(R_AIR) * T0)
+        pvapl_Pa = jnp.exp(
+            DTYPE(54.842763) - DTYPE(6763.22) / T0
+            - DTYPE(4.210) * jnp.log(T0)
+            + DTYPE(0.000367) * T0
+        )
+        h2o_mmr = rh * pvapl_Pa * DTYPE(18.0) / (
+            DTYPE(29.0) * p_hPa * DTYPE(100.0)
+        )
+        gc0_h2o = h2o_mmr * rhoa
+
+        pc = _build_initial_pc_jax(grp, mu_nm, sigma_g, M_ug_m3, rhoa)
+        gc = jnp.asarray([[gc0_h2o, DTYPE(0.0)]], dtype=DTYPE)
+        T_scalar = T0
+
+        dgc_per_step = prod_rate * DTYPE(dtime) * DTYPE(H2SO4_PER_MOLEC_G)
+
+        for _ in range(nstep):
+            gc = gc.at[0, 1].set(gc[0, 1] + dgc_per_step)
+            env = _build_env(
+                jnp.atleast_1d(T_scalar), p_cgs, gc, cfg, ppm, grp, dm,
+            )
+            pc, gc_1d, T_scalar = diff_step_homog(
+                pc, gc[0], T_scalar, DTYPE(dtime), env,
+            )
+            gc = gc_1d[None, :]
+
+        return jnp.sum(pc[:, 0] * rmass_jnp)
+
+    return f
