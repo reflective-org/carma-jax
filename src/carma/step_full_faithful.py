@@ -39,7 +39,10 @@ Out-of-scope (deferred to later phases or future refactors)
 
 from carma.microfast_full import make_microfast_full_jit
 from carma.microslow import make_microslow
-from carma.newstate_calc_full import newstate_calc_full
+from carma.newstate_calc_full import (
+    make_substep_loop_jit,
+    newstate_calc_full,
+)
 from carma.precision import DTYPE
 import jax.numpy as jnp
 
@@ -120,6 +123,12 @@ def make_step_full_faithful(
         do_pheatatm=do_pheatatm,
     )
 
+    # Build the JIT'd substep loop once per config — it bakes in mf_jit
+    # via closure so that thousands of substeps inside a single outer
+    # step run as a single lax.while_loop call rather than per-substep
+    # Python dispatches.
+    substep_loop_jit = make_substep_loop_jit(mf_jit)
+
     # JIT'd microslow (coag)
     if config.do_coag:
         from carma.enums import ElementType
@@ -152,6 +161,7 @@ def make_step_full_faithful(
         dt_threshold=DTYPE(1.0),
         scale_threshold=DTYPE(1.0),
         prescribed_ntsubsteps=None,
+        initial_ntsubsteps=1,
     ):
         """Advance single-column state faithfully.
 
@@ -188,7 +198,8 @@ def make_step_full_faithful(
             rlhe, rlhm,
             ds_threshold_arr,
             microfast_full_jit=mf_jit,
-            initial_ntsubsteps=1,
+            substep_loop_jit=substep_loop_jit,
+            initial_ntsubsteps=int(initial_ntsubsteps),
             minsubsteps=minsubsteps,
             maxsubsteps=maxsubsteps,
             maxretries=maxretries,

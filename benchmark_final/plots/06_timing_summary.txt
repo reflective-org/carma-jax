@@ -1,0 +1,10 @@
+=== CARMA-JAX realistic-ensemble timing ===
+  Setup: 60 s × 1440 steps = 24 h simulation, 100 scenarios
+
+  Fortran (8 parallel processes):    149 s  (1489 ms/scen wall)
+  JAX (8 parallel processes, fp64):  542 s  (5420 ms/scen wall)
+  Ratio (JAX wall / Fortran wall):   3.6×
+
+  Both runs used 8 worker processes on the same CPU.
+  Per-scenario effective CPU time:
+    Fortran: ~12 s/scen   JAX: ~43 s/scen
