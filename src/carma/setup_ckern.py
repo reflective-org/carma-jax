@@ -5,6 +5,8 @@ in the kernel computation. JIT-compilable.
 Ported from: setupckern.F90
 """
 
+import functools
+
 import jax
 import jax.numpy as jnp
 
@@ -22,9 +24,9 @@ _VW_B3 = DTYPE(-0.0163)
 _VW_HAM = DTYPE(6.4e-13)        # erg, Hamaker constant
 
 
-@jax.jit
+@functools.partial(jax.jit, static_argnames=("fuchs_delta_sqrt2_whole",))
 def setup_ckern_jit(t, rhoa, zmet, rmu, r_wet, rrat, rprat, bpm, rmass, re, vf,
-                    cstick, use_vw=None):
+                    cstick, use_vw=None, fuchs_delta_sqrt2_whole=False):
     """Compute coagulation kernels — fully vectorized, JIT-compiled.
 
     Computes Brownian + gravitational collection kernel for all
@@ -49,6 +51,14 @@ def setup_ckern_jit(t, rhoa, zmet, rmu, r_wet, rrat, rprat, bpm, rmass, re, vf,
             setupckern.F90:271-279). Default None → no VdW (raw cstick
             everywhere). Fortran sets it to ``is_sulfate[j1] AND
             is_sulfate[j2]``.
+        fuchs_delta_sqrt2_whole: Static bool, default False (published
+            CARMA, setupckern.F90:251-254). The published Fuchs transition
+            distance applies sqrt(2) to the bracket only,
+            ``delta = sqrt(2)/(6 r l) [(2r+l)^3 - (4r^2+l^2)^1.5] - 2r``.
+            True applies sqrt(2) to the whole distance,
+            ``delta = sqrt(2) {[(2r+l)^3 - (4r^2+l^2)^1.5]/(6 r l) - 2r}``
+            (the placement in M7's m7_coaset), so the -2r term is scaled too.
+            Both tend to sqrt(2)*l for l >> r.
 
     Returns:
         ckernel: (NZ, NBIN, NBIN, NGROUP, NGROUP) [cm^3/s].
@@ -81,10 +91,15 @@ def setup_ckern_jit(t, rhoa, zmet, rmu, r_wet, rrat, rprat, bpm, rmass, re, vf,
     # Fuchs transition correction: delta
     dt1 = (DTYPE(2.0) * r_eff + rlb) ** 3
     dt2 = (DTYPE(4.0) * r_eff**2 + rlb**2) ** DTYPE(1.5)
-    delt_p = (
-        jnp.sqrt(DTYPE(2.0)) / (DTYPE(6.0) * r_eff * rlb) * (dt1 - dt2)
-        - DTYPE(2.0) * r_eff
-    )  # (NZ, NBIN, NGROUP)
+    if fuchs_delta_sqrt2_whole:
+        delt_p = jnp.sqrt(DTYPE(2.0)) * (
+            (dt1 - dt2) / (DTYPE(6.0) * r_eff * rlb) - DTYPE(2.0) * r_eff
+        )  # (NZ, NBIN, NGROUP)
+    else:
+        delt_p = (
+            jnp.sqrt(DTYPE(2.0)) / (DTYPE(6.0) * r_eff * rlb) * (dt1 - dt2)
+            - DTYPE(2.0) * r_eff
+        )  # (NZ, NBIN, NGROUP)
 
     # === Broadcasting to (NZ, NBIN_i1, NBIN_i2, NGROUP_j1, NGROUP_j2) ===
     # Particle 1: axes (NZ, i1, 1, j1, 1)
