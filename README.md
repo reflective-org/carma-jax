@@ -153,4 +153,4 @@ Plots from 1000-scenario Fortran vs JAX comparison are in `plots/`:
 
 ## 🔒 License
 
-This project is released under the Apache 2.0 License - see the [LICENSE](https://github.com/reflective-org/sai-simulator/blob/main/LICENSE) file for details.
+This project is released under the Apache 2.0 License - see the [LICENSE](./LICENSE) file for details.

@@ -17,5 +17,12 @@ authors:
 repository-code: 'https://github.com/reflective-org/carma-jax'
 keywords:
   - Aerosol Microphysics
+references:
+  - type: software
+    title: Community Aerosol and Radiation Model for Atmospheres (CARMA)
+    authors:
+      - name: the CARMA authors
+    repository-code: 'https://github.com/ESCOMP/CARMA'
+    license: Apache-2.0
 license: Apache-2.0
 date-released: '2026-05-01'
